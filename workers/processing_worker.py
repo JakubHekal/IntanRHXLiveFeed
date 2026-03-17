@@ -17,9 +17,8 @@ SPIKE_OVERLAP_SAMPLES = 400
 PSD_YLIM_MIN = -10.0
 PSD_YLIM_MAX = 40.0
 
-# Waveform averaging buffer duration and forgetting
-WAVEFORM_BUFFER_SEC = 60.0
-WAVEFORM_FORGETTING_FACTOR = 0.95
+# Window of spike times used for the average waveform
+WAVEFORM_BUFFER_SEC = 10
 
 class _ProcessingResult:
     __slots__ = (
@@ -70,46 +69,6 @@ def _detect_spike_indices(x: np.ndarray, fs: float) -> np.ndarray:
     return peaks
 
 
-def _apply_waveform_forgetting(waveform_buffer, current_time, W, spike_time):
-    """
-    Add new waveforms to buffer and apply exponential forgetting based on age.
-    Returns weighted mean and SEM across buffer.
-    
-    Args:
-        waveform_buffer: List of (timestamp, waveform_array) tuples
-        current_time: Current timestamp (seconds)
-        W: New waveforms array (num_spikes, num_samples)
-        spike_time: Time of the spike being added
-    """
-    # Add new waveforms to buffer with their spike time
-    for i in range(W.shape[0]):
-        waveform_buffer.append((spike_time + i / (W.shape[0] + 1), W[i, :]))
-    
-    # Remove waveforms older than buffer duration
-    cutoff_time = current_time - WAVEFORM_BUFFER_SEC
-    waveform_buffer[:] = [(t, w) for t, w in waveform_buffer if t >= cutoff_time]
-    
-    if not waveform_buffer:
-        return None, None
-    
-    # Apply exponential forgetting: weight = FORGETTING_FACTOR ^ (age_in_seconds)
-    weights = []
-    for t, _ in waveform_buffer:
-        age = current_time - t
-        weight = WAVEFORM_FORGETTING_FACTOR ** age
-        weights.append(weight)
-    
-    weights = np.array(weights, dtype=np.float64)
-    weights /= weights.sum() if weights.sum() > 0 else 1.0
-    
-    # Stack waveforms and apply weights
-    W_all = np.array([w for _, w in waveform_buffer], dtype=np.float64)
-    wf_mu = (W_all * weights[:, np.newaxis]).sum(axis=0)
-    wf_sem = (W_all * weights[:, np.newaxis]).std(axis=0) / max(np.sqrt((weights ** 2).sum()), 1.0)
-    
-    return wf_mu, wf_sem
-
-
 class ProcessingWorker(QtCore.QThread):
     result_ready = QtCore.pyqtSignal(object)
 
@@ -119,7 +78,6 @@ class ProcessingWorker(QtCore.QThread):
         self._mutex = QtCore.QMutex()
         self._condition = QtCore.QWaitCondition()
         self._running = True
-        self._waveform_buffer = []  # List of (timestamp, waveform) tuples for forgetting
 
     def stop(self):
         with QtCore.QMutexLocker(self._mutex):
@@ -181,19 +139,15 @@ class ProcessingWorker(QtCore.QThread):
                         except Exception:
                             pass
 
-                # Trim history
-                if t_snap.size:
-                    history_cutoff = t_snap[-1] - SPIKE_HISTORY_MIN * 60.0
-                    new_spike_times = [t for t in new_spike_times if t >= history_cutoff]
-
+                # Keep all spike times — full session history for histogram
                 result.spike_times_cache = new_spike_times
                 result.last_scan_sample = stored
 
-                # Spike count histogram
+                # Spike count histogram — spans entire session (t=0 to now)
                 spike_arr = np.array(new_spike_times, dtype=float)
                 if t_snap.size:
-                    history_start_t = max(0.0, t_snap[-1] - SPIKE_HISTORY_MIN * 60.0)
-                    first_bin = int(np.floor(history_start_t / SPIKE_BIN_SEC))
+                    history_start_t = 0.0
+                    first_bin = 0
                     last_bin = int(np.floor(t_snap[-1] / SPIKE_BIN_SEC))
                     bin_edges = np.arange(first_bin, last_bin + 2, dtype=float) * SPIKE_BIN_SEC
                     if bin_edges.size < 2:
@@ -202,39 +156,26 @@ class ProcessingWorker(QtCore.QThread):
                     result.spike_minute_idx = edges[:-1] / 60.0
                     result.spike_counts = counts
 
-                # Waveform mean+-SEM
+                # Waveform mean+-SEM — use only spikes in the last WAVEFORM_BUFFER_SEC to ensure stationarity of waveforms
                 if spike_arr.size >= 1 and t_snap.size:
-                    pk_indices = np.searchsorted(t_snap, spike_arr).astype(int)
-                    pk_indices = pk_indices[(pk_indices > 0) & (pk_indices < stored)]
-                    try:
-                        _, W = spike_plot.extract_waveforms(
-                            signal_snap[:stored].astype(float),
-                            pk_indices,
-                            fs,
-                            pre_ms=spike_plot.PRE_MS,
-                            post_ms=spike_plot.POST_MS,
-                        )
-                        if W.shape[0] >= 1:
-                            t_wf_ms = (np.arange(W.shape[1], dtype=np.float64) / fs) * 1000.0 - spike_plot.PRE_MS
-                            result.wf_t_ms = t_wf_ms
-                            
-                            # Apply waveform forgetting
-                            current_time = t_snap[-1] if t_snap.size else 0.0
-                            spike_time = spike_arr[0] if spike_arr.size else current_time
-                            wf_mu, wf_sem = _apply_waveform_forgetting(
-                                self._waveform_buffer, 
-                                current_time, 
-                                W, 
-                                spike_time
+                    current_time = t_snap[-1]
+                    wf_spike_arr = spike_arr[spike_arr >= current_time - WAVEFORM_BUFFER_SEC]
+                    if wf_spike_arr.size >= 1:
+                        pk_indices = np.searchsorted(t_snap, wf_spike_arr).astype(int)
+                        pk_indices = pk_indices[(pk_indices > 0) & (pk_indices < stored)]
+                        try:
+                            _, W = spike_plot.extract_waveforms(
+                                signal_snap[:stored].astype(float),
+                                pk_indices,
+                                fs,
+                                pre_ms=spike_plot.PRE_MS,
+                                post_ms=spike_plot.POST_MS,
                             )
-                            
-                            if wf_mu is not None:
-                                result.wf_mu = wf_mu
-                                result.wf_sem = wf_sem
-                            else:
-                                result.wf_mu = W.mean(axis=0)
+                            if W.shape[0] >= 1:
+                                result.wf_t_ms = (np.arange(W.shape[1], dtype=np.float64) / fs) * 1000.0 - spike_plot.PRE_MS
+                                result.wf_mu  = W.mean(axis=0)
                                 result.wf_sem = W.std(axis=0) / max(np.sqrt(W.shape[0]), 1)
-                    except Exception:
-                        pass
+                        except Exception:
+                            pass
 
             self.result_ready.emit(result)

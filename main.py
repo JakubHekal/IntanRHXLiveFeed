@@ -1,8 +1,5 @@
 import sys
 
-import matplotlib
-matplotlib.use("Qt5Agg")
-
 from PyQt5 import QtCore, QtWidgets
 
 from screens.connect_screen import ConnectScreen
@@ -16,6 +13,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Set up main window
         self.setWindowTitle("Intan RHX Device Monitor")
+
+        toolbar = QtWidgets.QToolBar()
+        toolbar.setMovable(False)
+        toolbar.addAction("Connect", lambda: self.set_screen("connect"))
+        toolbar.addAction("Plot", lambda: self.set_screen("plot"))
+        self.addToolBar(QtCore.Qt.TopToolBarArea, toolbar)
 
         self.stack = QtWidgets.QStackedWidget()
         self.setCentralWidget(self.stack)
