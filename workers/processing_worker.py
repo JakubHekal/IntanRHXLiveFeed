@@ -20,6 +20,14 @@ PSD_YLIM_MAX = 40.0
 # Window of spike times used for the average waveform
 WAVEFORM_BUFFER_SEC = 10
 
+
+def configure_processing_windows(psd_buffer_sec: int, waveform_buffer_sec: int, spike_bin_sec: int):
+    """Update processing window settings at runtime."""
+    global PSD_BUFFER_SEC, WAVEFORM_BUFFER_SEC, SPIKE_BIN_SEC
+    PSD_BUFFER_SEC = int(psd_buffer_sec)
+    WAVEFORM_BUFFER_SEC = int(waveform_buffer_sec)
+    SPIKE_BIN_SEC = int(spike_bin_sec)
+
 class _ProcessingResult:
     __slots__ = (
         'has_psd_update', 'has_spike_update',

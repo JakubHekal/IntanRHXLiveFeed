@@ -8,6 +8,8 @@ from pathlib import Path
 from PyQt5 import QtCore
 import numpy as np
 
+from state_manager import StateManager, AppState
+
 def load_intan_device_class():
     """
     Load the IntanRHXDevice class from the intan.interface module.
@@ -36,6 +38,7 @@ PLOT_UPDATE_HZ = 20
 PLOT_INTERVAL_MS = int(1000 / PLOT_UPDATE_HZ)
 ACQUIRE_CHUNK_MS = max(20, PLOT_INTERVAL_MS)
 WAITING_CHUNK_THRESHOLD = 10
+NO_DATA_LOSS_TIMEOUT_SEC = 3.0
 
 class RHXWorker(QtCore.QThread):
     connection_request_result_signal = QtCore.pyqtSignal(bool, str)
@@ -58,11 +61,13 @@ class RHXWorker(QtCore.QThread):
         self.repeated_chunk_count = 0
         self.csv_file_handle = None
         self.csv_sample_counter = 0
-        self._desired_streaming = True
-        self._is_streaming = False
         self._pending_marker_indices = []
-        self._waiting_for_data = False
         self._chunks_since_flush = 0
+        self._last_fresh_data_monotonic = 0.0
+        
+        # State machine integration
+        self.state_manager = StateManager.get_instance()
+        self._last_emitted_state = None
 
     def __del__(self):
         self.stop()
@@ -73,10 +78,12 @@ class RHXWorker(QtCore.QThread):
         self.wait(1000)
 
     def pause_receiving(self):
-        self._desired_streaming = False
+        """Pause receiving (state machine transition handled by caller)."""
+        pass
 
     def resume_receiving(self):
-        self._desired_streaming = True
+        """Resume receiving (state machine transition handled by caller)."""
+        pass
 
     def request_marker(self):
         marker_index = int(self.csv_sample_counter)
@@ -142,6 +149,7 @@ class RHXWorker(QtCore.QThread):
         self.csv_file_handle = None
     
     def run(self):
+        """Main device worker thread loop."""
         try:
             self.device = IntanRHXDevice(
                 host=self.host, 
@@ -154,7 +162,6 @@ class RHXWorker(QtCore.QThread):
             self.device.enable_wide_channel([self.channel], port=self.port)
             self.device.set_blocks_per_write(1)
             self.device.start_streaming()
-            self._is_streaming = True
             self._start_csv_writer()
         except Exception as e:
             self.connection_request_result_signal.emit(False, str(e))
@@ -163,113 +170,153 @@ class RHXWorker(QtCore.QThread):
         self.connection_request_result_signal.emit(self.device.connected, None)
         if self.device.connected:
             self.acquisition_state_signal.emit("running")
+            self._last_fresh_data_monotonic = QtCore.QElapsedTimer()
+            self._last_fresh_data_monotonic.start()
 
         try:
             connection_lost = False
-            while self.device.connected and not self.isInterruptionRequested():
-                if not self._desired_streaming and self._is_streaming:
+            is_currently_streaming = True  # Started above at device init
+            
+            while not self.isInterruptionRequested():
+                # Check for hard link loss where the device worker thread died
+                if is_currently_streaming and hasattr(self.device, "streaming_thread"):
+                    stream_thread = self.device.streaming_thread
+                    if stream_thread is not None and not stream_thread.is_alive():
+                        connection_lost = True
+                        break
+                
+                # Query state machine to determine desired action
+                should_stream = self.state_manager.get_current_state() in (
+                    AppState.STREAMING,
+                    AppState.WAITING_FOR_DATA,
+                )
+                
+                # Stop streaming if state machine says we shouldn't stream
+                if not should_stream and is_currently_streaming:
                     try:
                         self.device.stop_streaming()
                     except Exception:
                         pass
-                    self._is_streaming = False
-                    self._waiting_for_data = False
+                    is_currently_streaming = False
                     self.acquisition_state_signal.emit("paused")
-
-                if self._desired_streaming and not self._is_streaming:
+                
+                # Start streaming if state machine says we should stream
+                if should_stream and not is_currently_streaming:
                     try:
                         self.device.start_streaming()
-                        self._is_streaming = True
+                        is_currently_streaming = True
                         self.empty_chunk_count = 0
                         self.repeated_chunk_count = 0
                         self.last_chunk_signature = None
-                        self._waiting_for_data = False
                         self.acquisition_state_signal.emit("running")
                     except Exception as e:
-                        print(f"Error resuming stream: {e}")
-                        break
-
-                if not self._is_streaming:
+                        print(f"[WORKER] Error starting stream on resume: {e}")
+                        is_currently_streaming = False
+                        # Don't break - allow retry on next iteration
+                        self.msleep(PLOT_INTERVAL_MS)
+                        continue
+                
+                # If not streaming, just sleep
+                if not is_currently_streaming:
                     self.msleep(PLOT_INTERVAL_MS)
                     continue
-
+                
+                # Try to get data
                 try:
                     data = self.device.get_latest_window(duration_ms=ACQUIRE_CHUNK_MS)
-
-                    if data is None or not hasattr(data, 'shape') or len(data.shape) != 2:
+                    
+                    # Check for no data or invalid data
+                    if data is None or not hasattr(data, 'shape') or len(data.shape) != 2 or data.shape[1] < 1:
                         self.empty_chunk_count += 1
                         self.last_chunk_signature = None
                         self.repeated_chunk_count = 0
-                        if self.empty_chunk_count >= WAITING_CHUNK_THRESHOLD and not self._waiting_for_data:
-                            self._waiting_for_data = True
-                            self.acquisition_state_signal.emit("waiting")
+                        
+                        # Check if we should emit "waiting" state
+                        if self.empty_chunk_count >= WAITING_CHUNK_THRESHOLD:
+                            if self.state_manager.get_current_state() == AppState.STREAMING:
+                                self.acquisition_state_signal.emit("waiting")
+                        
+                        # Check for data loss timeout
+                        if self._last_fresh_data_monotonic.elapsed() >= int(NO_DATA_LOSS_TIMEOUT_SEC * 1000):
+                            connection_lost = True
+                            break
+                        
                         self.msleep(PLOT_INTERVAL_MS)
                         continue
-                    elif data.shape[1] < 1:
-                        self.empty_chunk_count += 1
-                        self.last_chunk_signature = None
-                        self.repeated_chunk_count = 0
-                        if self.empty_chunk_count >= WAITING_CHUNK_THRESHOLD and not self._waiting_for_data:
-                            self._waiting_for_data = True
-                            self.acquisition_state_signal.emit("waiting")
-                        self.msleep(PLOT_INTERVAL_MS)
-                        continue
-                    else:
-                        arr = np.asarray(data)
-                        signature = (
-                            arr.shape[0],
-                            arr.shape[1],
-                            float(np.round(arr[0, 0], 6)),
-                            float(np.round(arr[0, -1], 6)),
-                            float(np.round(np.mean(arr), 6)),
-                        )
-
-                        if signature == self.last_chunk_signature:
-                            self.repeated_chunk_count += 1
-                            if self.repeated_chunk_count > 5:
-                                self.empty_chunk_count += 1
-                                if self.empty_chunk_count >= WAITING_CHUNK_THRESHOLD and not self._waiting_for_data:
-                                    self._waiting_for_data = True
+                    
+                    # Validate data
+                    arr = np.asarray(data)
+                    signature = (
+                        arr.shape[0],
+                        arr.shape[1],
+                        float(np.round(arr[0, 0], 6)),
+                        float(np.round(arr[0, -1], 6)),
+                        float(np.round(np.mean(arr), 6)),
+                    )
+                    
+                    # Check for repeated chunks (stale data)
+                    if signature == self.last_chunk_signature:
+                        self.repeated_chunk_count += 1
+                        if self.repeated_chunk_count > 5:
+                            self.empty_chunk_count += 1
+                            
+                            # Check if we should emit "waiting" state
+                            if self.empty_chunk_count >= WAITING_CHUNK_THRESHOLD:
+                                if self.state_manager.get_current_state() == AppState.STREAMING:
                                     self.acquisition_state_signal.emit("waiting")
-                            self.msleep(PLOT_INTERVAL_MS)
-                            continue
-
-                        self.last_chunk_signature = signature
-                        self.repeated_chunk_count = 0
-                        self.empty_chunk_count = 0
-                        if self._waiting_for_data:
-                            self._waiting_for_data = False
-                            self.acquisition_state_signal.emit("running")
-                        self._append_chunk_to_csv(arr)
-                        self.data_received_signal.emit(arr)
-
-                    # Match the proven cadence from connection_test.py and avoid flooding Qt.
+                            
+                            # Check for data loss timeout
+                            if self._last_fresh_data_monotonic.elapsed() >= int(NO_DATA_LOSS_TIMEOUT_SEC * 1000):
+                                connection_lost = True
+                                break
+                        
+                        self.msleep(PLOT_INTERVAL_MS)
+                        continue
+                    
+                    # Fresh data arrived
+                    self.last_chunk_signature = signature
+                    self.repeated_chunk_count = 0
+                    self.empty_chunk_count = 0
+                    self._last_fresh_data_monotonic.restart()
+                    
+                    # If we were in waiting state, transition back to streaming
+                    if self.state_manager.get_current_state() == AppState.WAITING_FOR_DATA:
+                        self.acquisition_state_signal.emit("running")
+                    
+                    # Process the data
+                    self._append_chunk_to_csv(arr)
+                    self.data_received_signal.emit(arr)
+                    
                     self.msleep(PLOT_INTERVAL_MS)
+                
                 except Exception as e:
                     print(f"Error reading data: {e}")
                     if self.device is not None and not self.device.connected:
                         connection_lost = True
                     break
-
+            
+            # Check if connection was lost
             if self.device is not None and not self.device.connected and not self.isInterruptionRequested():
                 connection_lost = True
-
+            
             if connection_lost:
                 self.acquisition_state_signal.emit("connection_lost")
+        
         finally:
+            # Cleanup
             if self.device is not None:
                 try:
-                    if self._is_streaming:
+                    if is_currently_streaming:
                         self.device.stop_streaming()
                 except Exception:
                     pass
-                self._is_streaming = False
-
+            
             self._close_csv_writer()
-
+            
             if self.device is not None:
                 try:
                     self.device.close()
                 except Exception:
                     pass
+            
             self.acquisition_state_signal.emit("stopped")

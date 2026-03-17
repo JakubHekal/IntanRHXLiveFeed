@@ -1,10 +1,14 @@
 from PyQt5 import QtWidgets, QtCore
+from workers.processing_worker import PSD_BUFFER_SEC, WAVEFORM_BUFFER_SEC, SPIKE_BIN_SEC
 
-class ConnectScreen(QtWidgets.QWidget):
-    connection_request_signal = QtCore.pyqtSignal(str, int, int, int, str, str, int)
+class ConnectDialog(QtWidgets.QDialog):
+    connection_request_signal = QtCore.pyqtSignal(str, int, int, int, str, str, int, int, int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowContextHelpButtonHint)
+        self.setWindowTitle("Connect to RHX")
+        self.setModal(True)
 
         # Main layout
         layout = QtWidgets.QVBoxLayout(self)
@@ -12,13 +16,6 @@ class ConnectScreen(QtWidgets.QWidget):
         layout.setSpacing(12)
         layout.setSizeConstraint(QtWidgets.QLayout.SetMinimumSize)
         self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
-
-        # Title
-        title = QtWidgets.QLabel("RHX connection setup")
-        title.setWordWrap(False)
-        title.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        title.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-        layout.addWidget(title)
 
         # Group boxes for organization of the input fields
         connection_group_box = QtWidgets.QGroupBox("Connection details")
@@ -62,10 +59,18 @@ class ConnectScreen(QtWidgets.QWidget):
         self.project_name_edit = QtWidgets.QLineEdit("New project")
         project_form.addRow("Project name:", self.project_name_edit)
 
+        self.psd_buffer_edit = QtWidgets.QLineEdit(str(int(PSD_BUFFER_SEC)))
+        project_form.addRow("PSD buffer duration (s):", self.psd_buffer_edit)
+
+        self.waveform_buffer_edit = QtWidgets.QLineEdit(str(int(WAVEFORM_BUFFER_SEC)))
+        project_form.addRow("Waveform buffer duration (s):", self.waveform_buffer_edit)
+
+        self.spike_bin_edit = QtWidgets.QLineEdit(str(int(SPIKE_BIN_SEC)))
+        project_form.addRow("Spike count bin duration (s):", self.spike_bin_edit)
+
         project_group_box.setLayout(project_form)
 
-        # Connect button and error label
-
+        # Status + action buttons
         self.status_label = QtWidgets.QLabel("")
         self.status_label.setWordWrap(True)
         self.status_label.setTextFormat(QtCore.Qt.PlainText)
@@ -75,9 +80,19 @@ class ConnectScreen(QtWidgets.QWidget):
         self.status_label.hide()
         layout.addWidget(self.status_label)
 
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addStretch(1)
+
+        self.cancel_button = QtWidgets.QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        button_row.addWidget(self.cancel_button)
+
         self.connect_button = QtWidgets.QPushButton("Connect")
         self.connect_button.clicked.connect(self._on_connect_clicked)
-        layout.addWidget(self.connect_button)
+        self.connect_button.setDefault(True)
+        button_row.addWidget(self.connect_button)
+
+        layout.addLayout(button_row)
     
     def set_busy(self, busy: bool):
         if busy:
@@ -89,7 +104,14 @@ class ConnectScreen(QtWidgets.QWidget):
         self.host_edit.setDisabled(busy)
         self.command_port_edit.setDisabled(busy)
         self.data_port_edit.setDisabled(busy)
+        self.sample_rate_edit.setDisabled(busy)
         self.project_name_edit.setDisabled(busy)
+        self.psd_buffer_edit.setDisabled(busy)
+        self.waveform_buffer_edit.setDisabled(busy)
+        self.spike_bin_edit.setDisabled(busy)
+        self.port_combo.setDisabled(busy)
+        self.channel_combo.setDisabled(busy)
+        self.cancel_button.setDisabled(busy)
 
     def set_status_message(self, message: str, error: bool = False):
         self.status_label.setVisible(bool(message))
@@ -129,7 +151,7 @@ class ConnectScreen(QtWidgets.QWidget):
 
         host = self.host_edit.text().strip()
         if not host:
-            self.set_status_message("Host is required.", error=True)
+            QtWidgets.QMessageBox.critical(self, "Invalid Input", "Host is required.")
             return
 
         try:
@@ -138,7 +160,7 @@ class ConnectScreen(QtWidgets.QWidget):
             if not (0 < command_port < 65536) or not (0 < data_port < 65536):
                 raise ValueError
         except ValueError:
-            self.set_status_message("Ports must be valid integers from 1 to 65535.", error=True)
+            QtWidgets.QMessageBox.critical(self, "Invalid Input", "Ports must be valid integers from 1 to 65535.")
             return
 
         try:
@@ -146,18 +168,43 @@ class ConnectScreen(QtWidgets.QWidget):
             if sample_rate <= 0:
                 raise ValueError
         except ValueError:
-            self.set_status_message("Sample rate must be a positive integer.", error=True)
+            QtWidgets.QMessageBox.critical(self, "Invalid Input", "Sample rate must be a positive integer.")
             return
 
         project_name = self.project_name_edit.text().strip()
         if not project_name:
-            self.set_status_message("Project name is required.", error=True)
+            QtWidgets.QMessageBox.critical(self, "Invalid Input", "Project name is required.")
+            return
+
+        try:
+            psd_buffer_sec = int(self.psd_buffer_edit.text().strip())
+            waveform_buffer_sec = int(self.waveform_buffer_edit.text().strip())
+            spike_bin_sec = int(self.spike_bin_edit.text().strip())
+            if psd_buffer_sec <= 0 or waveform_buffer_sec <= 0 or spike_bin_sec <= 0:
+                raise ValueError
+        except ValueError:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Invalid Input",
+                "PSD buffer, waveform buffer, and spike bin must be positive integers.",
+            )
             return
 
         port = self.port_combo.currentText()
         channel = int(self.channel_combo.currentText())
 
-        self.connection_request_signal.emit(host, command_port, data_port, sample_rate, project_name, port, channel)
+        self.connection_request_signal.emit(
+            host,
+            command_port,
+            data_port,
+            sample_rate,
+            project_name,
+            port,
+            channel,
+            psd_buffer_sec,
+            waveform_buffer_sec,
+            spike_bin_sec,
+        )
 
     
 

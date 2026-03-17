@@ -7,6 +7,7 @@ import numpy as np
 
 from workers.processing_worker import (
     ProcessingWorker,
+    configure_processing_windows,
     SPIKE_INCREMENTAL_MIN_SAMPLES,
     PSD_BUFFER_SEC,
     WAVEFORM_BUFFER_SEC,
@@ -22,10 +23,11 @@ DEFAULT_SAMPLING_RATE = 20000
 MAX_DISPLAY_POINTS    = 15000
 
 # ── Per-subplot render rate limits ────────────────────────────────────────────
-PLOT_UPDATE_FREQ_HZ = 60
-RAW_RENDER_HZ       = 60
-PSD_RENDER_HZ       = 60
-SPIKE_RENDER_HZ     = 60
+PLOT_UPDATE_FREQ_HZ = 120
+RAW_RENDER_HZ       = 30
+PSD_RENDER_HZ       = 30
+SPIKE_RENDER_HZ     = 30
+WAVEFORM_YLIM_ABS_UV = 100
 
 # ── Background compute throttle (every N data chunks) ─────────────────────────
 PSD_PLOT_UPDATE_EVERY_N   = 15
@@ -34,8 +36,7 @@ SPIKE_PLOT_UPDATE_EVERY_N = 15
 # ── Pyqtgraph global style ────────────────────────────────────────────────────
 pg.setConfigOption('background', 'transparent')
 pg.setConfigOption('foreground', 'black')
-pg.setConfigOption('antialias', False)
-
+pg.setConfigOption('antialias', True)
 
 def _make_display_buffer(fs: float) -> np.ndarray:
     """Pre-allocate fixed-size ring buffer for DISPLAY_BUFFER_SEC of data."""
@@ -53,6 +54,8 @@ class PgCanvas(QtWidgets.QWidget):
 
         self.glw = pg.GraphicsLayoutWidget()
         layout.addWidget(self.glw)
+
+        self.glw.setContextMenuPolicy(QtCore.Qt.NoContextMenu)
 
         # Row 0: Raw signal (spans 3 columns)
         self.raw_plot = self.glw.addPlot(row=0, col=0, colspan=3)
@@ -88,12 +91,13 @@ class PgCanvas(QtWidgets.QWidget):
         self.wf_plot.setLabel('bottom', 't [ms]')
         self.wf_plot.showGrid(x=True, y=True, alpha=0.3)
         self.wf_plot.setMouseEnabled(x=False, y=False)
+        self.wf_plot.setYRange(-WAVEFORM_YLIM_ABS_UV, WAVEFORM_YLIM_ABS_UV, padding=0)
 
         # ── Curves ────────────────────────────────────────────────────────────
-        self.raw_curve   = self.raw_plot.plot(  pen=pg.mkPen('#4da6ff', width=1))
-        self.psd_curve   = self.psd_plot.plot(  pen=pg.mkPen('#ffa64d', width=1))
-        self.spike_curve = self.spike_plot.plot(pen=pg.mkPen('#ff4d4d', width=1))
-        self.wf_curve    = self.wf_plot.plot(   pen=pg.mkPen('#50c878', width=2))
+        self.raw_curve   = self.raw_plot.plot(  pen=pg.mkPen("#1D20ED", width=1))
+        self.psd_curve   = self.psd_plot.plot(  pen=pg.mkPen("#f62d2d", width=2))
+        self.spike_curve = self.spike_plot.plot(pen=pg.mkPen("#20C814", width=2))
+        self.wf_curve    = self.wf_plot.plot(   pen=pg.mkPen("#e840b3", width=2))
 
         # SEM fill (FillBetweenItem requires two PlotDataItems)
         self.wf_upper = self.wf_plot.plot(pen=None)
@@ -126,10 +130,22 @@ class PlotScreen(QtWidgets.QWidget):
         self.marker_times     = []      # full-session marker timestamps
         self.is_receiving     = False
         self.base_connection_details = ""
+        self.base_project_line = ""
 
         self._spike_times_cache      = []
         self._last_spike_scan_sample = 0  # absolute sample count (never resets)
         self._proc_result            = None
+        self._psd_buffer_sec         = int(PSD_BUFFER_SEC)
+        self._waveform_buffer_sec    = int(WAVEFORM_BUFFER_SEC)
+        self._spike_bin_sec          = int(SPIKE_BIN_SEC)
+        self._latest_psd_f           = None
+        self._latest_psd_db          = None
+        self._latest_wf_t_ms         = None
+        self._latest_wf_mu           = None
+
+        # Snapshot overlays (underlaid on top of corresponding plots)
+        self._psd_snapshot_curves = []
+        self._wf_snapshot_curves  = []
 
         # Ring buffer (fixed-size, never grows)
         self._ring  = _make_display_buffer(DEFAULT_SAMPLING_RATE)
@@ -158,31 +174,10 @@ class PlotScreen(QtWidgets.QWidget):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(6)
 
-        header = QtWidgets.QHBoxLayout()
-
-        self.toggle_receiving_button = QtWidgets.QPushButton("Stop receiving")
-        self.toggle_receiving_button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-        self.toggle_receiving_button.clicked.connect(self._on_toggle_receiving_clicked)
-
-        self.marker_button = QtWidgets.QPushButton("Add marker")
-        self.marker_button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-        self.marker_button.clicked.connect(self._on_marker_clicked)
-
-        self.save_disconnect_button = QtWidgets.QPushButton("Save and Disconnect")
-        self.save_disconnect_button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-        self.save_disconnect_button.clicked.connect(self._on_save_disconnect_clicked)
-
         self.connection_details_label = QtWidgets.QLabel()
-        self.fps_label                = QtWidgets.QLabel("FPS: 0.0")
-
-        header.addWidget(self.toggle_receiving_button)
-        header.addWidget(self.marker_button)
-        header.addWidget(self.save_disconnect_button)
-        header.addWidget(self.connection_details_label)
-        header.addStretch(1)
-        header.addWidget(self.fps_label)
-
-        layout.addLayout(header)
+        self.connection_details_label.setContentsMargins(0, 0, 12, 0)
+        self.fps_label = QtWidgets.QLabel()
+        self.fps_label.setContentsMargins(12, 0, 12, 0)
 
         self.canvas = PgCanvas(self)
         self.canvas.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
@@ -197,14 +192,28 @@ class PlotScreen(QtWidgets.QWidget):
         self._fps_last_t      = time.perf_counter()
         self._render_dur_ms   = 0.0
 
+    def configure_processing_settings(self, psd_buffer_sec: int, waveform_buffer_sec: int, spike_bin_sec: int):
+        """Apply runtime processing settings and refresh plot labels."""
+        self._psd_buffer_sec = int(psd_buffer_sec)
+        self._waveform_buffer_sec = int(waveform_buffer_sec)
+        self._spike_bin_sec = int(spike_bin_sec)
+
+        configure_processing_windows(
+            psd_buffer_sec=self._psd_buffer_sec,
+            waveform_buffer_sec=self._waveform_buffer_sec,
+            spike_bin_sec=self._spike_bin_sec,
+        )
+
+        self.canvas.psd_plot.setTitle(f"Power spectrum (last {self._psd_buffer_sec}s)")
+        self.canvas.spike_plot.setTitle(f"Spike counts ({self._spike_bin_sec}s bins)")
+        self.canvas.wf_plot.setTitle(f"Averaged spike waveform (last {self._waveform_buffer_sec}s)")
+
     # ── Connection management ──────────────────────────────────────────────────
 
     def set_connection_details(self, host, command_port, data_port, sample_rate, project_name):
         self.clear_project_buffers()
-        self.base_connection_details = (
-            f"Connected to {host}:{command_port}/{data_port} at {sample_rate} Hz"
-            f" \u2014 Project: {project_name}"
-        )
+        self.base_connection_details = f"Connected to {host}:{command_port}/{data_port} at {sample_rate} Hz"
+        self.base_project_line = f"Project: {project_name}"
         self.set_connection_status("Receiving")
         self.sampling_rate = float(sample_rate)
         # Re-allocate ring buffer for actual sample rate
@@ -221,6 +230,8 @@ class PlotScreen(QtWidgets.QWidget):
         text = self.base_connection_details
         if status_text:
             text += f" \u2014 {status_text}"
+        if self.base_project_line:
+            text += f"\n{self.base_project_line}"
         self.connection_details_label.setText(text)
 
     def clear_project_buffers(self):
@@ -232,6 +243,7 @@ class PlotScreen(QtWidgets.QWidget):
         self.canvas.wf_upper.setData([], [])
         self.canvas.wf_lower.setData([], [])
         self._clear_marker_lines()
+        self.clear_snapshots()
 
         # Reset ring buffer
         self._ring[:] = 0
@@ -244,6 +256,10 @@ class PlotScreen(QtWidgets.QWidget):
         self._spike_times_cache      = []
         self._last_spike_scan_sample = 0
         self._proc_result            = None
+        self._latest_psd_f           = None
+        self._latest_psd_db          = None
+        self._latest_wf_t_ms         = None
+        self._latest_wf_mu           = None
         self._psd_pending            = False
         self._spike_pending          = False
         self._last_raw_render_t      = 0.0
@@ -256,34 +272,71 @@ class PlotScreen(QtWidgets.QWidget):
         self.canvas.raw_plot.setXRange(0, DISPLAY_WINDOW_SEC, padding=0)
         self.canvas.raw_plot.setYRange(-1, 1, padding=0)
         self.canvas.psd_plot.setYRange(PSD_YLIM_MIN, PSD_YLIM_MAX, padding=0)
+        self.canvas.wf_plot.setYRange(-WAVEFORM_YLIM_ABS_UV, WAVEFORM_YLIM_ABS_UV, padding=0)
 
         self.base_connection_details = ""
+        self.base_project_line = ""
         self.connection_details_label.clear()
         self.set_receiving_state(False)
         self._fps_frame_count = 0
         self._fps_last_t      = time.perf_counter()
         self._render_dur_ms   = 0.0
-        self.fps_label.setText("FPS: 0.0")
-
-    # ── UI actions ─────────────────────────────────────────────────────────────
-
-    def _on_toggle_receiving_clicked(self):
-        self.toggle_receiving_request_signal.emit(not self.is_receiving)
-
-    def _on_save_disconnect_clicked(self):
-        self.save_disconnect_request_signal.emit()
-
-    def _on_marker_clicked(self):
-        self.marker_request_signal.emit()
+        self.fps_label.setText("FPS: 0.0\nFrame time: 0.0 ms")
 
     def set_receiving_state(self, receiving: bool):
         self.is_receiving = bool(receiving)
-        if self.is_receiving:
-            self.toggle_receiving_button.setText("Stop receiving")
-            self.marker_button.setEnabled(True)
-        else:
-            self.toggle_receiving_button.setText("Start receiving")
-            self.marker_button.setEnabled(False)
+
+    def take_psd_snapshot(self) -> bool:
+        """Capture current PSD curve and underlay it on the PSD plot."""
+        if self._latest_psd_f is None or self._latest_psd_db is None:
+            return False
+        if self._latest_psd_f.size < 1 or self._latest_psd_db.size < 1:
+            return False
+
+        # Keep only the newest snapshot.
+        for old_curve in self._psd_snapshot_curves:
+            self.canvas.psd_plot.removeItem(old_curve)
+        self._psd_snapshot_curves.clear()
+
+        curve = self.canvas.psd_plot.plot(
+            self._latest_psd_f.copy(),
+            self._latest_psd_db.copy(),
+            pen=pg.mkPen(80, 80, 80, 130, width=1),
+        )
+        curve.setZValue(-10)
+        self._psd_snapshot_curves.append(curve)
+        return True
+
+    def take_waveform_snapshot(self) -> bool:
+        """Capture current average waveform and underlay it on the waveform plot."""
+        if self._latest_wf_t_ms is None or self._latest_wf_mu is None:
+            return False
+        if self._latest_wf_t_ms.size < 1 or self._latest_wf_mu.size < 1:
+            return False
+
+        # Keep only the newest snapshot.
+        for old_curve in self._wf_snapshot_curves:
+            self.canvas.wf_plot.removeItem(old_curve)
+        self._wf_snapshot_curves.clear()
+
+        curve = self.canvas.wf_plot.plot(
+            self._latest_wf_t_ms.copy(),
+            self._latest_wf_mu.copy(),
+            pen=pg.mkPen(80, 80, 80, 130, width=1),
+        )
+        curve.setZValue(-10)
+        self._wf_snapshot_curves.append(curve)
+        return True
+
+    def clear_snapshots(self):
+        """Remove all snapshot overlays from PSD and waveform plots."""
+        for curve in self._psd_snapshot_curves:
+            self.canvas.psd_plot.removeItem(curve)
+        self._psd_snapshot_curves.clear()
+
+        for curve in self._wf_snapshot_curves:
+            self.canvas.wf_plot.removeItem(curve)
+        self._wf_snapshot_curves.clear()
 
     def add_marker(self, timestamp_s: float):
         self.marker_times.append(float(timestamp_s))
@@ -386,7 +439,7 @@ class PlotScreen(QtWidgets.QWidget):
                     do_psd=should_run_psd, do_spike=True,
                 )
             else:
-                psd_n = max(8, int(round(self.sampling_rate * PSD_BUFFER_SEC)))
+                psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec)))
                 t_tail, sig_tail = self._ring_read_tail(psd_n)
                 self._proc_worker.schedule(
                     sig_tail.copy(), t_tail.copy(),
@@ -443,6 +496,8 @@ class PlotScreen(QtWidgets.QWidget):
         if r is not None and self._psd_pending and (now - self._last_psd_render_t) >= 1.0 / PSD_RENDER_HZ:
             if r.psd_f is not None and r.psd_db is not None:
                 self.canvas.psd_curve.setData(r.psd_f, r.psd_db)
+                self._latest_psd_f = np.asarray(r.psd_f).copy()
+                self._latest_psd_db = np.asarray(r.psd_db).copy()
                 if r.psd_f.size:
                     self.canvas.psd_plot.setXRange(float(r.psd_f[0]), float(r.psd_f[-1]), padding=0)
                 self.canvas.psd_plot.setYRange(PSD_YLIM_MIN, PSD_YLIM_MAX, padding=0)
@@ -463,13 +518,16 @@ class PlotScreen(QtWidgets.QWidget):
                 self.canvas.wf_curve.setData(r.wf_t_ms, r.wf_mu)
                 self.canvas.wf_upper.setData(r.wf_t_ms, r.wf_mu + r.wf_sem)
                 self.canvas.wf_lower.setData(r.wf_t_ms, r.wf_mu - r.wf_sem)
+                self._latest_wf_t_ms = np.asarray(r.wf_t_ms).copy()
+                self._latest_wf_mu = np.asarray(r.wf_mu).copy()
                 self.canvas.wf_plot.setXRange(float(r.wf_t_ms[0]), float(r.wf_t_ms[-1]), padding=0)
-                wf_peak = float(np.max(np.abs(r.wf_mu))) if r.wf_mu.size else 0.0
-                self.canvas.wf_plot.setYRange(-max(1.0, wf_peak * 1.5), max(1.0, wf_peak * 1.5), padding=0)
+                self.canvas.wf_plot.setYRange(-WAVEFORM_YLIM_ABS_UV, WAVEFORM_YLIM_ABS_UV, padding=0)
             else:
                 self.canvas.wf_curve.setData([], [])
                 self.canvas.wf_upper.setData([], [])
                 self.canvas.wf_lower.setData([], [])
+                self._latest_wf_t_ms = None
+                self._latest_wf_mu = None
 
             self._spike_pending       = False
             self._last_spike_render_t = now
@@ -509,6 +567,6 @@ class PlotScreen(QtWidgets.QWidget):
         elapsed = now - self._fps_last_t
         if elapsed >= 1.0:
             fps = self._fps_frame_count / elapsed
-            self.fps_label.setText(f"FPS: {fps:.1f}  render: {self._render_dur_ms:.1f}ms")
+            self.fps_label.setText(f"FPS: {fps:.1f}\nFrame time: {self._render_dur_ms:.1f}ms")
             self._fps_frame_count = 0
             self._fps_last_t      = now
