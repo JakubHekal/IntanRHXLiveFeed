@@ -357,6 +357,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.state_manager.device_disconnected()
 
 if __name__ == "__main__":
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+
+    if hasattr(QtCore.Qt, 'setHighDpiScaleFactorRoundingPolicy'):
+        QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(
+            QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+
+        
     app = QtWidgets.QApplication(sys.argv)
     window = MainWindow()
     window.show()

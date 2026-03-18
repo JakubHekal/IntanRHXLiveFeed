@@ -2,7 +2,7 @@ import time
 import bisect
 
 import pyqtgraph as pg
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtWidgets, QtCore, QtGui
 import numpy as np
 
 from workers.processing_worker import (
@@ -53,6 +53,8 @@ class PgCanvas(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.glw = pg.GraphicsLayoutWidget()
+        self.glw.setViewportUpdateMode(QtWidgets.QGraphicsView.FullViewportUpdate)
+        self.glw.setRenderHint(QtGui.QPainter.Antialiasing)
         layout.addWidget(self.glw)
 
         self.glw.setContextMenuPolicy(QtCore.Qt.NoContextMenu)
@@ -191,6 +193,23 @@ class PlotScreen(QtWidgets.QWidget):
         self._fps_frame_count = 0
         self._fps_last_t      = time.perf_counter()
         self._render_dur_ms   = 0.0
+
+    def changeEvent(self, event):
+        # 13 is the raw integer ID for WindowChangeInternal in PyQt5
+        # WindowStateChange (21) handles maximizing/restoring
+        if event.type() in [13, QtCore.QEvent.WindowStateChange]:
+            if hasattr(self, 'canvas') and self.canvas.glw:
+                # Force the internal GraphicsView to recalculate its scene
+                self.canvas.glw.update()
+                
+                # Re-sync every plot's ViewBox
+                for plot in [self.canvas.raw_plot, self.canvas.psd_plot, 
+                            self.canvas.spike_plot, self.canvas.wf_plot]:
+                    # This 'fake' range set forces the background grid to re-anchor
+                    plot.vb.setRange(plot.vb.viewRect(), padding=0)
+                    plot.update()
+                    
+        super().changeEvent(event)
 
     def configure_processing_settings(self, psd_buffer_sec: int, waveform_buffer_sec: int, spike_bin_sec: int):
         """Apply runtime processing settings and refresh plot labels."""
