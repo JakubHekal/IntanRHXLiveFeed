@@ -1,0 +1,3 @@
+[submodule "python-intan"]
+	path = python-intan
+	url = https://github.com/Neuro-Mechatronics-Interfaces/python-intan
