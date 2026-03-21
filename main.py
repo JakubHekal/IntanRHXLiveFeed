@@ -3,6 +3,7 @@ import sys
 from PyQt5 import QtCore, QtWidgets, QtGui
 
 from screens.connect_screen import ConnectDialog
+from screens.marker_dialog import MarkerDialog
 from screens.plot_screen import PlotScreen
 from workers.rhx_worker import RHXWorker
 from state_manager import StateManager, AppState
@@ -12,6 +13,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.rhx_worker = None
         self.connect_dialog = None
+        self.marker_dialog = None
         
         # State machine integration
         self.state_manager = StateManager.get_instance()
@@ -104,6 +106,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.marker_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_ArrowDown))
         self.marker_action.triggered.connect(self._on_marker_requested)
 
+        self.marker_manager_action = self.toolbar.addAction("Markers")
+        self.marker_manager_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView))
+        self.marker_manager_action.triggered.connect(self._on_open_marker_manager)
+
         self.snapshot_menu = QtWidgets.QMenu(self)
         self.snapshot_psd_action = self.snapshot_menu.addAction("Take PSD snapshot")
         self.snapshot_psd_action.triggered.connect(self._on_snapshot_psd_requested)
@@ -156,6 +162,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.marker_action.setEnabled(config.get("marker", False))
         self.save_disconnect_action.setEnabled(config.get("save", False))
         self.snapshot_button.setEnabled(config.get("snapshot", False))
+        self.marker_manager_action.setEnabled(
+            current_state in (AppState.CONNECTED, AppState.STREAMING, AppState.WAITING_FOR_DATA, AppState.PAUSED)
+        )
         
         # Update button text based on state
         if current_state in (AppState.STREAMING, AppState.WAITING_FOR_DATA):
@@ -206,6 +215,7 @@ class MainWindow(QtWidgets.QMainWindow):
         data_port,
         sample_rate,
         project_name,
+        project_path,
         port,
         channel,
         psd_buffer_sec,
@@ -227,11 +237,22 @@ class MainWindow(QtWidgets.QMainWindow):
             spike_bin_sec=spike_bin_sec,
         )
         
-        self.rhx_worker = RHXWorker(host, command_port, data_port, sample_rate, project_name, port, channel)
+        self.rhx_worker = RHXWorker(
+            host,
+            command_port,
+            data_port,
+            sample_rate,
+            project_name,
+            project_path,
+            port,
+            channel,
+        )
         self.rhx_worker.connection_request_result_signal.connect(self._on_connection_result)
         # Connect state/data signals before start so initial worker emits are not missed.
         self.rhx_worker.data_received_signal.connect(self.plot_screen._on_data_received)
         self.rhx_worker.marker_added_signal.connect(self.plot_screen.add_marker)
+        self.rhx_worker.marker_catalog_signal.connect(self.plot_screen.set_marker_catalog)
+        self.rhx_worker.marker_catalog_signal.connect(self._on_marker_catalog_updated)
         self.rhx_worker.acquisition_state_signal.connect(self._on_acquisition_state_changed)
         self.rhx_worker.start()
 
@@ -244,12 +265,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.state_manager.connection_succeeded()
             if self.connect_dialog is not None:
                 self.connect_dialog.accept()
+            paths = self.rhx_worker.get_project_paths() if self.rhx_worker is not None else {}
             self.plot_screen.set_connection_details(
                 host=self.rhx_worker.host,
                 command_port=self.rhx_worker.command_port,
                 data_port=self.rhx_worker.data_port,
                 sample_rate=self.rhx_worker.sample_rate,
                 project_name=self.rhx_worker.project_name,
+            )
+            self.plot_screen.set_project_storage_paths(
+                run_dir=paths.get("run_dir", ""),
+                snapshots_dir=paths.get("snapshots_dir", ""),
             )
         else:
             # Transition back to IDLE state
@@ -287,7 +313,53 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_marker_requested(self):
         if self.rhx_worker is None:
             return
-        self.rhx_worker.request_marker()
+
+        default_name = f"Marker {len(self.plot_screen.get_markers()) + 1}"
+        marker_name, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Add Marker",
+            "Marker name:",
+            text=default_name,
+        )
+        if not ok:
+            return
+        marker_name = marker_name.strip()
+        if not marker_name:
+            QtWidgets.QMessageBox.warning(self, "Invalid Marker", "Marker name cannot be empty.")
+            return
+
+        self.rhx_worker.request_marker(marker_name)
+
+    def _ensure_marker_dialog(self):
+        if self.marker_dialog is None:
+            self.marker_dialog = MarkerDialog(self)
+            self.marker_dialog.rename_requested.connect(self._on_marker_rename_requested)
+            self.marker_dialog.delete_requested.connect(self._on_marker_delete_requested)
+
+    def _on_open_marker_manager(self):
+        self._ensure_marker_dialog()
+        self.marker_dialog.set_markers(self.plot_screen.get_markers())
+        self.marker_dialog.show()
+        self.marker_dialog.raise_()
+        self.marker_dialog.activateWindow()
+
+    def _on_marker_rename_requested(self, marker_id: int, new_name: str):
+        if self.rhx_worker is None:
+            return
+        if not self.rhx_worker.request_rename_marker(marker_id, new_name):
+            QtWidgets.QMessageBox.warning(self, "Markers", "Rename failed. The marker may no longer exist.")
+            return
+
+    def _on_marker_delete_requested(self, marker_id: int):
+        if self.rhx_worker is None:
+            return
+        if not self.rhx_worker.request_delete_marker(marker_id):
+            QtWidgets.QMessageBox.warning(self, "Markers", "Delete failed. The marker may no longer exist.")
+            return
+
+    def _on_marker_catalog_updated(self, markers):
+        if self.marker_dialog is not None and self.marker_dialog.isVisible():
+            self.marker_dialog.set_markers(markers)
 
     def _on_snapshot_psd_requested(self):
         if not self.plot_screen.take_psd_snapshot():
@@ -328,6 +400,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.rhx_worker is not None:
                 self.rhx_worker.stop()
                 self.rhx_worker = None
+
+            if self.marker_dialog is not None:
+                self.marker_dialog.hide()
             
             self.plot_screen.clear_project_buffers()
             
@@ -355,6 +430,30 @@ class MainWindow(QtWidgets.QMainWindow):
         elif state == "connection_lost":
             # Device disconnected unexpectedly
             self.state_manager.device_disconnected()
+
+    def closeEvent(self, event):
+        """Ask for confirmation before exiting to prevent accidental closes."""
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Confirm Exit",
+            "Close the application? Any active stream will be disconnected.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            event.ignore()
+            return
+
+        if self.rhx_worker is not None:
+            self.rhx_worker.stop()
+            self.rhx_worker = None
+
+        if self.marker_dialog is not None:
+            self.marker_dialog.hide()
+        if self.connect_dialog is not None:
+            self.connect_dialog.hide()
+
+        super().closeEvent(event)
 
 if __name__ == "__main__":
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)

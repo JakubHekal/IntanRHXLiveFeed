@@ -1,7 +1,10 @@
 import time
 import bisect
+from datetime import datetime
+from pathlib import Path
 
 import pyqtgraph as pg
+import pyqtgraph.exporters
 from PyQt5 import QtWidgets, QtCore, QtGui
 import numpy as np
 
@@ -25,9 +28,16 @@ MAX_DISPLAY_POINTS    = 15000
 # ── Per-subplot render rate limits ────────────────────────────────────────────
 PLOT_UPDATE_FREQ_HZ = 120
 RAW_RENDER_HZ       = 30
-PSD_RENDER_HZ       = 30
-SPIKE_RENDER_HZ     = 30
+PSD_RENDER_HZ       = 10
+SPIKE_RENDER_HZ     = 10
 WAVEFORM_YLIM_ABS_UV = 100
+SPIKE_SCROLL_WINDOW_MIN = 10.0
+RAW_HISTORY_TARGET_HZ = 100.0
+RAW_HISTORY_HIGH_TARGET_HZ = 1000.0
+RAW_ADAPTIVE_HIGH_RES_MAX_SPAN_SEC = 30.0
+RAW_FULL_RES_MAX_SPAN_SEC = 30.0
+RAW_MANUAL_VIEW_MARGIN_SEC = 2.0
+MAX_RAW_HISTORY_PLOT_POINTS = 200000
 
 # ── Background compute throttle (every N data chunks) ─────────────────────────
 PSD_PLOT_UPDATE_EVERY_N   = 15
@@ -57,7 +67,8 @@ class PgCanvas(QtWidgets.QWidget):
         self.glw.setRenderHint(QtGui.QPainter.Antialiasing)
         layout.addWidget(self.glw)
 
-        self.glw.setContextMenuPolicy(QtCore.Qt.NoContextMenu)
+        # Keep default context menu handling so each plot ViewBox can show its menu.
+        self.glw.setContextMenuPolicy(QtCore.Qt.DefaultContextMenu)
 
         # Row 0: Raw signal (spans 3 columns)
         self.raw_plot = self.glw.addPlot(row=0, col=0, colspan=3)
@@ -67,7 +78,7 @@ class PgCanvas(QtWidgets.QWidget):
         self.raw_plot.showGrid(x=True, y=True, alpha=0.3)
         self.raw_plot.setDownsampling(auto=True, mode='peak')
         self.raw_plot.setClipToView(True)
-        self.raw_plot.setMouseEnabled(x=False, y=False)
+        self.raw_plot.setMouseEnabled(x=True, y=True)
 
         # Row 1: PSD
         self.psd_plot = self.glw.addPlot(row=1, col=0)
@@ -84,7 +95,8 @@ class PgCanvas(QtWidgets.QWidget):
         self.spike_plot.setLabel('left',   'Count')
         self.spike_plot.setLabel('bottom', 't [min]')
         self.spike_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.spike_plot.setMouseEnabled(x=False, y=False)
+        # Allow horizontal pan/zoom so users can review full spike history.
+        self.spike_plot.setMouseEnabled(x=True, y=True)
 
         # Row 1: Waveform
         self.wf_plot = self.glw.addPlot(row=1, col=2)
@@ -114,6 +126,10 @@ class PgCanvas(QtWidgets.QWidget):
         self._marker_lines    = []
         self._marker_pen      = pg.mkPen(color='crimson', style=QtCore.Qt.DashLine, width=1)
         self._last_marker_set = []   # timestamps of currently displayed lines
+        self._marker_labels = []
+        self._spike_marker_lines = []
+        self._last_spike_marker_set = []
+        self._spike_marker_labels = []
 
 
 class PlotScreen(QtWidgets.QWidget):
@@ -121,6 +137,7 @@ class PlotScreen(QtWidgets.QWidget):
     toggle_receiving_request_signal = QtCore.pyqtSignal(bool)
     save_disconnect_request_signal  = QtCore.pyqtSignal()
     marker_request_signal           = QtCore.pyqtSignal()
+    auto_follow_changed_signal      = QtCore.pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -129,10 +146,13 @@ class PlotScreen(QtWidgets.QWidget):
         # ── Session state ──────────────────────────────────────────────────────
         self.sampling_rate    = float(DEFAULT_SAMPLING_RATE)
         self.sample_counter   = 0       # total samples ever received (absolute)
-        self.marker_times     = []      # full-session marker timestamps
+        self.marker_records   = []      # marker dicts: id,timestamp_s,name,active
+        self._marker_times_sorted = []
         self.is_receiving     = False
         self.base_connection_details = ""
         self.base_project_line = ""
+        self.project_run_dir = ""
+        self.project_snapshots_dir = ""
 
         self._spike_times_cache      = []
         self._last_spike_scan_sample = 0  # absolute sample count (never resets)
@@ -144,6 +164,26 @@ class PlotScreen(QtWidgets.QWidget):
         self._latest_psd_db          = None
         self._latest_wf_t_ms         = None
         self._latest_wf_mu           = None
+
+        # Full-session raw history (dual-resolution for adaptive manual browsing).
+        self._raw_hist_t_low = []
+        self._raw_hist_y_low = []
+        self._raw_hist_t_high = []
+        self._raw_hist_y_high = []
+        self._raw_hist_sample_mod_low = 0
+        self._raw_hist_sample_mod_high = 0
+        self._raw_hist_stride_low = 1
+        self._raw_hist_stride_high = 1
+
+        # Axis follow state: when disabled, user-adjusted ranges are preserved.
+        self._follow_axes = {
+            'raw': True,
+            'psd': True,
+            'spike': True,
+            'wf': True,
+        }
+        self._follow_menu_actions = {}
+        self._suspend_follow_detection = False
 
         # Snapshot overlays (underlaid on top of corresponding plots)
         self._psd_snapshot_curves = []
@@ -185,6 +225,11 @@ class PlotScreen(QtWidgets.QWidget):
         self.canvas.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         layout.addWidget(self.canvas, 1)
 
+        self._connect_plot_range_signals()
+        self._install_plot_follow_context_actions()
+
+        self._update_raw_history_stride()
+
         self.render_timer = QtCore.QTimer(self)
         self.render_timer.setInterval(1000 // PLOT_UPDATE_FREQ_HZ)
         self.render_timer.timeout.connect(self._render_plot)
@@ -193,6 +238,149 @@ class PlotScreen(QtWidgets.QWidget):
         self._fps_frame_count = 0
         self._fps_last_t      = time.perf_counter()
         self._render_dur_ms   = 0.0
+
+    def _plot_item_for_key(self, key: str):
+        if key == 'raw':
+            return self.canvas.raw_plot
+        if key == 'psd':
+            return self.canvas.psd_plot
+        if key == 'spike':
+            return self.canvas.spike_plot
+        if key == 'wf':
+            return self.canvas.wf_plot
+        raise KeyError(key)
+
+    def _update_raw_history_stride(self):
+        target_low = max(1.0, float(RAW_HISTORY_TARGET_HZ))
+        target_high = max(1.0, float(RAW_HISTORY_HIGH_TARGET_HZ))
+        self._raw_hist_stride_low = max(1, int(round(float(self.sampling_rate) / target_low)))
+        self._raw_hist_stride_high = max(1, int(round(float(self.sampling_rate) / target_high)))
+
+    def _append_decimated_history(self, t_chunk: np.ndarray, signal: np.ndarray, stride: int, sample_mod: int, t_store: list, y_store: list) -> int:
+        n = int(signal.size)
+        if n <= 0:
+            return int(sample_mod)
+        stride = max(1, int(stride))
+        start = (stride - int(sample_mod)) % stride
+        if start < n:
+            idx = np.arange(start, n, stride, dtype=int)
+            if idx.size:
+                t_store.extend(np.asarray(t_chunk[idx], dtype=np.float64).tolist())
+                y_store.extend(np.asarray(signal[idx], dtype=np.float64).tolist())
+        return (int(sample_mod) + n) % stride
+
+    def _append_raw_history(self, t_chunk: np.ndarray, signal: np.ndarray):
+        self._raw_hist_sample_mod_low = self._append_decimated_history(
+            t_chunk,
+            signal,
+            self._raw_hist_stride_low,
+            self._raw_hist_sample_mod_low,
+            self._raw_hist_t_low,
+            self._raw_hist_y_low,
+        )
+        self._raw_hist_sample_mod_high = self._append_decimated_history(
+            t_chunk,
+            signal,
+            self._raw_hist_stride_high,
+            self._raw_hist_sample_mod_high,
+            self._raw_hist_t_high,
+            self._raw_hist_y_high,
+        )
+
+        # Keep only the last DISPLAY_BUFFER_SEC seconds in decimated history.
+        latest_t = float(t_chunk[-1]) if np.asarray(t_chunk).size else 0.0
+        cutoff_t = latest_t - float(DISPLAY_BUFFER_SEC)
+        self._trim_history_store(self._raw_hist_t_low, self._raw_hist_y_low, cutoff_t)
+        self._trim_history_store(self._raw_hist_t_high, self._raw_hist_y_high, cutoff_t)
+
+    def _trim_history_store(self, t_store: list, y_store: list, cutoff_t: float):
+        if not t_store:
+            return
+        keep_from = bisect.bisect_left(t_store, float(cutoff_t))
+        if keep_from <= 0:
+            return
+        del t_store[:keep_from]
+        del y_store[:keep_from]
+
+    def _raw_time_bounds(self):
+        stored = min(self._total, self._cap)
+        if stored <= 0:
+            return 0.0, 0.0
+        latest_t = (self.sample_counter - 1) / float(self.sampling_rate)
+        earliest_t = latest_t - ((stored - 1) / float(self.sampling_rate))
+        return float(earliest_t), float(latest_t)
+
+    def _connect_plot_range_signals(self):
+        for key in ('raw', 'psd', 'spike', 'wf'):
+            vb = self._plot_item_for_key(key).vb
+            if hasattr(vb, 'sigRangeChangedManually'):
+                vb.sigRangeChangedManually.connect(lambda *_args, k=key: self._on_manual_plot_range_change(k))
+            else:
+                vb.sigRangeChanged.connect(lambda *_args, k=key: self._on_manual_plot_range_change(k))
+
+    def _install_plot_follow_context_actions(self):
+        for key in ('raw', 'psd', 'spike', 'wf'):
+            vb = self._plot_item_for_key(key).vb
+            menu = getattr(vb, 'menu', None)
+            if menu is None:
+                continue
+            menu.addSeparator()
+            action = QtWidgets.QAction("Auto-follow", self)
+            action.setCheckable(True)
+            action.setChecked(bool(self._follow_axes.get(key, True)))
+            action.toggled.connect(lambda checked, k=key: self.set_plot_auto_follow(k, checked))
+            menu.addAction(action)
+            self._follow_menu_actions[key] = action
+
+    def _set_follow_menu_action_state(self, key: str, enabled: bool):
+        action = self._follow_menu_actions.get(key)
+        if action is None:
+            return
+        blocked = action.blockSignals(True)
+        try:
+            action.setChecked(bool(enabled))
+        finally:
+            action.blockSignals(blocked)
+
+    def _on_manual_plot_range_change(self, key: str):
+        if self._suspend_follow_detection:
+            return
+        if self._follow_axes.get(key, True):
+            self._follow_axes[key] = False
+            self._set_follow_menu_action_state(key, False)
+            self.auto_follow_changed_signal.emit(self.is_auto_follow_enabled())
+
+    def is_auto_follow_enabled(self) -> bool:
+        return all(bool(v) for v in self._follow_axes.values())
+
+    def set_plot_auto_follow(self, key: str, enabled: bool):
+        if key not in self._follow_axes:
+            return
+        enabled = bool(enabled)
+        if self._follow_axes[key] == enabled:
+            self._set_follow_menu_action_state(key, enabled)
+            return
+        self._follow_axes[key] = enabled
+        self._set_follow_menu_action_state(key, enabled)
+        self.auto_follow_changed_signal.emit(self.is_auto_follow_enabled())
+
+    def set_auto_follow(self, enabled: bool):
+        enabled = bool(enabled)
+        for key in self._follow_axes:
+            self._follow_axes[key] = enabled
+            self._set_follow_menu_action_state(key, enabled)
+        self.auto_follow_changed_signal.emit(self.is_auto_follow_enabled())
+
+    def reset_plot_views(self):
+        self._suspend_follow_detection = True
+        try:
+            self.canvas.raw_plot.setXRange(0, DISPLAY_WINDOW_SEC, padding=0)
+            self.canvas.raw_plot.setYRange(-1, 1, padding=0)
+            self.canvas.psd_plot.setYRange(PSD_YLIM_MIN, PSD_YLIM_MAX, padding=0)
+            self.canvas.wf_plot.setYRange(-WAVEFORM_YLIM_ABS_UV, WAVEFORM_YLIM_ABS_UV, padding=0)
+        finally:
+            self._suspend_follow_detection = False
+        self.set_auto_follow(True)
 
     def changeEvent(self, event):
         # 13 is the raw integer ID for WindowChangeInternal in PyQt5
@@ -206,7 +394,11 @@ class PlotScreen(QtWidgets.QWidget):
                 for plot in [self.canvas.raw_plot, self.canvas.psd_plot, 
                             self.canvas.spike_plot, self.canvas.wf_plot]:
                     # This 'fake' range set forces the background grid to re-anchor
-                    plot.vb.setRange(plot.vb.viewRect(), padding=0)
+                    self._suspend_follow_detection = True
+                    try:
+                        plot.vb.setRange(plot.vb.viewRect(), padding=0)
+                    finally:
+                        self._suspend_follow_detection = False
                     plot.update()
                     
         super().changeEvent(event)
@@ -240,6 +432,9 @@ class PlotScreen(QtWidgets.QWidget):
         self._cap   = self._ring.shape[1]
         self._wpos  = 0
         self._total = 0
+        self._update_raw_history_stride()
+        self._raw_hist_sample_mod_low = 0
+        self._raw_hist_sample_mod_high = 0
         self.set_receiving_state(True)
 
     def set_connection_status(self, status_text=""):
@@ -253,6 +448,10 @@ class PlotScreen(QtWidgets.QWidget):
             text += f"\n{self.base_project_line}"
         self.connection_details_label.setText(text)
 
+    def set_project_storage_paths(self, run_dir: str, snapshots_dir: str):
+        self.project_run_dir = str(run_dir or "")
+        self.project_snapshots_dir = str(snapshots_dir or "")
+
     def clear_project_buffers(self):
         # Clear all curves
         self.canvas.raw_curve.setData([], [])
@@ -262,6 +461,7 @@ class PlotScreen(QtWidgets.QWidget):
         self.canvas.wf_upper.setData([], [])
         self.canvas.wf_lower.setData([], [])
         self._clear_marker_lines()
+        self._clear_spike_marker_lines()
         self.clear_snapshots()
 
         # Reset ring buffer
@@ -271,7 +471,8 @@ class PlotScreen(QtWidgets.QWidget):
         self.sample_counter = 0
 
         # Reset all state
-        self.marker_times            = []
+        self.marker_records          = []
+        self._marker_times_sorted    = []
         self._spike_times_cache      = []
         self._last_spike_scan_sample = 0
         self._proc_result            = None
@@ -279,6 +480,12 @@ class PlotScreen(QtWidgets.QWidget):
         self._latest_psd_db          = None
         self._latest_wf_t_ms         = None
         self._latest_wf_mu           = None
+        self._raw_hist_t_low         = []
+        self._raw_hist_y_low         = []
+        self._raw_hist_t_high        = []
+        self._raw_hist_y_high        = []
+        self._raw_hist_sample_mod_low = 0
+        self._raw_hist_sample_mod_high = 0
         self._psd_pending            = False
         self._spike_pending          = False
         self._last_raw_render_t      = 0.0
@@ -286,15 +493,22 @@ class PlotScreen(QtWidgets.QWidget):
         self._last_spike_render_t    = 0.0
         self.psd_update_counter      = 0
         self.spike_plot_frame_counter = 0
+        self.set_auto_follow(True)
 
         # Reset axes
-        self.canvas.raw_plot.setXRange(0, DISPLAY_WINDOW_SEC, padding=0)
-        self.canvas.raw_plot.setYRange(-1, 1, padding=0)
-        self.canvas.psd_plot.setYRange(PSD_YLIM_MIN, PSD_YLIM_MAX, padding=0)
-        self.canvas.wf_plot.setYRange(-WAVEFORM_YLIM_ABS_UV, WAVEFORM_YLIM_ABS_UV, padding=0)
+        self._suspend_follow_detection = True
+        try:
+            self.canvas.raw_plot.setXRange(0, DISPLAY_WINDOW_SEC, padding=0)
+            self.canvas.raw_plot.setYRange(-1, 1, padding=0)
+            self.canvas.psd_plot.setYRange(PSD_YLIM_MIN, PSD_YLIM_MAX, padding=0)
+            self.canvas.wf_plot.setYRange(-WAVEFORM_YLIM_ABS_UV, WAVEFORM_YLIM_ABS_UV, padding=0)
+        finally:
+            self._suspend_follow_detection = False
 
         self.base_connection_details = ""
         self.base_project_line = ""
+        self.project_run_dir = ""
+        self.project_snapshots_dir = ""
         self.connection_details_label.clear()
         self.set_receiving_state(False)
         self._fps_frame_count = 0
@@ -304,6 +518,28 @@ class PlotScreen(QtWidgets.QWidget):
 
     def set_receiving_state(self, receiving: bool):
         self.is_receiving = bool(receiving)
+
+    def _save_plot_snapshot_png(self, plot_item, prefix: str) -> bool:
+        if not self.project_snapshots_dir:
+            return False
+        try:
+            out_dir = Path(self.project_snapshots_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            out_path = out_dir / f"{prefix}_{stamp}.png"
+
+            try:
+                exporter = pg.exporters.ImageExporter(plot_item)
+                exporter.export(str(out_path))
+            except Exception:
+                # Fallback: grab full widget if plot exporter fails.
+                pix = self.canvas.glw.grab()
+                if pix.isNull() or not pix.save(str(out_path), "PNG"):
+                    return False
+
+            return out_path.exists() and out_path.stat().st_size > 0
+        except Exception:
+            return False
 
     def take_psd_snapshot(self) -> bool:
         """Capture current PSD curve and underlay it on the PSD plot."""
@@ -324,6 +560,9 @@ class PlotScreen(QtWidgets.QWidget):
         )
         curve.setZValue(-10)
         self._psd_snapshot_curves.append(curve)
+
+        # Saving to disk is best-effort; snapshot availability should depend on data.
+        self._save_plot_snapshot_png(self.canvas.psd_plot, "psd_snapshot")
         return True
 
     def take_waveform_snapshot(self) -> bool:
@@ -345,6 +584,9 @@ class PlotScreen(QtWidgets.QWidget):
         )
         curve.setZValue(-10)
         self._wf_snapshot_curves.append(curve)
+
+        # Saving to disk is best-effort; snapshot availability should depend on data.
+        self._save_plot_snapshot_png(self.canvas.wf_plot, "waveform_snapshot")
         return True
 
     def clear_snapshots(self):
@@ -357,8 +599,54 @@ class PlotScreen(QtWidgets.QWidget):
             self.canvas.wf_plot.removeItem(curve)
         self._wf_snapshot_curves.clear()
 
-    def add_marker(self, timestamp_s: float):
-        self.marker_times.append(float(timestamp_s))
+    def add_marker(self, marker):
+        if isinstance(marker, dict):
+            ts = float(marker.get("timestamp_s", marker.get("timestamp", 0.0)))
+            marker_id = int(marker.get("id", len(self.marker_records) + 1))
+            name = str(marker.get("name", f"Marker {marker_id}"))
+            self.marker_records.append(
+                {
+                    "id": marker_id,
+                    "timestamp_s": ts,
+                    "name": name,
+                }
+            )
+        else:
+            ts = float(marker)
+            marker_id = len(self.marker_records) + 1
+            self.marker_records.append(
+                {
+                    "id": marker_id,
+                    "timestamp_s": ts,
+                    "name": f"Marker {marker_id}",
+                }
+            )
+        self._marker_times_sorted = sorted(float(m.get("timestamp_s", 0.0)) for m in self.marker_records)
+
+    def set_marker_catalog(self, markers):
+        safe = []
+        for item in markers or []:
+            try:
+                safe.append(
+                    {
+                        "id": int(item.get("id", 0)),
+                        "timestamp_s": float(item.get("timestamp_s", 0.0)),
+                        "name": str(item.get("name", "")),
+                    }
+                )
+            except Exception:
+                continue
+        self.marker_records = sorted(safe, key=lambda m: float(m.get("timestamp_s", 0.0)))
+        self._marker_times_sorted = [float(m.get("timestamp_s", 0.0)) for m in self.marker_records]
+
+    def get_markers(self):
+        return [dict(m) for m in self.marker_records]
+
+    def _active_marker_times(self):
+        return list(self._marker_times_sorted)
+
+    def _sorted_markers(self):
+        return sorted(self.marker_records, key=lambda m: float(m.get("timestamp_s", 0.0)))
 
     # ── Ring buffer ────────────────────────────────────────────────────────────
 
@@ -429,6 +717,7 @@ class PlotScreen(QtWidgets.QWidget):
         signal  = arr[0, :]
         t_chunk = (self.sample_counter + np.arange(n_samples, dtype=np.float64)) / self.sampling_rate
         self._ring_write(t_chunk, signal)
+        self._append_raw_history(t_chunk, signal)
         self.sample_counter += n_samples
 
         # Throttle compute
@@ -492,21 +781,99 @@ class PlotScreen(QtWidgets.QWidget):
 
         # ── Raw signal @ RAW_RENDER_HZ ─────────────────────────────────────────
         if (now - self._last_raw_render_t) >= 1.0 / RAW_RENDER_HZ:
-            n_vis = int(self.sampling_rate * DISPLAY_WINDOW_SEC)
-            x_vis, y_vis = self._ring_read_tail(n_vis)
+            x_start = 0.0
+            x_end = 0.0
+            if self._follow_axes['raw']:
+                n_vis = int(self.sampling_rate * DISPLAY_WINDOW_SEC)
+                x_vis, y_vis = self._ring_read_tail(n_vis)
 
-            step = max(1, x_vis.size // MAX_DISPLAY_POINTS)
-            self.canvas.raw_curve.setData(x_vis[::step], y_vis[::step])
+                step = max(1, x_vis.size // MAX_DISPLAY_POINTS)
+                self.canvas.raw_curve.setData(x_vis[::step], y_vis[::step])
 
-            x_end   = float(x_vis[-1]) if x_vis.size else 0.0
-            x_start = max(0.0, x_end - DISPLAY_WINDOW_SEC)
-            self.canvas.raw_plot.setXRange(x_start, x_end, padding=0)
+                x_end = float(x_vis[-1]) if x_vis.size else 0.0
+                x_start = max(0.0, x_end - DISPLAY_WINDOW_SEC)
+                x_min_lim, _x_max_data = self._raw_time_bounds()
+                self.canvas.raw_plot.setLimits(xMin=max(0.0, x_min_lim), xMax=max(0.0, x_end + 0.1))
 
-            peak  = float(np.max(np.abs(y_vis))) if y_vis.size else 0.0
-            y_lim = max(0.2, peak * 1.2)
-            self.canvas.raw_plot.setYRange(-y_lim, y_lim, padding=0)
+                self._suspend_follow_detection = True
+                try:
+                    self.canvas.raw_plot.setXRange(x_start, x_end, padding=0)
+                finally:
+                    self._suspend_follow_detection = False
 
-            self._sync_marker_lines(x_start, x_end)
+                peak  = float(np.max(np.abs(y_vis))) if y_vis.size else 0.0
+                y_lim = max(0.2, peak * 1.2)
+                self._suspend_follow_detection = True
+                try:
+                    self.canvas.raw_plot.setYRange(-y_lim, y_lim, padding=0)
+                finally:
+                    self._suspend_follow_detection = False
+            else:
+                history_end = 0.0
+                history_start = 0.0
+                if self._raw_hist_t_low:
+                    history_start = float(self._raw_hist_t_low[0])
+                    history_end = float(self._raw_hist_t_low[-1])
+                    self.canvas.raw_plot.setLimits(xMin=max(0.0, history_start), xMax=max(0.0, history_end + 0.1))
+
+                vr = self.canvas.raw_plot.vb.viewRange()[0]
+                if len(vr) >= 2:
+                    x_start = float(vr[0])
+                    x_end = float(vr[1])
+                elif history_end > 0.0:
+                    x_end = history_end
+                    x_start = max(0.0, x_end - DISPLAY_WINDOW_SEC)
+
+                span = max(0.0, x_end - x_start)
+                t_src = None
+                y_src = None
+
+                # For recent/small windows, render from full-resolution ring data
+                # so zooming back in restores fine waveform detail.
+                stored = min(self._total, self._cap)
+                if stored > 1 and span <= RAW_FULL_RES_MAX_SPAN_SEC:
+                    earliest_t, latest_t = self._raw_time_bounds()
+                    left_q = max(earliest_t, x_start - RAW_MANUAL_VIEW_MARGIN_SEC)
+                    right_q = min(latest_t, x_end + RAW_MANUAL_VIEW_MARGIN_SEC)
+                    if right_q > left_q:
+                        t_lin, y_lin = self._ring_read()
+                        if t_lin.size:
+                            i0 = int(np.searchsorted(t_lin, left_q, side='left'))
+                            i1 = int(np.searchsorted(t_lin, right_q, side='right'))
+                            if i1 <= i0:
+                                i0 = max(0, min(i0, t_lin.size - 1))
+                                i1 = min(t_lin.size, i0 + 1)
+                            t_src = t_lin[i0:i1]
+                            y_src = y_lin[i0:i1]
+
+                # Otherwise use adaptive decimated full-session history.
+                if t_src is None or y_src is None:
+                    use_high = span <= RAW_ADAPTIVE_HIGH_RES_MAX_SPAN_SEC and bool(self._raw_hist_t_high)
+                    if use_high:
+                        t_store = self._raw_hist_t_high
+                        y_store = self._raw_hist_y_high
+                    else:
+                        t_store = self._raw_hist_t_low
+                        y_store = self._raw_hist_y_low
+
+                    if t_store:
+                        left_q = max(0.0, x_start - RAW_MANUAL_VIEW_MARGIN_SEC)
+                        right_q = max(left_q, x_end + RAW_MANUAL_VIEW_MARGIN_SEC)
+                        i0 = bisect.bisect_left(t_store, left_q)
+                        i1 = bisect.bisect_right(t_store, right_q)
+                        if i1 <= i0:
+                            i0 = max(0, min(i0, len(t_store) - 1))
+                            i1 = min(len(t_store), i0 + 1)
+                        t_src = np.asarray(t_store[i0:i1], dtype=np.float64)
+                        y_src = np.asarray(y_store[i0:i1], dtype=np.float64)
+
+                if t_src is not None and y_src is not None and np.asarray(t_src).size:
+                    x_seg = np.asarray(t_src, dtype=np.float64)
+                    y_seg = np.asarray(y_src, dtype=np.float64)
+                    step = max(1, x_seg.size // MAX_RAW_HISTORY_PLOT_POINTS)
+                    self.canvas.raw_curve.setData(x_seg[::step], y_seg[::step])
+
+            self._sync_marker_lines(max(0.0, min(x_start, x_end)), max(0.0, max(x_start, x_end)))
             self._last_raw_render_t = now
 
         r = self._proc_result
@@ -517,9 +884,14 @@ class PlotScreen(QtWidgets.QWidget):
                 self.canvas.psd_curve.setData(r.psd_f, r.psd_db)
                 self._latest_psd_f = np.asarray(r.psd_f).copy()
                 self._latest_psd_db = np.asarray(r.psd_db).copy()
-                if r.psd_f.size:
-                    self.canvas.psd_plot.setXRange(float(r.psd_f[0]), float(r.psd_f[-1]), padding=0)
-                self.canvas.psd_plot.setYRange(PSD_YLIM_MIN, PSD_YLIM_MAX, padding=0)
+                if self._follow_axes['psd']:
+                    self._suspend_follow_detection = True
+                    try:
+                        if r.psd_f.size:
+                            self.canvas.psd_plot.setXRange(float(r.psd_f[0]), float(r.psd_f[-1]), padding=0)
+                        self.canvas.psd_plot.setYRange(PSD_YLIM_MIN, PSD_YLIM_MAX, padding=0)
+                    finally:
+                        self._suspend_follow_detection = False
             self._psd_pending       = False
             self._last_psd_render_t = now
 
@@ -528,10 +900,21 @@ class PlotScreen(QtWidgets.QWidget):
             if r.spike_minute_idx is not None and r.spike_counts is not None:
                 self.canvas.spike_curve.setData(r.spike_minute_idx, r.spike_counts)
                 max_count = max(1, int(np.max(r.spike_counts)) if r.spike_counts.size else 1)
-                self.canvas.spike_plot.setYRange(0, max_count * 1.2, padding=0)
+                right_min = 0.0
                 if r.spike_minute_idx.size:
                     right_min = float(r.spike_minute_idx[-1]) + SPIKE_BIN_SEC / 60.0
-                    self.canvas.spike_plot.setXRange(0.0, right_min + 0.1, padding=0)
+                # Keep x-limits synced with available history so manual panning can
+                # browse the full session while preventing negative time.
+                self.canvas.spike_plot.setLimits(xMin=0.0, xMax=max(0.0, right_min + 0.1))
+                if self._follow_axes['spike']:
+                    self._suspend_follow_detection = True
+                    try:
+                        self.canvas.spike_plot.setYRange(0, max_count * 1.2, padding=0)
+                        if right_min > 0.0:
+                            left_min = max(0.0, right_min - SPIKE_SCROLL_WINDOW_MIN)
+                            self.canvas.spike_plot.setXRange(left_min, right_min, padding=0)
+                    finally:
+                        self._suspend_follow_detection = False
 
             if r.wf_t_ms is not None and r.wf_mu is not None and r.wf_sem is not None:
                 self.canvas.wf_curve.setData(r.wf_t_ms, r.wf_mu)
@@ -539,8 +922,13 @@ class PlotScreen(QtWidgets.QWidget):
                 self.canvas.wf_lower.setData(r.wf_t_ms, r.wf_mu - r.wf_sem)
                 self._latest_wf_t_ms = np.asarray(r.wf_t_ms).copy()
                 self._latest_wf_mu = np.asarray(r.wf_mu).copy()
-                self.canvas.wf_plot.setXRange(float(r.wf_t_ms[0]), float(r.wf_t_ms[-1]), padding=0)
-                self.canvas.wf_plot.setYRange(-WAVEFORM_YLIM_ABS_UV, WAVEFORM_YLIM_ABS_UV, padding=0)
+                if self._follow_axes['wf']:
+                    self._suspend_follow_detection = True
+                    try:
+                        self.canvas.wf_plot.setXRange(float(r.wf_t_ms[0]), float(r.wf_t_ms[-1]), padding=0)
+                        self.canvas.wf_plot.setYRange(-WAVEFORM_YLIM_ABS_UV, WAVEFORM_YLIM_ABS_UV, padding=0)
+                    finally:
+                        self._suspend_follow_detection = False
             else:
                 self.canvas.wf_curve.setData([], [])
                 self.canvas.wf_upper.setData([], [])
@@ -551,6 +939,10 @@ class PlotScreen(QtWidgets.QWidget):
             self._spike_pending       = False
             self._last_spike_render_t = now
 
+        spike_vr = self.canvas.spike_plot.vb.viewRange()[0]
+        if len(spike_vr) >= 2:
+            self._sync_spike_marker_lines(float(spike_vr[0]), float(spike_vr[1]))
+
         self._render_dur_ms = (time.perf_counter() - t0) * 1000.0
         self._update_fps_label()
 
@@ -558,25 +950,74 @@ class PlotScreen(QtWidgets.QWidget):
 
     def _sync_marker_lines(self, x_start: float, x_end: float):
         """Show InfiniteLines only for markers visible in [x_start, x_end]."""
-        left_i  = bisect.bisect_left(self.marker_times, x_start)
-        right_i = bisect.bisect_right(self.marker_times, x_end)
-        visible = self.marker_times[left_i:right_i]
+        markers = self._sorted_markers()
+        marker_times = [float(m.get("timestamp_s", 0.0)) for m in markers]
+        left_i  = bisect.bisect_left(marker_times, x_start)
+        right_i = bisect.bisect_right(marker_times, x_end)
+        visible = markers[left_i:right_i]
+        visible_key = [(int(m.get("id", 0)), float(m.get("timestamp_s", 0.0)), str(m.get("name", ""))) for m in visible]
 
-        if visible == self.canvas._last_marker_set:
+        if visible_key == self.canvas._last_marker_set:
             return  # nothing changed
 
         self._clear_marker_lines()
-        for t in visible:
+        y_top = float(self.canvas.raw_plot.vb.viewRange()[1][1]) if self.canvas.raw_plot.vb.viewRange() else 1.0
+        for m in visible:
+            t = float(m.get("timestamp_s", 0.0))
+            name = str(m.get("name", ""))
             line = pg.InfiniteLine(pos=t, angle=90, pen=self.canvas._marker_pen)
             self.canvas.raw_plot.addItem(line)
             self.canvas._marker_lines.append(line)
-        self.canvas._last_marker_set = list(visible)
+            if name:
+                label = pg.TextItem(text=name, color=(220, 20, 60), anchor=(0, 1))
+                label.setPos(t, y_top)
+                self.canvas.raw_plot.addItem(label)
+                self.canvas._marker_labels.append(label)
+        self.canvas._last_marker_set = list(visible_key)
+
+    def _sync_spike_marker_lines(self, x_start_min: float, x_end_min: float):
+        markers = self._sorted_markers()
+        marker_times_min = [float(m.get("timestamp_s", 0.0)) / 60.0 for m in markers]
+        left_i = bisect.bisect_left(marker_times_min, x_start_min)
+        right_i = bisect.bisect_right(marker_times_min, x_end_min)
+        visible = markers[left_i:right_i]
+        visible_key = [(int(m.get("id", 0)), float(m.get("timestamp_s", 0.0)), str(m.get("name", ""))) for m in visible]
+
+        if visible_key == self.canvas._last_spike_marker_set:
+            return
+
+        self._clear_spike_marker_lines()
+        y_top = float(self.canvas.spike_plot.vb.viewRange()[1][1]) if self.canvas.spike_plot.vb.viewRange() else 1.0
+        for m in visible:
+            t_min = float(m.get("timestamp_s", 0.0)) / 60.0
+            name = str(m.get("name", ""))
+            line = pg.InfiniteLine(pos=t_min, angle=90, pen=self.canvas._marker_pen)
+            self.canvas.spike_plot.addItem(line)
+            self.canvas._spike_marker_lines.append(line)
+            if name:
+                label = pg.TextItem(text=name, color=(220, 20, 60), anchor=(0, 1))
+                label.setPos(t_min, y_top)
+                self.canvas.spike_plot.addItem(label)
+                self.canvas._spike_marker_labels.append(label)
+        self.canvas._last_spike_marker_set = list(visible_key)
 
     def _clear_marker_lines(self):
         for line in self.canvas._marker_lines:
             self.canvas.raw_plot.removeItem(line)
         self.canvas._marker_lines.clear()
+        for label in self.canvas._marker_labels:
+            self.canvas.raw_plot.removeItem(label)
+        self.canvas._marker_labels.clear()
         self.canvas._last_marker_set = []
+
+    def _clear_spike_marker_lines(self):
+        for line in self.canvas._spike_marker_lines:
+            self.canvas.spike_plot.removeItem(line)
+        self.canvas._spike_marker_lines.clear()
+        for label in self.canvas._spike_marker_labels:
+            self.canvas.spike_plot.removeItem(label)
+        self.canvas._spike_marker_labels.clear()
+        self.canvas._last_spike_marker_set = []
 
     # ── FPS ────────────────────────────────────────────────────────────────────
 

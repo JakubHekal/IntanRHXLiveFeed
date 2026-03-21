@@ -1,8 +1,10 @@
+from pathlib import Path
+
 from PyQt5 import QtWidgets, QtCore
 from workers.processing_worker import PSD_BUFFER_SEC, WAVEFORM_BUFFER_SEC, SPIKE_BIN_SEC
 
 class ConnectDialog(QtWidgets.QDialog):
-    connection_request_signal = QtCore.pyqtSignal(str, int, int, int, str, str, int, int, int, int)
+    connection_request_signal = QtCore.pyqtSignal(str, int, int, int, str, str, str, int, int, int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -59,6 +61,15 @@ class ConnectDialog(QtWidgets.QDialog):
         self.project_name_edit = QtWidgets.QLineEdit("New project")
         project_form.addRow("Project name:", self.project_name_edit)
 
+        self.project_path_edit = QtWidgets.QLineEdit(str((Path.cwd() / "recordings").resolve()))
+        self.project_path_browse_button = QtWidgets.QPushButton("Browse...")
+        self.project_path_browse_button.clicked.connect(self._on_browse_project_path)
+        path_row = QtWidgets.QHBoxLayout()
+        path_row.setContentsMargins(0, 0, 0, 0)
+        path_row.addWidget(self.project_path_edit, 1)
+        path_row.addWidget(self.project_path_browse_button)
+        project_form.addRow("Project path:", path_row)
+
         self.psd_buffer_edit = QtWidgets.QLineEdit(str(int(PSD_BUFFER_SEC)))
         project_form.addRow("PSD buffer duration (s):", self.psd_buffer_edit)
 
@@ -106,6 +117,8 @@ class ConnectDialog(QtWidgets.QDialog):
         self.data_port_edit.setDisabled(busy)
         self.sample_rate_edit.setDisabled(busy)
         self.project_name_edit.setDisabled(busy)
+        self.project_path_edit.setDisabled(busy)
+        self.project_path_browse_button.setDisabled(busy)
         self.psd_buffer_edit.setDisabled(busy)
         self.waveform_buffer_edit.setDisabled(busy)
         self.spike_bin_edit.setDisabled(busy)
@@ -146,6 +159,17 @@ class ConnectDialog(QtWidgets.QDialog):
 
         QtCore.QTimer.singleShot(0, _resize)
 
+    def _on_browse_project_path(self):
+        current = self.project_path_edit.text().strip() or str(Path.cwd())
+        selected = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select project storage path",
+            current,
+            QtWidgets.QFileDialog.ShowDirsOnly | QtWidgets.QFileDialog.DontResolveSymlinks,
+        )
+        if selected:
+            self.project_path_edit.setText(selected)
+
     def _on_connect_clicked(self):
         self.reset_status_message()
 
@@ -176,6 +200,16 @@ class ConnectDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(self, "Invalid Input", "Project name is required.")
             return
 
+        project_path = self.project_path_edit.text().strip()
+        if not project_path:
+            QtWidgets.QMessageBox.critical(self, "Invalid Input", "Project path is required.")
+            return
+        try:
+            Path(project_path).mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Invalid Input", f"Cannot create/access project path:\n{e}")
+            return
+
         try:
             psd_buffer_sec = int(self.psd_buffer_edit.text().strip())
             waveform_buffer_sec = int(self.waveform_buffer_edit.text().strip())
@@ -199,6 +233,7 @@ class ConnectDialog(QtWidgets.QDialog):
             data_port,
             sample_rate,
             project_name,
+            project_path,
             port,
             channel,
             psd_buffer_sec,

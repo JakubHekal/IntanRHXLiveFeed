@@ -1,6 +1,6 @@
 import sys
 import importlib
-import io
+import csv
 import re
 from datetime import datetime
 from pathlib import Path
@@ -39,20 +39,23 @@ PLOT_INTERVAL_MS = int(1000 / PLOT_UPDATE_HZ)
 ACQUIRE_CHUNK_MS = max(20, PLOT_INTERVAL_MS)
 WAITING_CHUNK_THRESHOLD = 10
 NO_DATA_LOSS_TIMEOUT_SEC = 3.0
+RAW_CHUNK_SEC = 300
 
 class RHXWorker(QtCore.QThread):
     connection_request_result_signal = QtCore.pyqtSignal(bool, str)
     data_received_signal = QtCore.pyqtSignal(object)
     acquisition_state_signal = QtCore.pyqtSignal(str)
     marker_added_signal = QtCore.pyqtSignal(float)
+    marker_catalog_signal = QtCore.pyqtSignal(object)
 
-    def __init__(self, host, command_port, data_port, sample_rate, project_name, port="B", channel=0):
+    def __init__(self, host, command_port, data_port, sample_rate, project_name, project_path=None, port="B", channel=0):
         super().__init__()
         self.host = host
         self.command_port = command_port
         self.data_port = data_port
         self.sample_rate = sample_rate
         self.project_name = project_name
+        self.project_path = project_path
         self.port = port
         self.channel = channel
         self.device = None
@@ -60,10 +63,26 @@ class RHXWorker(QtCore.QThread):
         self.last_chunk_signature = None
         self.repeated_chunk_count = 0
         self.csv_file_handle = None
+        self.csv_writer = None
         self.csv_sample_counter = 0
-        self._pending_marker_indices = []
+        self._chunk_samples_written = 0
+        self._chunk_max_samples = max(1, int(round(float(self.sample_rate) * RAW_CHUNK_SEC)))
+        self._chunk_index = 0
+        self._raw_chunk_paths = []
+        self._current_chunk_path = None
+        self._pending_markers = []
+        self._markers = []
+        self._next_marker_id = 1
+        self.project_run_dir = None
+        self.raw_chunks_dir = None
+        self.snapshots_dir = None
+        self.markers_dir = None
+        self.markers_csv_path = None
         self._chunks_since_flush = 0
         self._last_fresh_data_monotonic = 0.0
+        self._io_mutex = QtCore.QMutex()
+        self._marker_cmd_queue = []
+        self._marker_rewrite_pending = False
         
         # State machine integration
         self.state_manager = StateManager.get_instance()
@@ -85,61 +104,219 @@ class RHXWorker(QtCore.QThread):
         """Resume receiving (state machine transition handled by caller)."""
         pass
 
-    def request_marker(self):
-        marker_index = int(self.csv_sample_counter)
-        self._pending_marker_indices.append(marker_index)
-        self.marker_added_signal.emit(marker_index / float(self.sample_rate))
+    def request_marker(self, marker_name: str = ""):
+        with QtCore.QMutexLocker(self._io_mutex):
+            marker_index = int(self.csv_sample_counter)
+            marker_id = int(self._next_marker_id)
+            self._next_marker_id += 1
 
-    def _start_csv_writer(self):
-        safe_project = re.sub(r"[^A-Za-z0-9._-]+", "_", str(self.project_name).strip()) or "project"
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        recordings_dir = Path.cwd() / "recordings"
-        recordings_dir.mkdir(parents=True, exist_ok=True)
-        csv_path = recordings_dir / f"{safe_project}_{timestamp}.csv"
+            safe_name = str(marker_name).strip() or f"Marker {marker_id}"
+            marker_record = {
+                "id": marker_id,
+                "sample_index": marker_index,
+                "timestamp_s": marker_index / float(self.sample_rate),
+                "name": safe_name,
+            }
 
-        self.csv_file_handle = open(csv_path, "w", newline="", encoding="utf-8")
-        self.csv_file_handle.write(f"time_s,ch_{self.channel}_uV,marker\r\n")
-        self.csv_sample_counter = 0
-        self._pending_marker_indices = []
-        self._chunks_since_flush = 0
+            self._markers.append(dict(marker_record))
+            self._pending_markers.append(dict(marker_record))
+            self._write_markers_csv_locked()
 
-    def _append_chunk_to_csv(self, arr: np.ndarray, force_flush: bool = False):
-        if self.csv_file_handle is None or arr.ndim != 2 or arr.shape[0] < 1 or arr.shape[1] < 1:
+            self.marker_added_signal.emit(marker_record["timestamp_s"])
+            self.marker_catalog_signal.emit(self._copy_markers_locked())
+
+    def _copy_markers_locked(self):
+        return [dict(m) for m in self._markers]
+
+    def get_project_paths(self):
+        with QtCore.QMutexLocker(self._io_mutex):
+            return {
+                "run_dir": str(self.project_run_dir) if self.project_run_dir is not None else "",
+                "snapshots_dir": str(self.snapshots_dir) if self.snapshots_dir is not None else "",
+                "markers_csv": str(self.markers_csv_path) if self.markers_csv_path is not None else "",
+                "raw_chunks_dir": str(self.raw_chunks_dir) if self.raw_chunks_dir is not None else "",
+            }
+
+    def get_markers(self):
+        with QtCore.QMutexLocker(self._io_mutex):
+            return self._copy_markers_locked()
+
+    def request_rename_marker(self, marker_id: int, new_name: str):
+        with QtCore.QMutexLocker(self._io_mutex):
+            clean_name = str(new_name).strip()
+            if not clean_name:
+                return False
+            self._marker_cmd_queue.append(("rename", int(marker_id), clean_name))
+            return True
+
+    def request_delete_marker(self, marker_id: int):
+        with QtCore.QMutexLocker(self._io_mutex):
+            self._marker_cmd_queue.append(("delete", int(marker_id), ""))
+            return True
+
+    def _process_marker_commands_locked(self):
+        if not self._marker_cmd_queue:
             return
 
-        n_samples = arr.shape[1]
-        times = (self.csv_sample_counter + np.arange(n_samples, dtype=np.float64)) / float(self.sample_rate)
-        values = arr[0, :].astype(np.float64, copy=False)
-        markers = np.zeros(n_samples, dtype=np.int8)
+        changed = False
+        for cmd in self._marker_cmd_queue:
+            op = cmd[0]
+            marker_id = int(cmd[1])
 
-        chunk_start = int(self.csv_sample_counter)
-        chunk_end = int(self.csv_sample_counter + n_samples)
-        has_marker = False
-        still_pending = []
-        for marker_index in self._pending_marker_indices:
-            if marker_index < chunk_start:
-                continue
-            if marker_index >= chunk_end:
-                still_pending.append(marker_index)
-                continue
-            markers[marker_index - chunk_start] = 1
-            has_marker = True
-        self._pending_marker_indices = still_pending
+            if op == "rename":
+                new_name = str(cmd[2]).strip()
+                if not new_name:
+                    continue
+                updated = False
+                for m in self._markers:
+                    if int(m.get("id", -1)) == marker_id:
+                        m["name"] = new_name
+                        updated = True
+                if updated:
+                    for m in self._pending_markers:
+                        if int(m.get("id", -1)) == marker_id:
+                            m["name"] = new_name
+                    changed = True
 
-        # Build CSV text in memory — avoids Python list boxing from tolist()
-        buf = io.StringIO()
-        for i in range(n_samples):
-            buf.write(f"{times[i]:.6f},{values[i]:.4f},{markers[i]}\r\n")
-        self.csv_file_handle.write(buf.getvalue())
+            elif op == "delete":
+                before = len(self._markers)
+                self._markers = [m for m in self._markers if int(m.get("id", -1)) != marker_id]
+                self._pending_markers = [m for m in self._pending_markers if int(m.get("id", -1)) != marker_id]
+                if len(self._markers) != before:
+                    changed = True
 
-        self._chunks_since_flush += 1
-        if has_marker or force_flush or self._chunks_since_flush >= 5:
-            self.csv_file_handle.flush()
-            self._chunks_since_flush = 0
+        self._marker_cmd_queue.clear()
 
-        self.csv_sample_counter += n_samples
+        if changed:
+            self._write_markers_csv_locked()
+            # Defer expensive chunk rewrites until save/disconnect.
+            self._marker_rewrite_pending = True
+            self.marker_catalog_signal.emit(self._copy_markers_locked())
 
-    def _close_csv_writer(self):
+    def _start_csv_writer(self):
+        with QtCore.QMutexLocker(self._io_mutex):
+            self._start_csv_writer_locked()
+
+    def _start_csv_writer_locked(self):
+        safe_project = re.sub(r"[^A-Za-z0-9._-]+", "_", str(self.project_name).strip()) or "project"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        base_dir = Path(self.project_path).expanduser() if self.project_path else (Path.cwd() / "recordings")
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        self.project_run_dir = base_dir / f"{safe_project}_{timestamp}"
+        self.raw_chunks_dir = self.project_run_dir / "raw_chunks"
+        self.snapshots_dir = self.project_run_dir / "snapshots"
+        self.markers_dir = self.project_run_dir / "markers"
+        self.project_run_dir.mkdir(parents=True, exist_ok=True)
+        self.raw_chunks_dir.mkdir(parents=True, exist_ok=True)
+        self.snapshots_dir.mkdir(parents=True, exist_ok=True)
+        self.markers_dir.mkdir(parents=True, exist_ok=True)
+        self.markers_csv_path = self.project_run_dir / "markers.csv"
+
+        self._chunk_index = 0
+        self._chunk_samples_written = 0
+        self._raw_chunk_paths = []
+        self._current_chunk_path = None
+        self.csv_sample_counter = 0
+        self._pending_markers = []
+        self._markers = []
+        self._next_marker_id = 1
+        self._chunks_since_flush = 0
+        self._marker_rewrite_pending = False
+        self._open_new_chunk_locked()
+        self._write_markers_csv_locked()
+
+    def _open_new_chunk_locked(self):
+        if self.raw_chunks_dir is None:
+            return
+        self._chunk_index += 1
+        path = self.raw_chunks_dir / f"chunk_{self._chunk_index:06d}.csv"
+        self.csv_file_handle = open(path, "w", newline="", encoding="utf-8")
+        self.csv_writer = csv.writer(self.csv_file_handle)
+        self.csv_writer.writerow(["time_s", f"ch_{self.channel}_uV", "marker_id", "marker_name"])
+        self._chunk_samples_written = 0
+        self._current_chunk_path = path
+        self._raw_chunk_paths.append(path)
+
+    def _write_markers_csv_locked(self):
+        if self.markers_csv_path is None:
+            return
+        with open(self.markers_csv_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["id", "timestamp_s", "name"])
+            for m in self._markers:
+                w.writerow([
+                    int(m.get("id", 0)),
+                    f"{float(m.get('timestamp_s', 0.0)):.6f}",
+                    str(m.get("name", "")),
+                ])
+
+    def _append_chunk_to_csv(self, arr: np.ndarray, force_flush: bool = False):
+        if arr.ndim != 2 or arr.shape[0] < 1 or arr.shape[1] < 1:
+            return
+
+        with QtCore.QMutexLocker(self._io_mutex):
+            if self.csv_file_handle is None:
+                return
+
+            values_all = arr[0, :].astype(np.float64, copy=False)
+            n_samples = int(values_all.size)
+            offset = 0
+            has_marker = False
+
+            while offset < n_samples:
+                if self.csv_file_handle is None:
+                    self._open_new_chunk_locked()
+                space = max(0, int(self._chunk_max_samples - self._chunk_samples_written))
+                if space <= 0:
+                    self._rotate_chunk_locked()
+                    continue
+
+                take = min(space, n_samples - offset)
+                seg_start = int(self.csv_sample_counter + offset)
+                seg_end = int(seg_start + take)
+                seg_vals = values_all[offset:offset + take]
+
+                marker_ids = np.zeros(take, dtype=np.int64)
+                marker_names = [""] * take
+                still_pending = []
+                for marker in self._pending_markers:
+                    idx = int(marker.get("sample_index", -1))
+                    if idx < seg_start:
+                        continue
+                    if idx >= seg_end:
+                        still_pending.append(marker)
+                        continue
+                    local = idx - seg_start
+                    marker_ids[local] = int(marker.get("id", 0))
+                    marker_names[local] = str(marker.get("name", ""))
+                    has_marker = True
+                self._pending_markers = still_pending
+
+                for i in range(take):
+                    t_s = (seg_start + i) / float(self.sample_rate)
+                    self.csv_writer.writerow([
+                        f"{t_s:.6f}",
+                        f"{float(seg_vals[i]):.4f}",
+                        int(marker_ids[i]),
+                        marker_names[i],
+                    ])
+
+                self._chunk_samples_written += take
+                offset += take
+
+                if self._chunk_samples_written >= self._chunk_max_samples:
+                    self._rotate_chunk_locked()
+
+            self._chunks_since_flush += 1
+            if has_marker or force_flush or self._chunks_since_flush >= 5:
+                self.csv_file_handle.flush()
+                self._chunks_since_flush = 0
+
+            self.csv_sample_counter += n_samples
+
+    def _rotate_chunk_locked(self):
         if self.csv_file_handle is not None:
             try:
                 self.csv_file_handle.flush()
@@ -147,6 +324,75 @@ class RHXWorker(QtCore.QThread):
             except Exception:
                 pass
         self.csv_file_handle = None
+        self.csv_writer = None
+        self._current_chunk_path = None
+        self._chunk_samples_written = 0
+        self._open_new_chunk_locked()
+
+    def _close_csv_writer(self):
+        with QtCore.QMutexLocker(self._io_mutex):
+            if self.csv_file_handle is not None:
+                try:
+                    self.csv_file_handle.flush()
+                    self.csv_file_handle.close()
+                except Exception:
+                    pass
+            self.csv_file_handle = None
+            self.csv_writer = None
+            self._current_chunk_path = None
+            if self._marker_rewrite_pending:
+                self._rewrite_marker_fields_in_chunks_locked()
+                self._marker_rewrite_pending = False
+            self._write_markers_csv_locked()
+
+    def _rewrite_marker_fields_in_chunks_locked(self):
+        if not self._raw_chunk_paths:
+            return
+
+        lookup = {int(m.get("id", -1)): m for m in self._markers}
+
+        reopen_path = self._current_chunk_path
+        if self.csv_file_handle is not None:
+            try:
+                self.csv_file_handle.flush()
+                self.csv_file_handle.close()
+            except Exception:
+                pass
+            self.csv_file_handle = None
+            self.csv_writer = None
+
+        for path in list(self._raw_chunk_paths):
+            if not Path(path).exists():
+                continue
+            tmp_path = Path(path).with_suffix(".tmp")
+            with open(path, "r", newline="", encoding="utf-8") as src, open(tmp_path, "w", newline="", encoding="utf-8") as dst:
+                reader = csv.DictReader(src)
+                if not reader.fieldnames:
+                    continue
+                writer = csv.DictWriter(dst, fieldnames=reader.fieldnames)
+                writer.writeheader()
+                for row in reader:
+                    try:
+                        marker_id = int(str(row.get("marker_id", "0") or "0"))
+                    except Exception:
+                        marker_id = 0
+
+                    if marker_id > 0:
+                        marker_info = lookup.get(marker_id)
+                        if marker_info is None:
+                            row["marker_id"] = "0"
+                            row["marker_name"] = ""
+                        else:
+                            row["marker_id"] = str(marker_id)
+                            row["marker_name"] = str(marker_info.get("name", ""))
+
+                    writer.writerow(row)
+            tmp_path.replace(path)
+
+        if reopen_path is not None and Path(reopen_path).exists():
+            self.csv_file_handle = open(reopen_path, "a", newline="", encoding="utf-8")
+            self.csv_writer = csv.writer(self.csv_file_handle)
+            self._current_chunk_path = reopen_path
     
     def run(self):
         """Main device worker thread loop."""
@@ -178,6 +424,9 @@ class RHXWorker(QtCore.QThread):
             is_currently_streaming = True  # Started above at device init
             
             while not self.isInterruptionRequested():
+                with QtCore.QMutexLocker(self._io_mutex):
+                    self._process_marker_commands_locked()
+
                 # Check for hard link loss where the device worker thread died
                 if is_currently_streaming and hasattr(self.device, "streaming_thread"):
                     stream_thread = self.device.streaming_thread

@@ -169,11 +169,25 @@ class ProcessingWorker(QtCore.QThread):
                     current_time = t_snap[-1]
                     wf_spike_arr = spike_arr[spike_arr >= current_time - WAVEFORM_BUFFER_SEC]
                     if wf_spike_arr.size >= 1:
-                        pk_indices = np.searchsorted(t_snap, wf_spike_arr).astype(int)
+                        # Map spike timestamps back to nearest sample indices.
+                        pk_indices = np.searchsorted(t_snap, wf_spike_arr, side='left').astype(int)
+                        if pk_indices.size:
+                            pk_indices = np.clip(pk_indices, 0, max(0, stored - 1))
+                            left_idx = np.maximum(pk_indices - 1, 0)
+                            use_left = np.abs(t_snap[left_idx] - wf_spike_arr) <= np.abs(t_snap[pk_indices] - wf_spike_arr)
+                            pk_indices = np.where(use_left, left_idx, pk_indices)
+                        pk_indices = np.unique(pk_indices)
                         pk_indices = pk_indices[(pk_indices > 0) & (pk_indices < stored)]
                         try:
-                            _, W = spike_plot.extract_waveforms(
+                            # Use the same spike band for waveform extraction as detection.
+                            x_hp = spike_count.bandpass_filt(
                                 signal_snap[:stored].astype(float),
+                                fs,
+                                spike_count.HP_SPIKE_BAND,
+                                order=3,
+                            )
+                            _, W = spike_plot.extract_waveforms(
+                                x_hp,
                                 pk_indices,
                                 fs,
                                 pre_ms=spike_plot.PRE_MS,
