@@ -11,7 +11,7 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest]
 
     runs-on: ${{ matrix.os }}
 
@@ -36,8 +36,6 @@ jobs:
             mv dist/app.exe dist/app-windows.exe
           elif [[ "$RUNNER_OS" == "Linux" ]]; then
             mv dist/app dist/app-linux
-          elif [[ "$RUNNER_OS" == "macOS" ]]; then
-            mv dist/app dist/app-macos
           fi
         shell: bash
 
@@ -63,7 +61,7 @@ jobs:
       - name: List downloaded files (Debugging)
         run: ls -R
 
-      - name: Make files executable (Linux/Mac)
+      - name: Make files executable (Linux)
         run: chmod +x app-* || true
 
       - name: Create GitHub Release
@@ -76,4 +74,3 @@ jobs:
           files: |
             app-linux
             app-windows.exe
-            app-macos
