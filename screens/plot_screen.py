@@ -27,7 +27,7 @@ MAX_DISPLAY_POINTS    = 15000
 
 # ── Per-subplot render rate limits ────────────────────────────────────────────
 PLOT_UPDATE_FREQ_HZ = 120
-RAW_RENDER_HZ       = 30
+RAW_RENDER_HZ       = 60
 PSD_RENDER_HZ       = 10
 SPIKE_RENDER_HZ     = 10
 WAVEFORM_YLIM_ABS_UV = 100
@@ -44,7 +44,7 @@ PSD_PLOT_UPDATE_EVERY_N   = 15
 SPIKE_PLOT_UPDATE_EVERY_N = 15  
 
 # ── Pyqtgraph global style ────────────────────────────────────────────────────
-pg.setConfigOption('background', 'transparent')
+pg.setConfigOption('background', 'white')
 pg.setConfigOption('foreground', 'black')
 pg.setConfigOption('antialias', True)
 

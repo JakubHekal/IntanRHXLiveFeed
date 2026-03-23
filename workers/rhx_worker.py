@@ -207,11 +207,9 @@ class RHXWorker(QtCore.QThread):
         self.project_run_dir = base_dir / f"{safe_project}_{timestamp}"
         self.raw_chunks_dir = self.project_run_dir / "raw_chunks"
         self.snapshots_dir = self.project_run_dir / "snapshots"
-        self.markers_dir = self.project_run_dir / "markers"
         self.project_run_dir.mkdir(parents=True, exist_ok=True)
         self.raw_chunks_dir.mkdir(parents=True, exist_ok=True)
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
-        self.markers_dir.mkdir(parents=True, exist_ok=True)
         self.markers_csv_path = self.project_run_dir / "markers.csv"
 
         self._chunk_index = 0
