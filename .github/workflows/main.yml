@@ -6,12 +6,20 @@ on:
       version:
         description: "Enter the version (e.g., v1.0.0)"
         required: true
+      os:
+        description: "Select the target OS"
+        required: true
+
+        options:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
 
 jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ github.event.inputs.os }}
 
     runs-on: ${{ matrix.os }}
 
@@ -63,7 +71,7 @@ jobs:
       - name: List downloaded files (Debugging)
         run: ls -R
 
-      - name: Make files executable (Linux)
+      - name: Make files executable (Linux and macOS)
         run: chmod +x app-* || true
 
       - name: Create GitHub Release
@@ -74,6 +82,6 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            app-linux
             app-windows.exe
+            app-linux
             app-macos
