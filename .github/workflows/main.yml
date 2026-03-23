@@ -11,7 +11,7 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     runs-on: ${{ matrix.os }}
 
@@ -28,7 +28,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Build executable
-        run: pyinstaller --onefile main.py
+        run: pyinstaller --onefile --name app main.py
 
       - name: Rename executable
         run: |
@@ -36,6 +36,8 @@ jobs:
             mv dist/app.exe dist/app-windows.exe
           elif [[ "$RUNNER_OS" == "Linux" ]]; then
             mv dist/app dist/app-linux
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            mv dist/app dist/app-macos
           fi
         shell: bash
 
@@ -74,3 +76,4 @@ jobs:
           files: |
             app-linux
             app-windows.exe
+            app-macos
