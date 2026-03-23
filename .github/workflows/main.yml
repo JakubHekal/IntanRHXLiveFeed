@@ -6,20 +6,37 @@ on:
       version:
         description: "Enter the version (e.g., v1.0.0)"
         required: true
-      os:
-        description: "Select the target OS"
-        required: true
-        type: choice
-        options:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
+      build-windows:
+        description: "Build for Windows"
+        type: boolean
+        required: false
+        default: "true"
+      build-linux:
+        description: "Build for Linux"
+        type: boolean
+        required: false
+        default: "true"
+      build-macos:
+        description: "Build for macOS"
+        type: boolean
+        required: false
+        default: "true"
 
 jobs:
   build:
     strategy:
       matrix:
-        os: ${{ github.event.inputs.os }}
+        os: ${{ 
+          [
+            'windows-latest',
+            'ubuntu-latest',
+            'macos-latest'
+          ] | filter(os => (
+            (os == 'windows-latest' && github.event.inputs.build-windows == 'true') ||
+            (os == 'ubuntu-latest' && github.event.inputs.build-linux == 'true') ||
+            (os == 'macos-latest' && github.event.inputs.build-macos == 'true')
+          ))
+        }}
 
     runs-on: ${{ matrix.os }}
 
