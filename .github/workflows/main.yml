@@ -9,7 +9,7 @@ on:
       os:
         description: "Select the target OS"
         required: true
-
+        type: choice
         options:
           - ubuntu-latest
           - windows-latest
