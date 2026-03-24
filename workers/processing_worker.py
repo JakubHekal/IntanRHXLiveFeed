@@ -5,6 +5,7 @@ import time
 import processing.psd as psd
 import processing.spike_count as spike_count
 import processing.spike_plot as spike_plot
+from telemetry_logger import append_telemetry_line
 
 PSD_BUFFER_SEC = 10
 SPIKE_HISTORY_MIN = 30
@@ -159,12 +160,14 @@ class ProcessingWorker(QtCore.QThread):
         schedule_rate = float(self._telemetry_scheduled) / max(elapsed, 1e-6)
         process_rate = float(self._telemetry_processed) / max(elapsed, 1e-6)
 
-        print(
+        line = (
             "[telemetry][proc] "
             f"window_s={elapsed:.2f} scheduled={int(self._telemetry_scheduled)} processed={int(self._telemetry_processed)} "
             f"overwritten={int(self._telemetry_overwritten)} schedule_hz={schedule_rate:.2f} process_hz={process_rate:.2f} "
             f"avg_proc_ms={avg_proc_ms:.3f}"
         )
+        print(line)
+        append_telemetry_line(line)
 
         self._telemetry_last_emit = now
         self._telemetry_scheduled = 0

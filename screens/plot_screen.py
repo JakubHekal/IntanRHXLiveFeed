@@ -7,6 +7,7 @@ import pyqtgraph as pg
 import pyqtgraph.exporters
 from PyQt5 import QtWidgets, QtCore, QtGui
 import numpy as np
+from telemetry_logger import append_telemetry_line
 
 from workers.processing_worker import (
     ProcessingWorker,
@@ -150,6 +151,8 @@ class PlotScreen(QtWidgets.QWidget):
         self.marker_records   = []      # marker dicts: id,timestamp_s,name,active
         self._marker_times_sorted = []
         self.is_receiving     = False
+        self._receiving_wall_active_sec = 0.0
+        self._receiving_wall_run_start = None
         self.base_connection_details = ""
         self.base_project_line = ""
         self.project_run_dir = ""
@@ -268,13 +271,23 @@ class PlotScreen(QtWidgets.QWidget):
         render_rate = float(self._telemetry_render_calls) / max(elapsed, 1e-6)
         raw_render_rate = float(self._telemetry_raw_renders) / max(elapsed, 1e-6)
         data_to_render_ms = (now - self._telemetry_latest_chunk_received_t) * 1000.0
+        sample_clock_sec = float(self.sample_counter) / max(float(self.sampling_rate), 1e-9)
+        wall_elapsed_sec = float(self._receiving_wall_active_sec)
+        if self._receiving_wall_run_start is not None:
+            wall_elapsed_sec += max(0.0, now - float(self._receiving_wall_run_start))
+        drift_pct = 0.0
+        if wall_elapsed_sec > 0.25:
+            drift_pct = ((sample_clock_sec / wall_elapsed_sec) - 1.0) * 100.0
 
-        print(
+        line = (
             "[telemetry][plot] "
             f"window_s={elapsed:.2f} chunks={int(self._telemetry_chunks)} samples={int(self._telemetry_samples)} "
             f"chunk_hz={chunk_rate:.2f} sample_hz={sample_rate:.1f} render_hz={render_rate:.2f} raw_render_hz={raw_render_rate:.2f} "
-            f"avg_ingest_ms={avg_ingest_ms:.3f} avg_render_ms={avg_render_ms:.3f} data_to_render_ms={data_to_render_ms:.3f}"
+            f"avg_ingest_ms={avg_ingest_ms:.3f} avg_render_ms={avg_render_ms:.3f} data_to_render_ms={data_to_render_ms:.3f} "
+            f"sample_clock_s={sample_clock_sec:.1f} wall_s={wall_elapsed_sec:.1f} drift_pct={drift_pct:.2f}"
         )
+        print(line)
+        append_telemetry_line(line)
 
         self._telemetry_last_emit = now
         self._telemetry_chunks = 0
@@ -557,13 +570,28 @@ class PlotScreen(QtWidgets.QWidget):
         self.project_snapshots_dir = ""
         self.connection_details_label.clear()
         self.set_receiving_state(False)
+        self._receiving_wall_active_sec = 0.0
+        self._receiving_wall_run_start = None
         self._fps_frame_count = 0
         self._fps_last_t      = time.perf_counter()
         self._render_dur_ms   = 0.0
         self.fps_label.setText("FPS: 0.0\nFrame time: 0.0 ms")
 
     def set_receiving_state(self, receiving: bool):
-        self.is_receiving = bool(receiving)
+        receiving = bool(receiving)
+        if receiving == self.is_receiving:
+            return
+
+        now = time.perf_counter()
+        if receiving:
+            if self._receiving_wall_run_start is None:
+                self._receiving_wall_run_start = now
+        else:
+            if self._receiving_wall_run_start is not None:
+                self._receiving_wall_active_sec += max(0.0, now - float(self._receiving_wall_run_start))
+                self._receiving_wall_run_start = None
+
+        self.is_receiving = receiving
 
     def shutdown_workers(self) -> bool:
         if not hasattr(self, '_proc_worker') or self._proc_worker is None:

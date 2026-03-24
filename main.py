@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 from PyQt5 import QtCore, QtWidgets, QtGui
 
@@ -7,6 +8,7 @@ from screens.marker_dialog import MarkerDialog
 from screens.plot_screen import PlotScreen
 from workers.rhx_worker import RHXWorker
 from state_manager import StateManager, AppState
+from telemetry_logger import set_telemetry_file, append_telemetry_line
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -14,6 +16,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rhx_worker = None
         self.connect_dialog = None
         self.marker_dialog = None
+        self._handling_connection_lost = False
+        self._waiting_connection_lost_worker = False
         
         # State machine integration
         self.state_manager = StateManager.get_instance()
@@ -192,7 +196,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_state_changed(self, new_state: AppState):
         """Called when state machine transitions to a new state."""
         self._update_ui_from_state()
-        print(f"[UI] State changed to: {new_state.value}")
+        line = f"[UI] State changed to: {new_state.value}"
+        print(line)
+        append_telemetry_line(line)
+        if new_state == AppState.CONNECTION_LOST and not self._handling_connection_lost:
+            QtCore.QTimer.singleShot(0, self._handle_connection_lost)
 
     def _ensure_connect_dialog(self):
         if self.connect_dialog is None:
@@ -209,6 +217,58 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         self.rhx_worker = None
         return True
+
+    def _handle_connection_lost(self):
+        if self._handling_connection_lost:
+            return
+        self._handling_connection_lost = True
+        if self.state_manager.get_current_state() == AppState.CONNECTION_LOST:
+            self.state_manager.request_disconnect()
+
+        worker = self.rhx_worker
+        if worker is None:
+            self._finalize_connection_lost_cleanup()
+            return
+
+        if self._stop_rhx_worker(timeout_ms=4000):
+            self._finalize_connection_lost_cleanup()
+            return
+
+        if not self._waiting_connection_lost_worker:
+            self._waiting_connection_lost_worker = True
+            try:
+                worker.finished.connect(self._on_connection_lost_worker_finished)
+            except Exception:
+                pass
+
+        QtWidgets.QMessageBox.warning(
+            self,
+            "Connection Lost",
+            "Connection was lost and worker shutdown is still finishing in the background. Cleanup will complete automatically.",
+        )
+
+    def _on_connection_lost_worker_finished(self):
+        self._waiting_connection_lost_worker = False
+        self.rhx_worker = None
+        self._finalize_connection_lost_cleanup()
+
+    def _finalize_connection_lost_cleanup(self):
+        if self.marker_dialog is not None:
+            self.marker_dialog.hide()
+
+        self.plot_screen.clear_project_buffers()
+
+        if self.state_manager.get_current_state() == AppState.DISCONNECTING:
+            self.state_manager.disconnect_complete()
+
+        QtWidgets.QMessageBox.warning(
+            self,
+            "Connection Lost",
+            "The stream connection was lost. The session was safely reset and is ready to reconnect.",
+        )
+        set_telemetry_file("")
+        self.open_connect_dialog()
+        self._handling_connection_lost = False
 
     def open_connect_dialog(self):
         self._ensure_connect_dialog()
@@ -238,6 +298,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Transition to CONNECTING state
         self.state_manager.request_connect()
         self.connect_dialog.set_busy(True)
+        set_telemetry_file("")
         
         if not self._stop_rhx_worker(timeout_ms=3000):
             self.connect_dialog.set_busy(False)
@@ -284,6 +345,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.connect_dialog is not None:
                 self.connect_dialog.accept()
             paths = self.rhx_worker.get_project_paths() if self.rhx_worker is not None else {}
+            run_dir = str(paths.get("run_dir", "") or "")
+            if run_dir:
+                set_telemetry_file(str(Path(run_dir) / "telemetry.txt"))
             self.plot_screen.set_connection_details(
                 host=self.rhx_worker.host,
                 command_port=self.rhx_worker.command_port,
@@ -298,6 +362,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             # Transition back to IDLE state
             self.state_manager.connection_failed()
+            set_telemetry_file("")
             QtWidgets.QMessageBox.critical(
                 self,
                 "Connection Failed",
@@ -430,6 +495,7 @@ class MainWindow(QtWidgets.QMainWindow):
             
             # Complete the disconnect and return to IDLE
             self.state_manager.disconnect_complete()
+            set_telemetry_file("")
             self.open_connect_dialog()
 
     def _on_acquisition_state_changed(self, state):
