@@ -1,5 +1,6 @@
 from PyQt5 import QtCore
 import numpy as np
+import time
 
 import processing.psd as psd
 import processing.spike_count as spike_count
@@ -87,6 +88,39 @@ class ProcessingWorker(QtCore.QThread):
         self._condition = QtCore.QWaitCondition()
         self._running = True
 
+        # Lightweight runtime telemetry for Phase 1 baselining.
+        now = time.perf_counter()
+        self._telemetry_last_emit = now
+        self._telemetry_emit_interval_sec = 5.0
+        self._telemetry_scheduled = 0
+        self._telemetry_overwritten = 0
+        self._telemetry_processed = 0
+        self._telemetry_proc_ms_total = 0.0
+
+    def _emit_telemetry_if_due(self):
+        now = time.perf_counter()
+        elapsed = now - self._telemetry_last_emit
+        if elapsed < self._telemetry_emit_interval_sec:
+            return
+
+        processed = max(1, int(self._telemetry_processed))
+        avg_proc_ms = self._telemetry_proc_ms_total / processed
+        schedule_rate = float(self._telemetry_scheduled) / max(elapsed, 1e-6)
+        process_rate = float(self._telemetry_processed) / max(elapsed, 1e-6)
+
+        print(
+            "[telemetry][proc] "
+            f"window_s={elapsed:.2f} scheduled={int(self._telemetry_scheduled)} processed={int(self._telemetry_processed)} "
+            f"overwritten={int(self._telemetry_overwritten)} schedule_hz={schedule_rate:.2f} process_hz={process_rate:.2f} "
+            f"avg_proc_ms={avg_proc_ms:.3f}"
+        )
+
+        self._telemetry_last_emit = now
+        self._telemetry_scheduled = 0
+        self._telemetry_overwritten = 0
+        self._telemetry_processed = 0
+        self._telemetry_proc_ms_total = 0.0
+
     def stop(self):
         with QtCore.QMutexLocker(self._mutex):
             self._running = False
@@ -95,7 +129,10 @@ class ProcessingWorker(QtCore.QThread):
 
     def schedule(self, signal_snap, t_snap, fs, spike_cache, last_scan, stored, do_psd=True, do_spike=True):
         with QtCore.QMutexLocker(self._mutex):
+            if self._pending is not None:
+                self._telemetry_overwritten += 1
             self._pending = (signal_snap, t_snap, fs, spike_cache, last_scan, stored, bool(do_psd), bool(do_spike))
+            self._telemetry_scheduled += 1
             self._condition.wakeOne()
 
     def run(self):
@@ -109,6 +146,7 @@ class ProcessingWorker(QtCore.QThread):
                 self._pending = None
 
             signal_snap, t_snap, fs, spike_cache, last_scan, stored, do_psd, do_spike = job
+            proc_t0 = time.perf_counter()
             result = _ProcessingResult()
             result.has_psd_update = do_psd
             result.has_spike_update = do_spike
@@ -179,16 +217,24 @@ class ProcessingWorker(QtCore.QThread):
                         pk_indices = np.unique(pk_indices)
                         pk_indices = pk_indices[(pk_indices > 0) & (pk_indices < stored)]
                         try:
-                            # Use the same spike band for waveform extraction as detection.
-                            x_hp = spike_count.bandpass_filt(
-                                signal_snap[:stored].astype(float),
+                            # Filter only the segment needed by waveform extraction.
+                            pre_samp = int(round((spike_plot.PRE_MS / 1000.0) * fs))
+                            post_samp = int(round((spike_plot.POST_MS / 1000.0) * fs))
+                            seg_start = max(0, int(pk_indices[0]) - pre_samp - 2)
+                            seg_end = min(int(stored), int(pk_indices[-1]) + post_samp + 3)
+                            if seg_end - seg_start < 10:
+                                continue
+
+                            x_hp_seg = spike_count.bandpass_filt(
+                                signal_snap[seg_start:seg_end].astype(float),
                                 fs,
                                 spike_count.HP_SPIKE_BAND,
                                 order=3,
                             )
+                            pk_local = pk_indices - seg_start
                             _, W = spike_plot.extract_waveforms(
-                                x_hp,
-                                pk_indices,
+                                x_hp_seg,
+                                pk_local,
                                 fs,
                                 pre_ms=spike_plot.PRE_MS,
                                 post_ms=spike_plot.POST_MS,
@@ -201,3 +247,6 @@ class ProcessingWorker(QtCore.QThread):
                             pass
 
             self.result_ready.emit(result)
+            self._telemetry_processed += 1
+            self._telemetry_proc_ms_total += (time.perf_counter() - proc_t0) * 1000.0
+            self._emit_telemetry_if_due()

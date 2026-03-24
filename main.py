@@ -415,21 +415,29 @@ class MainWindow(QtWidgets.QMainWindow):
         Called when RHXWorker acquisition state changes.
         Maps worker states to FSM transitions.
         """
+        current_state = self.state_manager.get_current_state()
+
         if state == "running":
-            # Data is flowing
-            self.state_manager.data_arrived()
+            # Worker can emit running both on first stream start and after waiting resumes.
+            if current_state == AppState.CONNECTED:
+                self.state_manager.request_stream()
+            elif current_state == AppState.WAITING_FOR_DATA:
+                self.state_manager.data_arrived()
         elif state == "waiting":
             # No data yet, but still trying to stream
-            self.state_manager.no_data_available()
+            if current_state == AppState.STREAMING:
+                self.state_manager.no_data_available()
         elif state == "paused":
             # User paused or naturally paused
-            self.state_manager.user_pause()
+            if current_state in (AppState.STREAMING, AppState.WAITING_FOR_DATA):
+                self.state_manager.user_pause()
         elif state == "stopped":
             # Streaming stopped normally
             pass
         elif state == "connection_lost":
             # Device disconnected unexpectedly
-            self.state_manager.device_disconnected()
+            if current_state in (AppState.STREAMING, AppState.WAITING_FOR_DATA, AppState.PAUSED):
+                self.state_manager.device_disconnected()
 
     def closeEvent(self, event):
         """Ask for confirmation before exiting to prevent accidental closes."""

@@ -28,8 +28,8 @@ MAX_DISPLAY_POINTS    = 15000
 # ── Per-subplot render rate limits ────────────────────────────────────────────
 PLOT_UPDATE_FREQ_HZ = 120
 RAW_RENDER_HZ       = 60
-PSD_RENDER_HZ       = 10
-SPIKE_RENDER_HZ     = 10
+PSD_RENDER_HZ       = 30
+SPIKE_RENDER_HZ     = 30
 WAVEFORM_YLIM_ABS_UV = 100
 SPIKE_SCROLL_WINDOW_MIN = 10.0
 RAW_HISTORY_TARGET_HZ = 100.0
@@ -238,6 +238,49 @@ class PlotScreen(QtWidgets.QWidget):
         self._fps_frame_count = 0
         self._fps_last_t      = time.perf_counter()
         self._render_dur_ms   = 0.0
+
+        # Lightweight runtime telemetry for Phase 1 baselining.
+        now = time.perf_counter()
+        self._telemetry_last_emit = now
+        self._telemetry_emit_interval_sec = 5.0
+        self._telemetry_chunks = 0
+        self._telemetry_samples = 0
+        self._telemetry_render_calls = 0
+        self._telemetry_raw_renders = 0
+        self._telemetry_render_ms_total = 0.0
+        self._telemetry_ingest_ms_total = 0.0
+        self._telemetry_latest_chunk_received_t = now
+
+    def _emit_telemetry_if_due(self):
+        now = time.perf_counter()
+        elapsed = now - self._telemetry_last_emit
+        if elapsed < self._telemetry_emit_interval_sec:
+            return
+
+        render_calls = max(1, int(self._telemetry_render_calls))
+        raw_renders = max(1, int(self._telemetry_raw_renders))
+        avg_render_ms = self._telemetry_render_ms_total / render_calls
+        avg_ingest_ms = self._telemetry_ingest_ms_total / max(1, int(self._telemetry_chunks))
+        chunk_rate = float(self._telemetry_chunks) / max(elapsed, 1e-6)
+        sample_rate = float(self._telemetry_samples) / max(elapsed, 1e-6)
+        render_rate = float(self._telemetry_render_calls) / max(elapsed, 1e-6)
+        raw_render_rate = float(self._telemetry_raw_renders) / max(elapsed, 1e-6)
+        data_to_render_ms = (now - self._telemetry_latest_chunk_received_t) * 1000.0
+
+        print(
+            "[telemetry][plot] "
+            f"window_s={elapsed:.2f} chunks={int(self._telemetry_chunks)} samples={int(self._telemetry_samples)} "
+            f"chunk_hz={chunk_rate:.2f} sample_hz={sample_rate:.1f} render_hz={render_rate:.2f} raw_render_hz={raw_render_rate:.2f} "
+            f"avg_ingest_ms={avg_ingest_ms:.3f} avg_render_ms={avg_render_ms:.3f} data_to_render_ms={data_to_render_ms:.3f}"
+        )
+
+        self._telemetry_last_emit = now
+        self._telemetry_chunks = 0
+        self._telemetry_samples = 0
+        self._telemetry_render_calls = 0
+        self._telemetry_raw_renders = 0
+        self._telemetry_render_ms_total = 0.0
+        self._telemetry_ingest_ms_total = 0.0
 
     def _plot_item_for_key(self, key: str):
         if key == 'raw':
@@ -530,6 +573,7 @@ class PlotScreen(QtWidgets.QWidget):
 
             try:
                 exporter = pg.exporters.ImageExporter(plot_item)
+                exporter.parameters()['width'] = 1920
                 exporter.export(str(out_path))
             except Exception:
                 # Fallback: grab full widget if plot exporter fails.
@@ -702,6 +746,7 @@ class PlotScreen(QtWidgets.QWidget):
     # ── Data ingestion ─────────────────────────────────────────────────────────
 
     def _on_data_received(self, chunk: np.ndarray):
+        ingest_t0 = time.perf_counter()
         if chunk is None:
             return
         arr = np.asarray(chunk)
@@ -719,6 +764,9 @@ class PlotScreen(QtWidgets.QWidget):
         self._ring_write(t_chunk, signal)
         self._append_raw_history(t_chunk, signal)
         self.sample_counter += n_samples
+        self._telemetry_chunks += 1
+        self._telemetry_samples += int(n_samples)
+        self._telemetry_latest_chunk_received_t = time.perf_counter()
 
         # Throttle compute
         self.psd_update_counter       += 1
@@ -755,6 +803,8 @@ class PlotScreen(QtWidgets.QWidget):
                     [], 0, sig_tail.size,
                     do_psd=True, do_spike=False,
                 )
+        self._telemetry_ingest_ms_total += (time.perf_counter() - ingest_t0) * 1000.0
+        self._emit_telemetry_if_due()
 
     def _on_processing_result(self, result):
         self._proc_result = result
@@ -778,9 +828,11 @@ class PlotScreen(QtWidgets.QWidget):
 
         t0 = time.perf_counter()
         now = t0
+        self._telemetry_render_calls += 1
 
         # ── Raw signal @ RAW_RENDER_HZ ─────────────────────────────────────────
         if (now - self._last_raw_render_t) >= 1.0 / RAW_RENDER_HZ:
+            self._telemetry_raw_renders += 1
             x_start = 0.0
             x_end = 0.0
             if self._follow_axes['raw']:
@@ -944,6 +996,8 @@ class PlotScreen(QtWidgets.QWidget):
             self._sync_spike_marker_lines(float(spike_vr[0]), float(spike_vr[1]))
 
         self._render_dur_ms = (time.perf_counter() - t0) * 1000.0
+        self._telemetry_render_ms_total += self._render_dur_ms
+        self._emit_telemetry_if_due()
         self._update_fps_label()
 
     # ── Marker helpers ─────────────────────────────────────────────────────────

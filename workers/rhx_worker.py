@@ -2,6 +2,7 @@ import sys
 import importlib
 import csv
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -40,6 +41,9 @@ ACQUIRE_CHUNK_MS = max(20, PLOT_INTERVAL_MS)
 WAITING_CHUNK_THRESHOLD = 10
 NO_DATA_LOSS_TIMEOUT_SEC = 3.0
 RAW_CHUNK_SEC = 300
+TELEMETRY_EMIT_INTERVAL_SEC = 5.0
+CSV_FLUSH_INTERVAL_SEC = 1.0
+CSV_FILE_BUFFER_BYTES = 1024 * 1024
 
 class RHXWorker(QtCore.QThread):
     connection_request_result_signal = QtCore.pyqtSignal(bool, str)
@@ -79,10 +83,23 @@ class RHXWorker(QtCore.QThread):
         self.markers_dir = None
         self.markers_csv_path = None
         self._chunks_since_flush = 0
+        self._last_csv_flush_t = 0.0
         self._last_fresh_data_monotonic = 0.0
         self._io_mutex = QtCore.QMutex()
         self._marker_cmd_queue = []
         self._marker_rewrite_pending = False
+
+        # Lightweight runtime telemetry for Phase 1 baselining.
+        now = time.perf_counter()
+        self._telemetry_last_emit = now
+        self._telemetry_chunk_count = 0
+        self._telemetry_sample_count = 0
+        self._telemetry_acquire_ms_total = 0.0
+        self._telemetry_csv_ms_total = 0.0
+        self._telemetry_emit_ms_total = 0.0
+        self._telemetry_empty_chunks = 0
+        self._telemetry_repeated_chunks = 0
+        self._telemetry_invalid_chunks = 0
         
         # State machine integration
         self.state_manager = StateManager.get_instance()
@@ -221,6 +238,7 @@ class RHXWorker(QtCore.QThread):
         self._markers = []
         self._next_marker_id = 1
         self._chunks_since_flush = 0
+        self._last_csv_flush_t = time.perf_counter()
         self._marker_rewrite_pending = False
         self._open_new_chunk_locked()
         self._write_markers_csv_locked()
@@ -230,7 +248,13 @@ class RHXWorker(QtCore.QThread):
             return
         self._chunk_index += 1
         path = self.raw_chunks_dir / f"chunk_{self._chunk_index:06d}.csv"
-        self.csv_file_handle = open(path, "w", newline="", encoding="utf-8")
+        self.csv_file_handle = open(
+            path,
+            "w",
+            newline="",
+            encoding="utf-8",
+            buffering=CSV_FILE_BUFFER_BYTES,
+        )
         self.csv_writer = csv.writer(self.csv_file_handle)
         self.csv_writer.writerow(["time_s", f"ch_{self.channel}_uV", "marker_id", "marker_name"])
         self._chunk_samples_written = 0
@@ -262,6 +286,7 @@ class RHXWorker(QtCore.QThread):
             n_samples = int(values_all.size)
             offset = 0
             has_marker = False
+            inv_fs = 1.0 / float(self.sample_rate)
 
             while offset < n_samples:
                 if self.csv_file_handle is None:
@@ -275,6 +300,20 @@ class RHXWorker(QtCore.QThread):
                 seg_start = int(self.csv_sample_counter + offset)
                 seg_end = int(seg_start + take)
                 seg_vals = values_all[offset:offset + take]
+
+                if not self._pending_markers:
+                    rows = [
+                        f"{(seg_start + i) * inv_fs:.6f},{float(seg_vals[i]):.4f},0,\n"
+                        for i in range(take)
+                    ]
+                    self.csv_file_handle.writelines(rows)
+
+                    self._chunk_samples_written += take
+                    offset += take
+
+                    if self._chunk_samples_written >= self._chunk_max_samples:
+                        self._rotate_chunk_locked()
+                    continue
 
                 marker_ids = np.zeros(take, dtype=np.int64)
                 marker_names = [""] * take
@@ -292,14 +331,17 @@ class RHXWorker(QtCore.QThread):
                     has_marker = True
                 self._pending_markers = still_pending
 
-                for i in range(take):
-                    t_s = (seg_start + i) / float(self.sample_rate)
-                    self.csv_writer.writerow([
-                        f"{t_s:.6f}",
+                # Batch CSV writes to reduce Python call overhead in the hot path.
+                rows = [
+                    [
+                        f"{(seg_start + i) * inv_fs:.6f}",
                         f"{float(seg_vals[i]):.4f}",
                         int(marker_ids[i]),
                         marker_names[i],
-                    ])
+                    ]
+                    for i in range(take)
+                ]
+                self.csv_writer.writerows(rows)
 
                 self._chunk_samples_written += take
                 offset += take
@@ -308,11 +350,43 @@ class RHXWorker(QtCore.QThread):
                     self._rotate_chunk_locked()
 
             self._chunks_since_flush += 1
-            if has_marker or force_flush or self._chunks_since_flush >= 5:
+            now = time.perf_counter()
+            if has_marker or force_flush or (now - self._last_csv_flush_t) >= CSV_FLUSH_INTERVAL_SEC:
                 self.csv_file_handle.flush()
                 self._chunks_since_flush = 0
+                self._last_csv_flush_t = now
 
             self.csv_sample_counter += n_samples
+
+    def _emit_telemetry_if_due(self):
+        now = time.perf_counter()
+        elapsed = now - self._telemetry_last_emit
+        if elapsed < TELEMETRY_EMIT_INTERVAL_SEC:
+            return
+
+        chunks = max(1, int(self._telemetry_chunk_count))
+        samples = int(self._telemetry_sample_count)
+        rate_hz = float(samples) / max(elapsed, 1e-6)
+        avg_acquire_ms = self._telemetry_acquire_ms_total / chunks
+        avg_csv_ms = self._telemetry_csv_ms_total / chunks
+        avg_emit_ms = self._telemetry_emit_ms_total / chunks
+
+        print(
+            "[telemetry][rhx] "
+            f"window_s={elapsed:.2f} chunks={chunks} samples={samples} rate_hz={rate_hz:.1f} "
+            f"avg_acquire_ms={avg_acquire_ms:.3f} avg_csv_ms={avg_csv_ms:.3f} avg_emit_ms={avg_emit_ms:.3f} "
+            f"empty={int(self._telemetry_empty_chunks)} repeated={int(self._telemetry_repeated_chunks)} invalid={int(self._telemetry_invalid_chunks)}"
+        )
+
+        self._telemetry_last_emit = now
+        self._telemetry_chunk_count = 0
+        self._telemetry_sample_count = 0
+        self._telemetry_acquire_ms_total = 0.0
+        self._telemetry_csv_ms_total = 0.0
+        self._telemetry_emit_ms_total = 0.0
+        self._telemetry_empty_chunks = 0
+        self._telemetry_repeated_chunks = 0
+        self._telemetry_invalid_chunks = 0
 
     def _rotate_chunk_locked(self):
         if self.csv_file_handle is not None:
@@ -326,6 +400,7 @@ class RHXWorker(QtCore.QThread):
         self._current_chunk_path = None
         self._chunk_samples_written = 0
         self._open_new_chunk_locked()
+        self._last_csv_flush_t = time.perf_counter()
 
     def _close_csv_writer(self):
         with QtCore.QMutexLocker(self._io_mutex):
@@ -470,11 +545,14 @@ class RHXWorker(QtCore.QThread):
                 
                 # Try to get data
                 try:
+                    acq_t0 = time.perf_counter()
                     data = self.device.get_latest_window(duration_ms=ACQUIRE_CHUNK_MS)
+                    self._telemetry_acquire_ms_total += (time.perf_counter() - acq_t0) * 1000.0
                     
                     # Check for no data or invalid data
                     if data is None or not hasattr(data, 'shape') or len(data.shape) != 2 or data.shape[1] < 1:
                         self.empty_chunk_count += 1
+                        self._telemetry_empty_chunks += 1
                         self.last_chunk_signature = None
                         self.repeated_chunk_count = 0
                         
@@ -493,6 +571,11 @@ class RHXWorker(QtCore.QThread):
                     
                     # Validate data
                     arr = np.asarray(data)
+                    if arr.ndim != 2 or arr.shape[0] < 1 or arr.shape[1] < 1:
+                        self._telemetry_invalid_chunks += 1
+                        self.msleep(PLOT_INTERVAL_MS)
+                        self._emit_telemetry_if_due()
+                        continue
                     signature = (
                         arr.shape[0],
                         arr.shape[1],
@@ -504,6 +587,7 @@ class RHXWorker(QtCore.QThread):
                     # Check for repeated chunks (stale data)
                     if signature == self.last_chunk_signature:
                         self.repeated_chunk_count += 1
+                        self._telemetry_repeated_chunks += 1
                         if self.repeated_chunk_count > 5:
                             self.empty_chunk_count += 1
                             
@@ -531,8 +615,17 @@ class RHXWorker(QtCore.QThread):
                         self.acquisition_state_signal.emit("running")
                     
                     # Process the data
+                    csv_t0 = time.perf_counter()
                     self._append_chunk_to_csv(arr)
+                    self._telemetry_csv_ms_total += (time.perf_counter() - csv_t0) * 1000.0
+
+                    emit_t0 = time.perf_counter()
                     self.data_received_signal.emit(arr)
+                    self._telemetry_emit_ms_total += (time.perf_counter() - emit_t0) * 1000.0
+
+                    self._telemetry_chunk_count += 1
+                    self._telemetry_sample_count += int(arr.shape[1])
+                    self._emit_telemetry_if_due()
                     
                     self.msleep(PLOT_INTERVAL_MS)
                 

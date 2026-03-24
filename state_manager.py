@@ -148,14 +148,27 @@ class StateManager:
             if trigger_method is None:
                 print(f"[STATE] Invalid trigger: {trigger}")
                 return False
+
+            before_state = self._state_machine.get_current_state()
+
+            may_trigger_method = getattr(self._state_machine, f"may_{trigger}", None)
+            if callable(may_trigger_method) and not may_trigger_method():
+                if before_state == expected_state:
+                    return True
+                print(f"[STATE] Transition {trigger} ignored - current={before_state.value}, expected={expected_state.value}")
+                return False
             
             # Execute the transition
             trigger_method()
+            after_state = self._state_machine.get_current_state()
             
             # Verify we're in the expected state
-            if self._state_machine.get_current_state() != expected_state:
+            if after_state != expected_state:
                 print(f"[STATE] Transition {trigger} failed - not in {expected_state.value}")
                 return False
+
+            if after_state == before_state:
+                return True
             
             print(f"[STATE] Transitioned to {expected_state.value}")
             return True
