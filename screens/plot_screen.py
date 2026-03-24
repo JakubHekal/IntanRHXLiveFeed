@@ -12,6 +12,7 @@ from workers.processing_worker import (
     ProcessingWorker,
     configure_processing_windows,
     SPIKE_INCREMENTAL_MIN_SAMPLES,
+    SPIKE_OVERLAP_SAMPLES,
     PSD_BUFFER_SEC,
     WAVEFORM_BUFFER_SEC,
     SPIKE_BIN_SEC,
@@ -156,6 +157,7 @@ class PlotScreen(QtWidgets.QWidget):
 
         self._spike_times_cache      = []
         self._last_spike_scan_sample = 0  # absolute sample count (never resets)
+        self._last_proc_abs_start    = 0
         self._proc_result            = None
         self._psd_buffer_sec         = int(PSD_BUFFER_SEC)
         self._waveform_buffer_sec    = int(WAVEFORM_BUFFER_SEC)
@@ -518,6 +520,7 @@ class PlotScreen(QtWidgets.QWidget):
         self._marker_times_sorted    = []
         self._spike_times_cache      = []
         self._last_spike_scan_sample = 0
+        self._last_proc_abs_start    = 0
         self._proc_result            = None
         self._latest_psd_f           = None
         self._latest_psd_db          = None
@@ -561,6 +564,11 @@ class PlotScreen(QtWidgets.QWidget):
 
     def set_receiving_state(self, receiving: bool):
         self.is_receiving = bool(receiving)
+
+    def shutdown_workers(self) -> bool:
+        if not hasattr(self, '_proc_worker') or self._proc_worker is None:
+            return True
+        return self._proc_worker.stop(timeout_ms=4000)
 
     def _save_plot_snapshot_png(self, plot_item, prefix: str) -> bool:
         if not self.project_snapshots_dir:
@@ -782,21 +790,29 @@ class PlotScreen(QtWidgets.QWidget):
         should_run_psd   = do_psd
 
         if should_run_psd or should_run_spike:
-            t_lin, sig_lin = self._ring_read()
-            # absolute sample index of the first element in the linear window
-            abs_start = self._total - t_lin.size
-
             if should_run_spike:
+                stored = min(self._total, self._cap)
+                psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec))) if should_run_psd else 0
+                wf_n = max(8, int(round(self.sampling_rate * max(1, self._waveform_buffer_sec + 1))))
+                spike_n = int(max(SPIKE_INCREMENTAL_MIN_SAMPLES, gap) + SPIKE_OVERLAP_SAMPLES)
+                tail_n = min(stored, max(psd_n, wf_n, spike_n))
+
+                t_tail, sig_tail = self._ring_read_tail(tail_n)
+                abs_start = self._total - t_tail.size
                 rel_last = max(0, int(self._last_spike_scan_sample - abs_start))
+                rel_last = min(rel_last, t_tail.size)
+                self._last_proc_abs_start = abs_start
+
                 self._proc_worker.schedule(
-                    sig_lin.copy(), t_lin.copy(), self.sampling_rate,
+                    sig_tail.copy(), t_tail.copy(), self.sampling_rate,
                     list(self._spike_times_cache),
-                    rel_last, t_lin.size,
+                    rel_last, t_tail.size,
                     do_psd=should_run_psd, do_spike=True,
                 )
             else:
                 psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec)))
                 t_tail, sig_tail = self._ring_read_tail(psd_n)
+                self._last_proc_abs_start = self._total - t_tail.size
                 self._proc_worker.schedule(
                     sig_tail.copy(), t_tail.copy(),
                     self.sampling_rate,
@@ -811,10 +827,8 @@ class PlotScreen(QtWidgets.QWidget):
         if result.spike_times_cache is not None:
             self._spike_times_cache = result.spike_times_cache
         if result.last_scan_sample is not None:
-            # Convert relative index back to absolute
-            t_lin_size = min(self._total, self._cap)
-            abs_start  = self._total - t_lin_size
-            self._last_spike_scan_sample = abs_start + result.last_scan_sample
+            # Convert relative scan index back to absolute using the scheduled tail window.
+            self._last_spike_scan_sample = self._last_proc_abs_start + int(result.last_scan_sample)
         if getattr(result, 'has_psd_update', False) and result.psd_f is not None:
             self._psd_pending = True
         if getattr(result, 'has_spike_update', False) and result.spike_minute_idx is not None:

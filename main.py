@@ -199,6 +199,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.connect_dialog = ConnectDialog(self)
             self.connect_dialog.connection_request_signal.connect(self._on_connection_requested)
 
+    def _stop_rhx_worker(self, timeout_ms: int = 3000) -> bool:
+        if self.rhx_worker is None:
+            return True
+        worker = self.rhx_worker
+        stopped = worker.stop(timeout_ms=timeout_ms)
+        if not stopped:
+            print("[UI] RHX worker did not stop cleanly")
+            return False
+        self.rhx_worker = None
+        return True
+
     def open_connect_dialog(self):
         self._ensure_connect_dialog()
         if self.connect_dialog.isVisible():
@@ -228,8 +239,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.state_manager.request_connect()
         self.connect_dialog.set_busy(True)
         
-        if self.rhx_worker is not None:
-            self.rhx_worker.stop()
+        if not self._stop_rhx_worker(timeout_ms=3000):
+            self.connect_dialog.set_busy(False)
+            self.state_manager.connection_failed()
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Worker Busy",
+                "The previous stream worker is still shutting down. Please wait a moment and try again.",
+            )
+            return
 
         self.plot_screen.configure_processing_settings(
             psd_buffer_sec=psd_buffer_sec,
@@ -397,9 +415,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.state_manager.request_disconnect()
             
             # Perform cleanup
-            if self.rhx_worker is not None:
-                self.rhx_worker.stop()
-                self.rhx_worker = None
+            if not self._stop_rhx_worker(timeout_ms=4000):
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Disconnect Incomplete",
+                    "Worker did not stop cleanly yet. Please try disconnect again.",
+                )
+                return
 
             if self.marker_dialog is not None:
                 self.marker_dialog.hide()
@@ -452,9 +474,23 @@ class MainWindow(QtWidgets.QMainWindow):
             event.ignore()
             return
 
-        if self.rhx_worker is not None:
-            self.rhx_worker.stop()
-            self.rhx_worker = None
+        if not self._stop_rhx_worker(timeout_ms=4000):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Close Blocked",
+                "Background worker is still shutting down. Please try closing again in a moment.",
+            )
+            event.ignore()
+            return
+
+        if not self.plot_screen.shutdown_workers():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Close Blocked",
+                "Processing worker is still shutting down. Please try closing again in a moment.",
+            )
+            event.ignore()
+            return
 
         if self.marker_dialog is not None:
             self.marker_dialog.hide()

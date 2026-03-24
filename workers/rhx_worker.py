@@ -108,10 +108,14 @@ class RHXWorker(QtCore.QThread):
     def __del__(self):
         self.stop()
 
-    def stop(self):
-        self._desired_streaming = False
+    def stop(self, timeout_ms: int = 3000) -> bool:
+        if not self.isRunning():
+            return True
         self.requestInterruption()
-        self.wait(1000)
+        if self.wait(max(0, int(timeout_ms))):
+            return True
+        print(f"[WORKER] RHXWorker stop timeout after {int(timeout_ms)} ms")
+        return False
 
     def pause_receiving(self):
         """Pause receiving (state machine transition handled by caller)."""
@@ -122,6 +126,9 @@ class RHXWorker(QtCore.QThread):
         pass
 
     def request_marker(self, marker_name: str = ""):
+        markers_snapshot = None
+        markers_csv_path = None
+        marker_ts = 0.0
         with QtCore.QMutexLocker(self._io_mutex):
             marker_index = int(self.csv_sample_counter)
             marker_id = int(self._next_marker_id)
@@ -137,10 +144,13 @@ class RHXWorker(QtCore.QThread):
 
             self._markers.append(dict(marker_record))
             self._pending_markers.append(dict(marker_record))
-            self._write_markers_csv_locked()
+            markers_snapshot = self._copy_markers_locked()
+            markers_csv_path = self.markers_csv_path
+            marker_ts = float(marker_record["timestamp_s"])
 
-            self.marker_added_signal.emit(marker_record["timestamp_s"])
-            self.marker_catalog_signal.emit(self._copy_markers_locked())
+        self._write_markers_csv(markers_csv_path, markers_snapshot)
+        self.marker_added_signal.emit(marker_ts)
+        self.marker_catalog_signal.emit(markers_snapshot)
 
     def _copy_markers_locked(self):
         return [dict(m) for m in self._markers]
@@ -173,7 +183,7 @@ class RHXWorker(QtCore.QThread):
 
     def _process_marker_commands_locked(self):
         if not self._marker_cmd_queue:
-            return
+            return None, None
 
         changed = False
         for cmd in self._marker_cmd_queue:
@@ -205,10 +215,11 @@ class RHXWorker(QtCore.QThread):
         self._marker_cmd_queue.clear()
 
         if changed:
-            self._write_markers_csv_locked()
             # Defer expensive chunk rewrites until save/disconnect.
             self._marker_rewrite_pending = True
-            self.marker_catalog_signal.emit(self._copy_markers_locked())
+            return self._copy_markers_locked(), self.markers_csv_path
+
+        return None, None
 
     def _start_csv_writer(self):
         with QtCore.QMutexLocker(self._io_mutex):
@@ -264,10 +275,16 @@ class RHXWorker(QtCore.QThread):
     def _write_markers_csv_locked(self):
         if self.markers_csv_path is None:
             return
-        with open(self.markers_csv_path, "w", newline="", encoding="utf-8") as f:
+        self._write_markers_csv(self.markers_csv_path, self._markers)
+
+    def _write_markers_csv(self, csv_path, markers_snapshot):
+        if csv_path is None:
+            return
+        safe_markers = [dict(m) for m in (markers_snapshot or [])]
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["id", "timestamp_s", "name"])
-            for m in self._markers:
+            for m in safe_markers:
                 w.writerow([
                     int(m.get("id", 0)),
                     f"{float(m.get('timestamp_s', 0.0)):.6f}",
@@ -497,8 +514,14 @@ class RHXWorker(QtCore.QThread):
             is_currently_streaming = True  # Started above at device init
             
             while not self.isInterruptionRequested():
+                marker_catalog = None
+                marker_csv_path = None
                 with QtCore.QMutexLocker(self._io_mutex):
-                    self._process_marker_commands_locked()
+                    marker_catalog, marker_csv_path = self._process_marker_commands_locked()
+
+                if marker_catalog is not None:
+                    self._write_markers_csv(marker_csv_path, marker_catalog)
+                    self.marker_catalog_signal.emit(marker_catalog)
 
                 # Check for hard link loss where the device worker thread died
                 if is_currently_streaming and hasattr(self.device, "streaming_thread"):

@@ -97,6 +97,57 @@ class ProcessingWorker(QtCore.QThread):
         self._telemetry_processed = 0
         self._telemetry_proc_ms_total = 0.0
 
+        # Incremental histogram cache to avoid full recompute every cycle.
+        self._hist_counts = np.zeros(0, dtype=np.int64)
+        self._hist_bin_sec = float(SPIKE_BIN_SEC)
+        self._hist_spike_count = 0
+        self._hist_last_t = 0.0
+
+    def _reset_hist_cache(self):
+        self._hist_counts = np.zeros(0, dtype=np.int64)
+        self._hist_bin_sec = float(SPIKE_BIN_SEC)
+        self._hist_spike_count = 0
+        self._hist_last_t = 0.0
+
+    def _update_incremental_histogram(self, spike_times, last_time_s):
+        bin_sec = float(SPIKE_BIN_SEC)
+        total_bins = max(1, int(np.floor(float(last_time_s) / bin_sec)) + 1)
+        cur_count = len(spike_times)
+
+        need_reset = (
+            self._hist_counts.size == 0
+            or not np.isclose(self._hist_bin_sec, bin_sec)
+            or cur_count < self._hist_spike_count
+            or float(last_time_s) + 1e-9 < float(self._hist_last_t)
+        )
+
+        if need_reset:
+            self._hist_counts = np.zeros(total_bins, dtype=np.int64)
+            if cur_count:
+                spike_arr = np.asarray(spike_times, dtype=np.float64)
+                bins = np.floor(spike_arr / bin_sec).astype(np.int64)
+                bins = bins[(bins >= 0) & (bins < total_bins)]
+                if bins.size:
+                    self._hist_counts += np.bincount(bins, minlength=total_bins).astype(np.int64)
+        else:
+            if total_bins > self._hist_counts.size:
+                pad_n = total_bins - self._hist_counts.size
+                self._hist_counts = np.pad(self._hist_counts, (0, pad_n), mode='constant')
+
+            if cur_count > self._hist_spike_count:
+                new_spikes = np.asarray(spike_times[self._hist_spike_count:], dtype=np.float64)
+                bins = np.floor(new_spikes / bin_sec).astype(np.int64)
+                bins = bins[(bins >= 0) & (bins < self._hist_counts.size)]
+                if bins.size:
+                    self._hist_counts += np.bincount(bins, minlength=self._hist_counts.size).astype(np.int64)
+
+        self._hist_bin_sec = bin_sec
+        self._hist_spike_count = cur_count
+        self._hist_last_t = float(last_time_s)
+
+        minute_idx = (np.arange(self._hist_counts.size, dtype=np.float64) * bin_sec) / 60.0
+        return minute_idx, self._hist_counts.copy()
+
     def _emit_telemetry_if_due(self):
         now = time.perf_counter()
         elapsed = now - self._telemetry_last_emit
@@ -121,11 +172,17 @@ class ProcessingWorker(QtCore.QThread):
         self._telemetry_processed = 0
         self._telemetry_proc_ms_total = 0.0
 
-    def stop(self):
+    def stop(self, timeout_ms: int = 3000) -> bool:
+        if not self.isRunning():
+            return True
         with QtCore.QMutexLocker(self._mutex):
             self._running = False
+            self._pending = None
             self._condition.wakeAll()
-        self.wait(2000)
+        if self.wait(max(0, int(timeout_ms))):
+            return True
+        print(f"[WORKER] ProcessingWorker stop timeout after {int(timeout_ms)} ms")
+        return False
 
     def schedule(self, signal_snap, t_snap, fs, spike_cache, last_scan, stored, do_psd=True, do_spike=True):
         with QtCore.QMutexLocker(self._mutex):
@@ -169,6 +226,8 @@ class ProcessingWorker(QtCore.QThread):
             # Incremental spike detection
             if do_spike:
                 new_spike_times = list(spike_cache)
+                if not new_spike_times:
+                    self._reset_hist_cache()
                 if stored > last_scan + SPIKE_INCREMENTAL_MIN_SAMPLES:
                     overlap = SPIKE_OVERLAP_SAMPLES
                     scan_start = max(0, last_scan - overlap)
@@ -189,17 +248,10 @@ class ProcessingWorker(QtCore.QThread):
                 result.spike_times_cache = new_spike_times
                 result.last_scan_sample = stored
 
-                # Spike count histogram — spans entire session (t=0 to now)
                 spike_arr = np.array(new_spike_times, dtype=float)
                 if t_snap.size:
-                    history_start_t = 0.0
-                    first_bin = 0
-                    last_bin = int(np.floor(t_snap[-1] / SPIKE_BIN_SEC))
-                    bin_edges = np.arange(first_bin, last_bin + 2, dtype=float) * SPIKE_BIN_SEC
-                    if bin_edges.size < 2:
-                        bin_edges = np.array([history_start_t, history_start_t + SPIKE_BIN_SEC])
-                    counts, edges = np.histogram(spike_arr, bins=bin_edges)
-                    result.spike_minute_idx = edges[:-1] / 60.0
+                    minute_idx, counts = self._update_incremental_histogram(new_spike_times, float(t_snap[-1]))
+                    result.spike_minute_idx = minute_idx
                     result.spike_counts = counts
 
                 # Waveform mean+-SEM — use only spikes in the last WAVEFORM_BUFFER_SEC to ensure stationarity of waveforms
@@ -222,27 +274,25 @@ class ProcessingWorker(QtCore.QThread):
                             post_samp = int(round((spike_plot.POST_MS / 1000.0) * fs))
                             seg_start = max(0, int(pk_indices[0]) - pre_samp - 2)
                             seg_end = min(int(stored), int(pk_indices[-1]) + post_samp + 3)
-                            if seg_end - seg_start < 10:
-                                continue
-
-                            x_hp_seg = spike_count.bandpass_filt(
-                                signal_snap[seg_start:seg_end].astype(float),
-                                fs,
-                                spike_count.HP_SPIKE_BAND,
-                                order=3,
-                            )
-                            pk_local = pk_indices - seg_start
-                            _, W = spike_plot.extract_waveforms(
-                                x_hp_seg,
-                                pk_local,
-                                fs,
-                                pre_ms=spike_plot.PRE_MS,
-                                post_ms=spike_plot.POST_MS,
-                            )
-                            if W.shape[0] >= 1:
-                                result.wf_t_ms = (np.arange(W.shape[1], dtype=np.float64) / fs) * 1000.0 - spike_plot.PRE_MS
-                                result.wf_mu  = W.mean(axis=0)
-                                result.wf_sem = W.std(axis=0) / max(np.sqrt(W.shape[0]), 1)
+                            if seg_end - seg_start >= 10:
+                                x_hp_seg = spike_count.bandpass_filt(
+                                    signal_snap[seg_start:seg_end].astype(float),
+                                    fs,
+                                    spike_count.HP_SPIKE_BAND,
+                                    order=3,
+                                )
+                                pk_local = pk_indices - seg_start
+                                _, W = spike_plot.extract_waveforms(
+                                    x_hp_seg,
+                                    pk_local,
+                                    fs,
+                                    pre_ms=spike_plot.PRE_MS,
+                                    post_ms=spike_plot.POST_MS,
+                                )
+                                if W.shape[0] >= 1:
+                                    result.wf_t_ms = (np.arange(W.shape[1], dtype=np.float64) / fs) * 1000.0 - spike_plot.PRE_MS
+                                    result.wf_mu  = W.mean(axis=0)
+                                    result.wf_sem = W.std(axis=0) / max(np.sqrt(W.shape[0]), 1)
                         except Exception:
                             pass
 
