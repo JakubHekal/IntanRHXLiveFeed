@@ -103,12 +103,14 @@ class ProcessingWorker(QtCore.QThread):
         self._hist_bin_sec = float(SPIKE_BIN_SEC)
         self._hist_spike_count = 0
         self._hist_last_t = 0.0
+        self._hist_minute_idx_cache = None  # Cache minute index array to avoid recomputation
 
     def _reset_hist_cache(self):
         self._hist_counts = np.zeros(0, dtype=np.int64)
         self._hist_bin_sec = float(SPIKE_BIN_SEC)
         self._hist_spike_count = 0
         self._hist_last_t = 0.0
+        self._hist_minute_idx_cache = None
 
     def _update_incremental_histogram(self, spike_times, last_time_s):
         bin_sec = float(SPIKE_BIN_SEC)
@@ -121,6 +123,9 @@ class ProcessingWorker(QtCore.QThread):
             or cur_count < self._hist_spike_count
             or float(last_time_s) + 1e-9 < float(self._hist_last_t)
         )
+
+        if need_reset:
+            self._hist_minute_idx_cache = None  # Invalidate cache when resetting
 
         if need_reset:
             self._hist_counts = np.zeros(total_bins, dtype=np.int64)
@@ -146,8 +151,11 @@ class ProcessingWorker(QtCore.QThread):
         self._hist_spike_count = cur_count
         self._hist_last_t = float(last_time_s)
 
-        minute_idx = (np.arange(self._hist_counts.size, dtype=np.float64) * bin_sec) / 60.0
-        return minute_idx, self._hist_counts.copy()
+        # Only recompute minute_idx if array size changed
+        if self._hist_minute_idx_cache is None or self._hist_minute_idx_cache.size != self._hist_counts.size:
+            self._hist_minute_idx_cache = (np.arange(self._hist_counts.size, dtype=np.float64) * bin_sec) / 60.0
+        
+        return self._hist_minute_idx_cache, self._hist_counts.copy()
 
     def _emit_telemetry_if_due(self):
         now = time.perf_counter()
