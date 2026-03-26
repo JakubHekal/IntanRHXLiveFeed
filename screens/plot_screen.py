@@ -232,6 +232,7 @@ class PlotScreen(QtWidgets.QWidget):
 
         self._connect_plot_range_signals()
         self._install_plot_follow_context_actions()
+        self._install_plot_bin_window_size_context_actions()
 
         self._update_raw_history_stride()
 
@@ -377,7 +378,7 @@ class PlotScreen(QtWidgets.QWidget):
                 vb.sigRangeChanged.connect(lambda *_args, k=key: self._on_manual_plot_range_change(k))
 
     def _install_plot_follow_context_actions(self):
-        for key in ('raw', 'psd', 'spike', 'wf'):
+        for key in ('raw', 'spike'):
             vb = self._plot_item_for_key(key).vb
             menu = getattr(vb, 'menu', None)
             if menu is None:
@@ -389,6 +390,47 @@ class PlotScreen(QtWidgets.QWidget):
             action.toggled.connect(lambda checked, k=key: self.set_plot_auto_follow(k, checked))
             menu.addAction(action)
             self._follow_menu_actions[key] = action
+
+    def _install_plot_bin_window_size_context_actions(self):
+        for key in ('psd', 'spike', 'wf'):
+            vb = self._plot_item_for_key(key).vb
+            menu = getattr(vb, 'menu', None)
+            if menu is None:
+                continue
+            action = QtWidgets.QAction("Configure bin size..." if key == 'spike' else "Configure window size...", self)
+            action.triggered.connect(lambda _, k=key: self._on_bin_window_size_config_requested(k))
+            menu.addAction(action)
+
+    def _on_bin_window_size_config_requested(self, key: str):
+        if key == 'psd':
+            current_sec = self._psd_buffer_sec
+            title = "Configure PSD window size"
+            label = "PSD buffer length (seconds):"
+        elif key == 'spike':
+            current_sec = self._spike_bin_sec
+            title = "Configure spike count bin size"
+            label = "Spike count bin size (seconds):"
+        elif key == 'wf':
+            current_sec = self._waveform_buffer_sec
+            title = "Configure waveform window size"
+            label = "Waveform buffer length (seconds):"
+        else:
+            return
+
+        sec, ok = QtWidgets.QInputDialog.getInt(self, title, label, value=int(current_sec), min=1, max=3600)
+        if not ok:
+            return
+        
+        # Apply the change to the appropriate parameter
+        psd_buffer_sec = sec if key == 'psd' else self._psd_buffer_sec
+        waveform_buffer_sec = sec if key == 'wf' else self._waveform_buffer_sec
+        spike_bin_sec = sec if key == 'spike' else self._spike_bin_sec
+        
+        self.configure_processing_settings(
+            psd_buffer_sec=psd_buffer_sec,
+            waveform_buffer_sec=waveform_buffer_sec,
+            spike_bin_sec=spike_bin_sec,
+        )
 
     def _set_follow_menu_action_state(self, key: str, enabled: bool):
         action = self._follow_menu_actions.get(key)
@@ -1065,7 +1107,7 @@ class PlotScreen(QtWidgets.QWidget):
             self.canvas.raw_plot.addItem(line)
             self.canvas._marker_lines.append(line)
             if name:
-                label = pg.TextItem(text=name, color=(220, 20, 60), anchor=(0, 1))
+                label = pg.TextItem(text=name, color=(220, 20, 60), anchor=(0, 0))
                 label.setPos(t, y_top)
                 self.canvas.raw_plot.addItem(label)
                 self.canvas._marker_labels.append(label)
@@ -1091,7 +1133,7 @@ class PlotScreen(QtWidgets.QWidget):
             self.canvas.spike_plot.addItem(line)
             self.canvas._spike_marker_lines.append(line)
             if name:
-                label = pg.TextItem(text=name, color=(220, 20, 60), anchor=(0, 1))
+                label = pg.TextItem(text=name, color=(220, 20, 60), anchor=(0, 0))
                 label.setPos(t_min, y_top)
                 self.canvas.spike_plot.addItem(label)
                 self.canvas._spike_marker_labels.append(label)
