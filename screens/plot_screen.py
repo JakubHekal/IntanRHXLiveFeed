@@ -20,16 +20,17 @@ from workers.processing_worker import (
     PSD_YLIM_MIN,
     PSD_YLIM_MAX,
 )
+from workers.expensive_task_worker import ExpensiveTaskWorker
 
 # ── Display constants ──────────────────────────────────────────────────────────
 DISPLAY_WINDOW_SEC    = 10          # raw signal x-axis window
 DISPLAY_BUFFER_SEC    = 300         # ring buffer size (5 min)
 DEFAULT_SAMPLING_RATE = 20000
-MAX_DISPLAY_POINTS    = 15000
+MAX_DISPLAY_POINTS    = 5000
 
 # ── Per-subplot render rate limits ────────────────────────────────────────────
 PLOT_UPDATE_FREQ_HZ = 120
-RAW_RENDER_HZ       = 60
+RAW_RENDER_HZ       = 30
 PSD_RENDER_HZ       = 30
 SPIKE_RENDER_HZ     = 30
 WAVEFORM_YLIM_ABS_UV = 100
@@ -42,8 +43,8 @@ RAW_MANUAL_VIEW_MARGIN_SEC = 2.0
 MAX_RAW_HISTORY_PLOT_POINTS = 200000
 
 # ── Background compute throttle (every N data chunks) ─────────────────────────
-PSD_PLOT_UPDATE_EVERY_N   = 15
-SPIKE_PLOT_UPDATE_EVERY_N = 15  
+PSD_PLOT_UPDATE_EVERY_N   = 20
+SPIKE_PLOT_UPDATE_EVERY_N = 20  
 
 # ── Pyqtgraph global style ────────────────────────────────────────────────────
 pg.setConfigOption('background', 'white')
@@ -215,6 +216,13 @@ class PlotScreen(QtWidgets.QWidget):
         self._proc_worker = ProcessingWorker(self)
         self._proc_worker.result_ready.connect(self._on_processing_result)
         self._proc_worker.start()
+        self._exp_worker = ExpensiveTaskWorker(self)
+        self._exp_worker.result_ready.connect(self._on_expensive_task_result)
+        self._exp_worker.start()
+
+        self._session_id = 0
+        self._task_id_counter = 0
+        self._active_expensive_task_id = {}
 
         # ── Layout ─────────────────────────────────────────────────────────────
         layout = QtWidgets.QVBoxLayout(self)
@@ -505,6 +513,7 @@ class PlotScreen(QtWidgets.QWidget):
 
     def configure_processing_settings(self, psd_buffer_sec: int, waveform_buffer_sec: int, spike_bin_sec: int):
         """Apply runtime processing settings and refresh plot labels."""
+        prev_spike_bin_sec = int(self._spike_bin_sec)
         self._psd_buffer_sec = int(psd_buffer_sec)
         self._waveform_buffer_sec = int(waveform_buffer_sec)
         self._spike_bin_sec = int(spike_bin_sec)
@@ -519,10 +528,64 @@ class PlotScreen(QtWidgets.QWidget):
         self.canvas.spike_plot.setTitle(f"Spike counts ({self._spike_bin_sec}s bins)")
         self.canvas.wf_plot.setTitle(f"Averaged spike waveform (last {self._waveform_buffer_sec}s)")
 
+        if self._spike_bin_sec != prev_spike_bin_sec:
+            self._schedule_spike_rebin_task()
+
+    def _next_task_id(self) -> int:
+        self._task_id_counter += 1
+        return int(self._task_id_counter)
+
+    def _schedule_spike_rebin_task(self):
+        if not hasattr(self, '_exp_worker') or self._exp_worker is None:
+            return
+
+        task_id = self._next_task_id()
+        self._active_expensive_task_id['spike_rebin'] = task_id
+
+        job = {
+            "task_type": "spike_rebin",
+            "task_id": task_id,
+            "session_id": int(self._session_id),
+            "spike_times": list(self._spike_times_cache),
+            "bin_sec": float(self._spike_bin_sec),
+            "last_time_s": float(self.sample_counter) / max(float(self.sampling_rate), 1e-9),
+        }
+        self._exp_worker.schedule(job)
+
+    def _on_expensive_task_result(self, result):
+        task_type = str(result.get("task_type", ""))
+        task_id = int(result.get("task_id", 0))
+        session_id = int(result.get("session_id", -1))
+
+        if session_id != int(self._session_id):
+            return
+
+        active_task_id = int(self._active_expensive_task_id.get(task_type, 0))
+        if task_id != active_task_id:
+            return
+
+        if str(result.get("status", "")) != "ok":
+            print(f"[ExpensiveTask] {task_type} failed: {result.get('error', '')}")
+            return
+
+        if task_type == "spike_rebin":
+            data = result.get("data") or {}
+            minute_idx = np.asarray(data.get("minute_idx", []), dtype=np.float64)
+            counts = np.asarray(data.get("counts", []), dtype=np.int64)
+            if minute_idx.size and counts.size and minute_idx.size == counts.size:
+                if self._proc_result is None:
+                    class _Result:  # lightweight container for first-time availability
+                        pass
+                    self._proc_result = _Result()
+                self._proc_result.spike_minute_idx = minute_idx
+                self._proc_result.spike_counts = counts
+                self._spike_pending = True
+
     # ── Connection management ──────────────────────────────────────────────────
 
     def set_connection_details(self, host, command_port, data_port, sample_rate, project_name):
         self.clear_project_buffers()
+        self._session_id += 1
         self.base_connection_details = f"Connected to {host}:{command_port}/{data_port} at {sample_rate} Hz"
         self.base_project_line = f"Project: {project_name}"
         self.set_connection_status("Receiving")
@@ -589,6 +652,7 @@ class PlotScreen(QtWidgets.QWidget):
         self._raw_hist_sample_mod_high = 0
         self._psd_pending            = False
         self._spike_pending          = False
+        self._active_expensive_task_id = {}
         self._last_raw_render_t      = 0.0
         self._last_psd_render_t      = 0.0
         self._last_spike_render_t    = 0.0
@@ -636,9 +700,13 @@ class PlotScreen(QtWidgets.QWidget):
         self.is_receiving = receiving
 
     def shutdown_workers(self) -> bool:
-        if not hasattr(self, '_proc_worker') or self._proc_worker is None:
-            return True
-        return self._proc_worker.stop(timeout_ms=4000)
+        ok_proc = True
+        ok_exp = True
+        if hasattr(self, '_proc_worker') and self._proc_worker is not None:
+            ok_proc = self._proc_worker.stop(timeout_ms=4000)
+        if hasattr(self, '_exp_worker') and self._exp_worker is not None:
+            ok_exp = self._exp_worker.stop(timeout_ms=4000)
+        return bool(ok_proc and ok_exp)
 
     def _save_plot_snapshot_png(self, plot_item, prefix: str) -> bool:
         if not self.project_snapshots_dir:
@@ -1038,7 +1106,7 @@ class PlotScreen(QtWidgets.QWidget):
                 max_count = max(1, int(np.max(r.spike_counts)) if r.spike_counts.size else 1)
                 right_min = 0.0
                 if r.spike_minute_idx.size:
-                    right_min = float(r.spike_minute_idx[-1]) + SPIKE_BIN_SEC / 60.0
+                    right_min = float(r.spike_minute_idx[-1]) + float(self._spike_bin_sec) / 60.0
                 # Keep x-limits synced with available history so manual panning can
                 # browse the full session while preventing negative time.
                 self.canvas.spike_plot.setLimits(xMin=0.0, xMax=max(0.0, right_min + 0.1))
