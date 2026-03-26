@@ -13,17 +13,10 @@ from workers.chunk_writer import ChunkWriter
 from workers.marker_manager import MarkerManager
 
 def load_intan_device_class():
-    """
-    Load the IntanRHXDevice class from the intan.interface module.
-    Use the installed version if available, otherwise load from the local python-intan package.
-    """
-    try:
-        module = importlib.import_module("intan.interface")
-        return module.IntanRHXDevice
-    except ImportError:
-        pass
-
-    root = Path(sys.path[0])
+    if getattr(sys, 'frozen', False):
+        root = Path(sys.executable).parent
+    else:
+        root = Path(sys.path[0])
     local_pkg = root / "python-intan"
     if local_pkg.exists():
         sys.path.insert(0, str(local_pkg))
