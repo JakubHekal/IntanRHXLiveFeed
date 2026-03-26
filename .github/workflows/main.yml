@@ -14,7 +14,7 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, ubuntu-latest]
 
     runs-on: ${{ matrix.os }}
 
@@ -31,7 +31,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Build executable
-        run: python pyinstaller_run.py
+        run: python pyinstall_run.py
 
       - name: Rename executable
         run: |
