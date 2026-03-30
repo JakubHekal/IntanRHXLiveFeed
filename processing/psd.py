@@ -26,10 +26,6 @@ import os
 import glob
 import re
 import numpy as np
-import pandas as pd
-import matplotlib
-matplotlib.use("Agg")  # comment this line out if you want interactive windows
-import matplotlib.pyplot as plt
 from scipy.signal import welch
 
 
@@ -60,7 +56,7 @@ DB_RANGE = None               # e.g. (-130, -60) or None
 
 
 # ----------------- Helpers -----------------
-def find_time_column(df: pd.DataFrame) -> str:
+def find_time_column(df) -> str:
     """Heuristically find a 'time' column; otherwise use first strictly-increasing numeric col."""
     for c in TIME_COLS:
         if c in df.columns:
@@ -87,7 +83,7 @@ def infer_fs(t: np.ndarray) -> float:
     return 1.0 / dt
 
 
-def list_signal_channels(df: pd.DataFrame, time_col: str) -> list[str]:
+def list_signal_channels(df, time_col: str) -> list[str]:
     """Return all numeric columns except time, applying include/exclude filters if set."""
     chans = []
     for c in df.columns:
@@ -141,6 +137,11 @@ def list_csvs(directory: str, pattern: str):
 
 # ----------------- Main -----------------
 def main():
+    import pandas as pd
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     # Gather CSVs
     csv_files = list_csvs(CSV_DIR, CSV_GLOB)
     if len(csv_files) < 2:

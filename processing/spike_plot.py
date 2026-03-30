@@ -4,10 +4,6 @@
 import os
 import glob
 import numpy as np
-import pandas as pd
-import matplotlib
-matplotlib.use("Agg")  # comment out for interactive
-import matplotlib.pyplot as plt
 from scipy.signal import welch, butter, sosfiltfilt, find_peaks, spectrogram
 
 # ================== USER SETTINGS ==================
@@ -92,7 +88,7 @@ def _parse_channel_list(x):
         return out if out else None
     return None
 
-def find_time_column(df: pd.DataFrame) -> str:
+def find_time_column(df) -> str:
     for c in TIME_COLS:
         if c in df.columns:
             return c
@@ -114,7 +110,7 @@ def infer_fs(t: np.ndarray) -> float:
 def list_csvs(directory, pattern):
     return sorted(glob.glob(os.path.join(directory, pattern)))
 
-def list_signal_channels(df: pd.DataFrame, time_col: str) -> list[str]:
+def list_signal_channels(df, time_col: str) -> list[str]:
     """Return all numeric columns except time, applying include/exclude filters."""
     chans = []
     for c in df.columns:
@@ -300,6 +296,11 @@ def _nan_interpolate(x: np.ndarray) -> np.ndarray:
 
 
 def main():
+    import pandas as pd
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     out_root = os.path.join(CSV_DIR, OUT_DIR_NAME)
     os.makedirs(out_root, exist_ok=True)
 

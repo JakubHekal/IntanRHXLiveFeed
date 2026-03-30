@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pyqtgraph as pg
-import pyqtgraph.exporters
+from pyqtgraph.exporters.ImageExporter import ImageExporter
 from PyQt5 import QtWidgets, QtCore, QtGui
 import numpy as np
 from telemetry_logger import append_telemetry_line
@@ -718,7 +718,7 @@ class PlotScreen(QtWidgets.QWidget):
             out_path = out_dir / f"{prefix}_{stamp}.png"
 
             try:
-                exporter = pg.exporters.ImageExporter(plot_item)
+                exporter = ImageExporter(plot_item)
                 exporter.parameters()['width'] = 1920
                 exporter.export(str(out_path))
             except Exception:

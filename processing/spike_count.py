@@ -21,8 +21,6 @@ import os
 import glob
 import math
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
 
 from scipy.signal import butter, filtfilt, find_peaks
 
@@ -246,6 +244,9 @@ def detect_spikes(x_uv: np.ndarray, t_s: np.ndarray):
 # =========================
 
 def main():
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
     # find CSV
     csv_paths = sorted(glob.glob(os.path.join(CSV_DIR, CSV_GLOB)))
     if not csv_paths:
