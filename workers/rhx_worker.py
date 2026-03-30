@@ -14,12 +14,17 @@ from workers.marker_manager import MarkerManager
 
 def load_intan_device_class():
     if getattr(sys, 'frozen', False):
-        root = Path(sys.executable).parent
+        # In onefile builds, bundled files are unpacked under _MEIPASS.
+        roots = [Path(getattr(sys, '_MEIPASS', Path(sys.executable).parent)), Path(sys.executable).parent]
     else:
-        root = Path(sys.path[0])
-    local_pkg = root / "python-intan"
-    if local_pkg.exists():
-        sys.path.insert(0, str(local_pkg))
+        roots = [Path(__file__).resolve().parents[1], Path(sys.path[0])]
+
+    for root in roots:
+        local_pkg = root / "python-intan"
+        if local_pkg.exists():
+            sys.path.insert(0, str(local_pkg))
+            break
+
     module = importlib.import_module("intan.interface")
     return module.IntanRHXDevice
 
