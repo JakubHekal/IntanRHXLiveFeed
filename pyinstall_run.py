@@ -25,7 +25,7 @@ pyinstaller_args = [
     os.path.join(project_root, 'main.py'),
     '--name', 'RHX Realtime Feed',
     '--icon', os.path.join(project_root, 'assets', 'icon.ico'),
-    '--splash', os.path.join(project_root, 'assets', 'RHX_splash.png'),
+    '--splash', os.path.join(project_root, 'assets', 'icon.png'),
     '--onefile',
     '--windowed',
     '--noconfirm',
