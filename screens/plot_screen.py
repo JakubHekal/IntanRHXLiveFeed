@@ -107,7 +107,7 @@ class PgCanvas(QtWidgets.QWidget):
         self.wf_plot.setLabel('left',   'U [uV]')
         self.wf_plot.setLabel('bottom', 't [ms]')
         self.wf_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.wf_plot.setMouseEnabled(x=False, y=False)
+        self.wf_plot.setMouseEnabled(x=False, y=True)
         self.wf_plot.setYRange(-WAVEFORM_YLIM_ABS_UV, WAVEFORM_YLIM_ABS_UV, padding=0)
 
         # ── Curves ────────────────────────────────────────────────────────────
@@ -386,7 +386,7 @@ class PlotScreen(QtWidgets.QWidget):
                 vb.sigRangeChanged.connect(lambda *_args, k=key: self._on_manual_plot_range_change(k))
 
     def _install_plot_follow_context_actions(self):
-        for key in ('raw', 'spike'):
+        for key in ('raw', 'spike', 'wf'):
             vb = self._plot_item_for_key(key).vb
             menu = getattr(vb, 'menu', None)
             if menu is None:
