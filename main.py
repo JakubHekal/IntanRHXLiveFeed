@@ -1,3 +1,5 @@
+import importlib
+import os
 import sys
 from pathlib import Path
 
@@ -84,7 +86,7 @@ class MainWindow(QtWidgets.QMainWindow):
         }
 
         # Set up main window
-        self.setWindowTitle("Intan RHX Device Monitor")
+        self.setWindowTitle("RHX Realtime Feed")
 
         self.plot_screen = PlotScreen()
         self.setCentralWidget(self.plot_screen)
@@ -566,6 +568,13 @@ class MainWindow(QtWidgets.QMainWindow):
         super().closeEvent(event)
 
 if __name__ == "__main__":
+
+    if '_PYI_SPLASH_IPC' in os.environ and importlib.util.find_spec("pyi_splash"):
+        import pyi_splash
+        pyi_splash.update_text('UI Loaded ...')
+        pyi_splash.close()
+
+
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
 
@@ -573,7 +582,6 @@ if __name__ == "__main__":
         QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(
             QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
         )
-
         
     app = QtWidgets.QApplication(sys.argv)
     window = MainWindow()

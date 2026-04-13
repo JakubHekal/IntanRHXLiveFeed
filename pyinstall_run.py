@@ -23,7 +23,9 @@ data_sep = ';' if sys.platform.startswith('win') else ':'
 
 pyinstaller_args = [
     os.path.join(project_root, 'main.py'),
-    '--name', 'rhx_realtime_feed',
+    '--name', 'RHX Realtime Feed',
+    '--icon', os.path.join(project_root, 'assets', 'icon.ico'),
+    '--splash', os.path.join(project_root, 'assets', 'RHX_splash.png'),
     '--onefile',
     '--windowed',
     '--noconfirm',
