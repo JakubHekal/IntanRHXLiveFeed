@@ -400,20 +400,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         default_name = f"Marker {len(self.plot_screen.get_markers()) + 1}"
-        marker_name, ok = QtWidgets.QInputDialog.getText(
-            self,
-            "Add Marker",
-            "Marker name:",
-            text=default_name,
-        )
-        if not ok:
-            return
-        marker_name = marker_name.strip()
-        if not marker_name:
-            QtWidgets.QMessageBox.warning(self, "Invalid Marker", "Marker name cannot be empty.")
-            return
-
-        self.rhx_worker.request_marker(marker_name)
+        self.rhx_worker.request_marker(default_name)
 
     def _ensure_marker_dialog(self):
         if self.marker_dialog is None:
