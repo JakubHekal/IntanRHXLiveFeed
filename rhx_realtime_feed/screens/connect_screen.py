@@ -2,6 +2,7 @@ from pathlib import Path
 
 from PyQt5 import QtWidgets, QtCore
 from rhx_realtime_feed.workers.processing_worker import PSD_BUFFER_SEC, WAVEFORM_BUFFER_SEC, SPIKE_BIN_SEC
+from rhx_realtime_feed.plot_settings import load_plot_setting, DEFAULT_PSDS, DEFAULT_WAVEFORM, DEFAULT_SPIKE_BIN
 
 class ConnectDialog(QtWidgets.QDialog):
     connection_request_signal = QtCore.pyqtSignal(str, int, int, int, str, str, str, int, int, int, int)
@@ -70,13 +71,13 @@ class ConnectDialog(QtWidgets.QDialog):
         path_row.addWidget(self.project_path_browse_button)
         project_form.addRow("Project path:", path_row)
 
-        self.psd_buffer_edit = QtWidgets.QLineEdit(str(int(PSD_BUFFER_SEC)))
+        self.psd_buffer_edit = QtWidgets.QLineEdit(str(load_plot_setting("psd_buffer_sec", DEFAULT_PSDS)))
         project_form.addRow("PSD buffer duration (s):", self.psd_buffer_edit)
 
-        self.waveform_buffer_edit = QtWidgets.QLineEdit(str(int(WAVEFORM_BUFFER_SEC)))
+        self.waveform_buffer_edit = QtWidgets.QLineEdit(str(load_plot_setting("waveform_buffer_sec", DEFAULT_WAVEFORM)))
         project_form.addRow("Waveform buffer duration (s):", self.waveform_buffer_edit)
 
-        self.spike_bin_edit = QtWidgets.QLineEdit(str(int(SPIKE_BIN_SEC)))
+        self.spike_bin_edit = QtWidgets.QLineEdit(str(load_plot_setting("spike_bin_sec", DEFAULT_SPIKE_BIN)))
         project_form.addRow("Spike count bin duration (s):", self.spike_bin_edit)
 
         project_group_box.setLayout(project_form)

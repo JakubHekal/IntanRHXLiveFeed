@@ -9,6 +9,8 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 import numpy as np
 from rhx_realtime_feed.telemetry_logger import append_telemetry_line
 
+from rhx_realtime_feed.plot_settings import load_plot_setting, save_plot_setting, DEFAULT_PSDS, DEFAULT_WAVEFORM, DEFAULT_SPIKE_BIN
+
 from rhx_realtime_feed.workers.processing_worker import (
     ProcessingWorker,
     configure_processing_windows,
@@ -163,9 +165,9 @@ class PlotScreen(QtWidgets.QWidget):
         self._last_spike_scan_sample = 0  # absolute sample count (never resets)
         self._last_proc_abs_start    = 0
         self._proc_result            = None
-        self._psd_buffer_sec         = int(PSD_BUFFER_SEC)
-        self._waveform_buffer_sec    = int(WAVEFORM_BUFFER_SEC)
-        self._spike_bin_sec          = int(SPIKE_BIN_SEC)
+        self._psd_buffer_sec         = load_plot_setting("psd_buffer_sec", DEFAULT_PSDS)
+        self._waveform_buffer_sec    = load_plot_setting("waveform_buffer_sec", DEFAULT_WAVEFORM)
+        self._spike_bin_sec          = load_plot_setting("spike_bin_sec", DEFAULT_SPIKE_BIN)
         self._latest_psd_f           = None
         self._latest_psd_db          = None
         self._latest_wf_t_ms         = None
@@ -517,6 +519,10 @@ class PlotScreen(QtWidgets.QWidget):
         self._psd_buffer_sec = int(psd_buffer_sec)
         self._waveform_buffer_sec = int(waveform_buffer_sec)
         self._spike_bin_sec = int(spike_bin_sec)
+
+        save_plot_setting("psd_buffer_sec", self._psd_buffer_sec)
+        save_plot_setting("waveform_buffer_sec", self._waveform_buffer_sec)
+        save_plot_setting("spike_bin_sec", self._spike_bin_sec)
 
         configure_processing_windows(
             psd_buffer_sec=self._psd_buffer_sec,
