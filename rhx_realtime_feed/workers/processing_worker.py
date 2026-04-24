@@ -2,10 +2,10 @@ from PyQt5 import QtCore
 import numpy as np
 import time
 
-import processing.psd as psd
-import processing.spike_count as spike_count
-import processing.spike_plot as spike_plot
-from telemetry_logger import append_telemetry_line
+import rhx_realtime_feed.processing.psd as psd
+import rhx_realtime_feed.processing.spike_count as spike_count
+import rhx_realtime_feed.processing.spike_plot as spike_plot
+from rhx_realtime_feed.telemetry_logger import append_telemetry_line
 
 PSD_BUFFER_SEC = 10
 SPIKE_HISTORY_MIN = 30

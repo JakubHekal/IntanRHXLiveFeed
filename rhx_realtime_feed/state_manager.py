@@ -7,7 +7,7 @@ Provides a thread-safe API for querying and transitioning states from any compon
 from typing import Optional
 import threading
 from PyQt5 import QtCore
-from state_machine import AppStateMachine, AppState
+from rhx_realtime_feed.state_machine import AppStateMachine, AppState
 
 
 class StateManager:

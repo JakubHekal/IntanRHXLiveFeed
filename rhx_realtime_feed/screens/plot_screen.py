@@ -7,9 +7,9 @@ import pyqtgraph as pg
 from pyqtgraph.exporters.ImageExporter import ImageExporter
 from PyQt5 import QtWidgets, QtCore, QtGui
 import numpy as np
-from telemetry_logger import append_telemetry_line
+from rhx_realtime_feed.telemetry_logger import append_telemetry_line
 
-from workers.processing_worker import (
+from rhx_realtime_feed.workers.processing_worker import (
     ProcessingWorker,
     configure_processing_windows,
     SPIKE_INCREMENTAL_MIN_SAMPLES,
@@ -20,7 +20,7 @@ from workers.processing_worker import (
     PSD_YLIM_MIN,
     PSD_YLIM_MAX,
 )
-from workers.expensive_task_worker import ExpensiveTaskWorker
+from rhx_realtime_feed.workers.expensive_task_worker import ExpensiveTaskWorker
 
 # ── Display constants ──────────────────────────────────────────────────────────
 DISPLAY_WINDOW_SEC    = 10          # raw signal x-axis window

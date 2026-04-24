@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from PyQt5 import QtWidgets, QtCore
-from workers.processing_worker import PSD_BUFFER_SEC, WAVEFORM_BUFFER_SEC, SPIKE_BIN_SEC
+from rhx_realtime_feed.workers.processing_worker import PSD_BUFFER_SEC, WAVEFORM_BUFFER_SEC, SPIKE_BIN_SEC
 
 class ConnectDialog(QtWidgets.QDialog):
     connection_request_signal = QtCore.pyqtSignal(str, int, int, int, str, str, str, int, int, int, int)

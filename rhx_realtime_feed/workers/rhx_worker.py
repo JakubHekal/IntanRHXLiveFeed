@@ -1,35 +1,15 @@
-import sys
-import importlib
 import time
 from datetime import datetime
-from pathlib import Path
 
 from PyQt5 import QtCore
 import numpy as np
 
-from state_manager import StateManager, AppState
-from telemetry_logger import append_telemetry_line
-from workers.chunk_writer import ChunkWriter
-from workers.marker_manager import MarkerManager
+from rhx_realtime_feed.state_manager import StateManager, AppState
+from rhx_realtime_feed.telemetry_logger import append_telemetry_line
+from rhx_realtime_feed.workers.chunk_writer import ChunkWriter
+from rhx_realtime_feed.workers.marker_manager import MarkerManager
+from rhx_realtime_feed.device import IntanRHXDevice
 
-def load_intan_device_class():
-    if getattr(sys, 'frozen', False):
-        # In onefile builds, bundled files are unpacked under _MEIPASS.
-        roots = [Path(getattr(sys, '_MEIPASS', Path(sys.executable).parent)), Path(sys.executable).parent]
-    else:
-        roots = [Path(__file__).resolve().parents[1], Path(sys.path[0])]
-
-    for root in roots:
-        local_pkg = root / "python-intan"
-        if local_pkg.exists():
-            sys.path.insert(0, str(local_pkg))
-            break
-
-    module = importlib.import_module("intan.interface")
-    return module.IntanRHXDevice
-
-
-IntanRHXDevice = load_intan_device_class()
 
 CHANNELS_PORT = "B"
 CHANNELS_TO_PLOT = [0]

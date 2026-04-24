@@ -5,12 +5,12 @@ from pathlib import Path
 
 from PyQt5 import QtCore, QtWidgets, QtGui
 
-from screens.connect_screen import ConnectDialog
-from screens.marker_dialog import MarkerDialog
-from screens.plot_screen import PlotScreen
-from workers.rhx_worker import RHXWorker
-from state_manager import StateManager, AppState
-from telemetry_logger import set_telemetry_file, append_telemetry_line
+from rhx_realtime_feed.screens.connect_screen import ConnectDialog
+from rhx_realtime_feed.screens.marker_dialog import MarkerDialog
+from rhx_realtime_feed.screens.plot_screen import PlotScreen
+from rhx_realtime_feed.workers.rhx_worker import RHXWorker
+from rhx_realtime_feed.state_manager import StateManager, AppState
+from rhx_realtime_feed.telemetry_logger import set_telemetry_file, append_telemetry_line
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
