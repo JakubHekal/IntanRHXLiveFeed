@@ -135,44 +135,36 @@ class StateManager:
     def _do_transition(self, trigger: str, expected_state: AppState) -> bool:
         """
         Execute a state transition.
-        
+
         Args:
             trigger: The transition trigger name (e.g., 'request_connect')
             expected_state: The expected state after transition
-        
+
         Returns:
             True if transition succeeded, False otherwise
         """
         try:
-            trigger_method = getattr(self._state_machine, trigger, None)
-            if trigger_method is None:
-                print(f"[STATE] Invalid trigger: {trigger}")
-                return False
+            sm = self._state_machine
+            before_state = sm.get_current_state()
 
-            before_state = self._state_machine.get_current_state()
-
-            may_trigger_method = getattr(self._state_machine, f"may_{trigger}", None)
-            if callable(may_trigger_method) and not may_trigger_method():
+            if not sm.can_trigger(trigger):
                 if before_state == expected_state:
                     return True
                 print(f"[STATE] Transition {trigger} ignored - current={before_state.value}, expected={expected_state.value}")
                 return False
-            
-            # Execute the transition
-            trigger_method()
-            after_state = self._state_machine.get_current_state()
-            
-            # Verify we're in the expected state
-            if after_state != expected_state:
-                print(f"[STATE] Transition {trigger} failed - not in {expected_state.value}")
+
+            if not sm.process_trigger(trigger):
+                print(f"[STATE] Transition {trigger} failed")
                 return False
 
-            if after_state == before_state:
-                return True
-            
+            after_state = sm.get_current_state()
+            if after_state != expected_state:
+                print(f"[STATE] Transition {trigger} - expected {expected_state.value}, got {after_state.value}")
+                return False
+
             print(f"[STATE] Transitioned to {expected_state.value}")
             return True
-            
+
         except Exception as e:
             print(f"[STATE] Transition error: {trigger} -> {e}")
             return False

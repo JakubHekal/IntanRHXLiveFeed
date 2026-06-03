@@ -9,7 +9,7 @@ try:
     rhx_hidden_imports = collect_submodules('rhx_realtime_feed')
 except Exception:
     rhx_hidden_imports = [
-        'transitions', 'rhx_realtime_feed.device._rhx_config', 'rhx_realtime_feed.device._rhx_device',
+        'rhx_realtime_feed.device._rhx_config', 'rhx_realtime_feed.device._rhx_device',
         'rhx_realtime_feed.state_machine', 'rhx_realtime_feed.state_manager', 'rhx_realtime_feed.telemetry_logger',
         'rhx_realtime_feed.workers.rhx_worker', 'rhx_realtime_feed.workers.processing_worker',
         'rhx_realtime_feed.workers.chunk_writer', 'rhx_realtime_feed.workers.marker_manager',
