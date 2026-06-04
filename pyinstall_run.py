@@ -42,7 +42,7 @@ exclusions = [
     'html5lib', 'markupsafe', 'yaml', 'toml',
 
     # 6. Web Servers & Networking (Pulled in by matplotlib web backends)
-    'tornado', 'aiohttp', 'asyncio', 'urllib3', 'requests', 'http', 'xmlrpc'
+    'tornado', 'aiohttp', 'urllib3', 'requests'
 ]
 
 pyinstaller_args = [

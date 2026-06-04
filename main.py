@@ -1,11 +1,14 @@
 import importlib
 import os
 import sys
+import time
 from pathlib import Path
 
 from PyQt5 import QtCore, QtWidgets, QtGui
 
+from rhx_realtime_feed import __version__
 from rhx_realtime_feed.screens.connect_screen import ConnectDialog
+from rhx_realtime_feed.updater import UpdateCheckThread, UpdateInfo
 from rhx_realtime_feed.screens.marker_dialog import MarkerDialog
 from rhx_realtime_feed.screens.plot_screen import PlotScreen
 from rhx_realtime_feed.workers.rhx_worker import RHXWorker
@@ -20,6 +23,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.marker_dialog = None
         self._handling_connection_lost = False
         self._waiting_connection_lost_worker = False
+        self._update_thread = None
         
         # State machine integration
         self.state_manager = StateManager.get_instance()
@@ -141,6 +145,12 @@ class MainWindow(QtWidgets.QMainWindow):
         spacer = QtWidgets.QWidget(self)
         spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         self.toolbar.addWidget(spacer)
+
+        self.toolbar.addSeparator()
+        self.check_update_action = self.toolbar.addAction("Check for Updates")
+        self.check_update_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_BrowserReload))
+        self.check_update_action.triggered.connect(self._check_for_updates_manual)
+
         self.toolbar.addWidget(self.plot_screen.connection_details_label)
         self.toolbar.addSeparator()
         self.toolbar.addWidget(self.plot_screen.fps_label)
@@ -153,6 +163,63 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.showMaximized()
         QtCore.QTimer.singleShot(0, self.open_connect_dialog)
+        QtCore.QTimer.singleShot(3000, self._check_for_updates_auto)
+
+    def _check_for_updates_auto(self):
+        settings = QtCore.QSettings("RHX", "RealtimeFeed")
+        last_check = settings.value("update/last_check_time", 0, type=int)
+        if time.time() - last_check < 86400:
+            return
+        self._run_update_check()
+
+    def _check_for_updates_manual(self):
+        self._run_update_check(force_show=True)
+
+    def _run_update_check(self, force_show=False):
+        if self._update_thread is not None and self._update_thread.isRunning():
+            if force_show:
+                QtWidgets.QMessageBox.information(
+                    self, "Checking", "Update check is already in progress."
+                )
+            return
+
+        self._update_force_show = force_show
+        self._update_thread = UpdateCheckThread(__version__, self)
+        self._update_thread.result_ready.connect(self._on_update_result)
+        self._update_thread.start()
+
+    def _on_update_result(self, result):
+        self._update_thread = None
+        force_show = getattr(self, "_update_force_show", False)
+
+        if isinstance(result, UpdateInfo):
+            QtCore.QSettings("RHX", "RealtimeFeed").setValue(
+                "update/last_check_time", int(time.time())
+            )
+            if result.available:
+                msg = (
+                    f"Version {result.latest_version} is now available "
+                    f"(you have {result.current_version}).\n\n"
+                    "Download the latest release from GitHub?"
+                )
+                reply = QtWidgets.QMessageBox.question(
+                    self, "Update Available", msg,
+                    QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                )
+                if reply == QtWidgets.QMessageBox.Yes:
+                    url = result.download_url or result.release_url
+                    QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
+            elif force_show:
+                QtWidgets.QMessageBox.information(
+                    self, "Up to Date",
+                    f"You are running the latest version ({result.current_version}).",
+                )
+        elif force_show:
+            QtWidgets.QMessageBox.warning(
+                self, "Update Check Failed",
+                "Could not check for updates.\n\n"
+                "Make sure you have an internet connection and try again.",
+            )
 
     def _update_ui_from_state(self):
         """
