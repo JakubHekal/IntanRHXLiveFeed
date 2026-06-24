@@ -73,8 +73,8 @@ class RHXConfig:
         Returns:
             str: Value of the parameter.
         """
-        msg = f"get {param}"
-        self.command_socket.sendall(msg.encode())
+        self.command_socket.sendall(f"get {param}\n".encode())
+        time.sleep(self.send_delay)
         return self.command_socket.recv(1024).decode()
 
     def enable_wide_channel(self, channels, port: str = 'a', status: bool = True):

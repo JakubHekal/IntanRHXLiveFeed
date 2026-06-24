@@ -97,6 +97,11 @@ class ProcessingWorker(QtCore.QThread):
         self._telemetry_overwritten = 0
         self._telemetry_processed = 0
         self._telemetry_proc_ms_total = 0.0
+        # ponytail: per-stage profiling accumulators
+        self._tel_psd_ms = 0.0
+        self._tel_detect_ms = 0.0
+        self._tel_hist_ms = 0.0
+        self._tel_wave_ms = 0.0
 
         # Incremental histogram cache to avoid full recompute every cycle.
         self._hist_counts = np.zeros(0, dtype=np.int64)
@@ -167,12 +172,17 @@ class ProcessingWorker(QtCore.QThread):
         avg_proc_ms = self._telemetry_proc_ms_total / processed
         schedule_rate = float(self._telemetry_scheduled) / max(elapsed, 1e-6)
         process_rate = float(self._telemetry_processed) / max(elapsed, 1e-6)
+        avg_psd_ms = self._tel_psd_ms / processed
+        avg_detect_ms = self._tel_detect_ms / processed
+        avg_hist_ms = self._tel_hist_ms / processed
+        avg_wave_ms = self._tel_wave_ms / processed
 
         line = (
             "[telemetry][proc] "
             f"window_s={elapsed:.2f} scheduled={int(self._telemetry_scheduled)} processed={int(self._telemetry_processed)} "
             f"overwritten={int(self._telemetry_overwritten)} schedule_hz={schedule_rate:.2f} process_hz={process_rate:.2f} "
-            f"avg_proc_ms={avg_proc_ms:.3f}"
+            f"avg_proc_ms={avg_proc_ms:.3f} psd_ms={avg_psd_ms:.2f} detect_ms={avg_detect_ms:.2f} "
+            f"hist_ms={avg_hist_ms:.2f} wave_ms={avg_wave_ms:.2f}"
         )
         print(line)
         append_telemetry_line(line)
@@ -182,6 +192,10 @@ class ProcessingWorker(QtCore.QThread):
         self._telemetry_overwritten = 0
         self._telemetry_processed = 0
         self._telemetry_proc_ms_total = 0.0
+        self._tel_psd_ms = 0.0
+        self._tel_detect_ms = 0.0
+        self._tel_hist_ms = 0.0
+        self._tel_wave_ms = 0.0
 
     def stop(self, timeout_ms: int = 3000) -> bool:
         if not self.isRunning():
@@ -221,10 +235,13 @@ class ProcessingWorker(QtCore.QThread):
 
             # PSD
             if do_psd:
+                t0 = time.perf_counter()
                 psd_samples = max(8, int(round(fs * PSD_BUFFER_SEC)))
                 psd_sig = signal_snap[-psd_samples:]
                 target_nperseg = max(64, int(round(psd.TARGET_NPERSEG_SEC * fs)))
                 nperseg = min(target_nperseg, psd_sig.size)
+                nperseg = max(64, 2**int(round(np.log2(nperseg))))
+                nperseg = min(nperseg, psd_sig.size)
                 noverlap = min(int(round(psd.NOVERLAP_RATIO * nperseg)), nperseg - 1)
                 if nperseg >= 8:
                     try:
@@ -233,16 +250,18 @@ class ProcessingWorker(QtCore.QThread):
                         result.psd_db = Pxx_db
                     except Exception:
                         pass
+                self._tel_psd_ms += (time.perf_counter() - t0) * 1000.0
 
             # Incremental spike detection
             if do_spike:
-                new_spike_times = list(spike_cache)
-                if not new_spike_times:
-                    self._reset_hist_cache()
+                t0 = time.perf_counter()
                 if stored > last_scan + SPIKE_INCREMENTAL_MIN_SAMPLES:
                     overlap = SPIKE_OVERLAP_SAMPLES
                     scan_start = max(0, last_scan - overlap)
                     scan_signal = signal_snap[scan_start:stored]
+                    new_spike_times = list(spike_cache)
+                    if not new_spike_times:
+                        self._reset_hist_cache()
                     if scan_signal.size >= 10:
                         try:
                             rel_peaks = _detect_spike_indices(scan_signal, fs)
@@ -254,6 +273,9 @@ class ProcessingWorker(QtCore.QThread):
                                 new_spike_times.extend(abs_times.tolist())
                         except Exception:
                             pass
+                else:
+                    new_spike_times = spike_cache
+                self._tel_detect_ms += (time.perf_counter() - t0) * 1000.0
 
                 # Keep all spike times — full session history for histogram
                 result.spike_times_cache = new_spike_times
@@ -261,16 +283,18 @@ class ProcessingWorker(QtCore.QThread):
 
                 spike_arr = np.array(new_spike_times, dtype=float)
                 if t_snap.size:
+                    t0 = time.perf_counter()
                     minute_idx, counts = self._update_incremental_histogram(new_spike_times, float(t_snap[-1]))
+                    self._tel_hist_ms += (time.perf_counter() - t0) * 1000.0
                     result.spike_minute_idx = minute_idx
                     result.spike_counts = counts
 
                 # Waveform mean+-SEM — use only spikes in the last WAVEFORM_BUFFER_SEC to ensure stationarity of waveforms
                 if spike_arr.size >= 1 and t_snap.size:
+                    t0 = time.perf_counter()
                     current_time = t_snap[-1]
                     wf_spike_arr = spike_arr[spike_arr >= current_time - WAVEFORM_BUFFER_SEC]
                     if wf_spike_arr.size >= 1:
-                        # Map spike timestamps back to nearest sample indices.
                         pk_indices = np.searchsorted(t_snap, wf_spike_arr, side='left').astype(int)
                         if pk_indices.size:
                             pk_indices = np.clip(pk_indices, 0, max(0, stored - 1))
@@ -280,7 +304,6 @@ class ProcessingWorker(QtCore.QThread):
                         pk_indices = np.unique(pk_indices)
                         pk_indices = pk_indices[(pk_indices > 0) & (pk_indices < stored)]
                         try:
-                            # Filter only the segment needed by waveform extraction.
                             pre_samp = int(round((spike_plot.PRE_MS / 1000.0) * fs))
                             post_samp = int(round((spike_plot.POST_MS / 1000.0) * fs))
                             seg_start = max(0, int(pk_indices[0]) - pre_samp - 2)
@@ -306,6 +329,7 @@ class ProcessingWorker(QtCore.QThread):
                                     result.wf_sem = W.std(axis=0) / max(np.sqrt(W.shape[0]), 1)
                         except Exception:
                             pass
+                    self._tel_wave_ms += (time.perf_counter() - t0) * 1000.0
 
             self.result_ready.emit(result)
             self._telemetry_processed += 1

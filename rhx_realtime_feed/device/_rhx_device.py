@@ -57,11 +57,11 @@ class IntanRHXDevice(Device, RHXConfig):
         self.connect()
 
         if self._connected:
+            RHXConfig.__init__(self, self.command_socket, verbose=verbose)
             self._sample_rate = self.get_sample_rate()
             self._sample_counter = 0
             self.effective_fs = float(self._sample_rate)
             self.init_circular_buffer()
-            RHXConfig.__init__(self, self.command_socket, verbose=verbose)
 
         if auto_start:
             self.start_streaming()

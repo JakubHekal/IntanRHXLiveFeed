@@ -125,10 +125,10 @@ class ChunkWriter:
                 seg_vals = values_all[offset:offset + take]
                 
                 if not has_marker:
-                    # Fast path: no markers, direct writelines
+                    times = (seg_start + np.arange(take, dtype=np.float64)) * inv_fs
                     rows = [
-                        f"{(seg_start + i) * inv_fs:.6f},{float(seg_vals[i]):.4f},0,\n"
-                        for i in range(take)
+                        f"{t:.6f},{v:.4f},0,\n"
+                        for t, v in zip(times, seg_vals)
                     ]
                     self.csv_file_handle.writelines(rows)
                     self._chunk_samples_written += take
@@ -148,14 +148,10 @@ class ChunkWriter:
                     marker_ids[local] = int(marker_rec.get("id", 0))
                     marker_names[local] = str(marker_rec.get("name", ""))
                 
+                times = (seg_start + np.arange(take, dtype=np.float64)) * inv_fs
                 rows = [
-                    [
-                        f"{(seg_start + i) * inv_fs:.6f}",
-                        f"{float(seg_vals[i]):.4f}",
-                        int(marker_ids[i]),
-                        marker_names[i],
-                    ]
-                    for i in range(take)
+                    [f"{t:.6f}", f"{v:.4f}", int(marker_ids[i]), marker_names[i]]
+                    for i, (t, v) in enumerate(zip(times, seg_vals))
                 ]
                 self.csv_writer.writerows(rows)
                 self._chunk_samples_written += take

@@ -292,6 +292,8 @@ class RHXWorker(QtCore.QThread):
                     is_repeated_chunk = (
                         self._last_chunk_data is not None
                         and self._last_chunk_data.shape == arr.shape
+                        and self._last_chunk_data[0, 0] == arr[0, 0]
+                        and self._last_chunk_data[0, -1] == arr[0, -1]
                         and np.array_equal(self._last_chunk_data, arr)
                     )
 

@@ -31,8 +31,8 @@ DEFAULT_SAMPLING_RATE = 20000
 MAX_DISPLAY_POINTS    = 5000
 
 # ── Per-subplot render rate limits ────────────────────────────────────────────
-PLOT_UPDATE_FREQ_HZ = 120
-RAW_RENDER_HZ       = 30
+PLOT_UPDATE_FREQ_HZ = 60
+RAW_RENDER_HZ       = 60
 PSD_RENDER_HZ       = 30
 SPIKE_RENDER_HZ     = 30
 WAVEFORM_YLIM_ABS_UV = 100
@@ -986,10 +986,11 @@ class PlotScreen(QtWidgets.QWidget):
 
         t0 = time.perf_counter()
         now = t0
-        self._telemetry_render_calls += 1
+        did_work = False
 
         # ── Raw signal @ RAW_RENDER_HZ ─────────────────────────────────────────
         if (now - self._last_raw_render_t) >= 1.0 / RAW_RENDER_HZ:
+            did_work = True
             self._telemetry_raw_renders += 1
             x_start = 0.0
             x_end = 0.0
@@ -1090,6 +1091,7 @@ class PlotScreen(QtWidgets.QWidget):
 
         # ── PSD @ PSD_RENDER_HZ ────────────────────────────────────────────────
         if r is not None and self._psd_pending and (now - self._last_psd_render_t) >= 1.0 / PSD_RENDER_HZ:
+            did_work = True
             if r.psd_f is not None and r.psd_db is not None:
                 self.canvas.psd_curve.setData(r.psd_f, r.psd_db)
                 self._latest_psd_f = np.asarray(r.psd_f).copy()
@@ -1107,6 +1109,7 @@ class PlotScreen(QtWidgets.QWidget):
 
         # ── Spike histogram + waveform @ SPIKE_RENDER_HZ ──────────────────────
         if r is not None and self._spike_pending and (now - self._last_spike_render_t) >= 1.0 / SPIKE_RENDER_HZ:
+            did_work = True
             if r.spike_minute_idx is not None and r.spike_counts is not None:
                 self.canvas.spike_curve.setData(r.spike_minute_idx, r.spike_counts)
                 max_count = max(1, int(np.max(r.spike_counts)) if r.spike_counts.size else 1)
@@ -1154,7 +1157,9 @@ class PlotScreen(QtWidgets.QWidget):
             self._sync_spike_marker_lines(float(spike_vr[0]), float(spike_vr[1]))
 
         self._render_dur_ms = (time.perf_counter() - t0) * 1000.0
-        self._telemetry_render_ms_total += self._render_dur_ms
+        if did_work:
+            self._telemetry_render_calls += 1
+            self._telemetry_render_ms_total += self._render_dur_ms
         self._emit_telemetry_if_due()
         self._update_fps_label()
 

@@ -248,7 +248,8 @@ def extract_waveforms(xhp, idx, fs, pre_ms=PRE_MS, post_ms=POST_MS):
     valid = idx[(idx - pre >= 0) & (idx + post < len(xhp))]
     if valid.size == 0:
         return valid, np.zeros((0, pre+post))
-    W = np.stack([xhp[i-pre:i+post] for i in valid], axis=0)
+    idx = valid[:, np.newaxis] + np.arange(-pre, post)
+    W = xhp[idx]
     return valid, W
 
 def gate_by_amplitude(valid_idx, W):
