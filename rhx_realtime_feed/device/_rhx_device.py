@@ -11,40 +11,25 @@ import time
 import socket
 import numpy as np
 import threading
-from typing import Optional
+from typing import Optional, List, Union
 
+from .device import Device, ChannelInfo
 from ._rhx_config import RHXConfig
 
 FRAMES_PER_BLOCK = 128
 MAGIC_NUMBER = 0x2ef07a08
 
 
-class IntanRHXDevice(RHXConfig):
-    """
-    Class for interacting with the Intan RHX system over TCP/IP.
+class IntanRHXDevice(Device, RHXConfig):
+    name = "Intan RHX"
+    device_type = "rhx"
+    _enabled_ports = []
 
-    Inherits:
-        RHXConfig: Provides configuration and command utilities.
-
-    Responsibilities:
-        - Connects to command and data ports
-        - Streams and parses EMG data
-        - Records EMG data into memory
-
-    Parameters:
-        host (str): IP address of the RHX server.
-        command_port (int): TCP port for command communication.
-        data_port (int): TCP port for waveform data.
-        num_channels (int): Number of channels to collect.
-        sample_rate (float): Expected EMG sample rate.
-        verbose (bool): Enable debug logging.
-    """
     def __init__(self,
                  host="127.0.0.1",
                  command_port=5000,
                  data_port=5001,
                  num_channels=128,
-                 sample_rate=None,
                  buffer_duration_sec=5,
                  auto_start=False,
                  verbose=False):
@@ -52,9 +37,9 @@ class IntanRHXDevice(RHXConfig):
         self.command_port = command_port
         self.data_port = data_port
         self.num_channels = num_channels
-        self.sample_rate = sample_rate
+        self._sample_rate = None
         self.verbose = verbose
-        self.connected = False
+        self._connected = False
 
         self.buffer_duration_sec = buffer_duration_sec
         self.circular_buffer = None
@@ -62,7 +47,6 @@ class IntanRHXDevice(RHXConfig):
         self.buffer_lock = threading.Lock()
         self.streaming_thread = None
         self.streaming = False
-        self.connected = False
 
         self.bytes_per_frame = 4 + 2 * self.num_channels
         self.bytes_per_block = 4 + FRAMES_PER_BLOCK * self.bytes_per_frame
@@ -72,16 +56,33 @@ class IntanRHXDevice(RHXConfig):
 
         self.connect()
 
-        if self.connected:
-            if self.sample_rate is None:
-                self.sample_rate = self.get_sample_rate()
+        if self._connected:
+            self._sample_rate = self.get_sample_rate()
             self._sample_counter = 0
-            self.effective_fs = float(self.sample_rate)
+            self.effective_fs = float(self._sample_rate)
             self.init_circular_buffer()
-            super().__init__(self.command_socket, verbose=verbose)
+            RHXConfig.__init__(self, self.command_socket, verbose=verbose)
 
         if auto_start:
             self.start_streaming()
+
+    # ── Device ABC property conformance ──
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    @connected.setter
+    def connected(self, value):
+        self._connected = bool(value)
+
+    @property
+    def sample_rate(self) -> Optional[float]:
+        return self._sample_rate
+
+    @sample_rate.setter
+    def sample_rate(self, value):
+        self._sample_rate = float(value) if value is not None else None
 
     def connect(self):
         """Establish TCP connections to the RHX command and data ports."""
@@ -99,13 +100,13 @@ class IntanRHXDevice(RHXConfig):
                 pass
             self.data_socket.settimeout(0.005)
 
-            self.connected = True
+            self._connected = True
             self.connection_lost = False
             self.reconnect_attempts = 0
 
         except Exception as e:
             print("Failed to initialize connection with 'Remote TCP Control'")
-            self.connected = False
+            self._connected = False
 
     def receive_data(self, buffer: bytearray, read_size: int, max_reads: int = 16):
         """Try to drain multiple chunks from the socket without blocking forever."""
@@ -251,8 +252,12 @@ class IntanRHXDevice(RHXConfig):
                 self.blocks_per_write = max(1, int(value))
                 self._update_read_size()
             elif "enable_wide_channel" in key:
-                self.enable_wide_channel(value)
+                port = kwargs.get("port", "a")
+                self._enabled_ports = [port]
+                self.enable_wide_channel(value, port=port)
                 self._update_read_size()
+            elif "port" in key:
+                pass
 
     def start_streaming(self):
         """Start streaming data from the RHX device."""
@@ -260,9 +265,9 @@ class IntanRHXDevice(RHXConfig):
             print("Already streaming")
             return
 
-        if self.sample_rate is None:
-            self.sample_rate = self.get_sample_rate()
-        self.effective_fs = float(self.sample_rate)
+        if self._sample_rate is None:
+            self._sample_rate = self.get_sample_rate()
+        self.effective_fs = float(self._sample_rate)
         self.init_circular_buffer()
 
         try:
@@ -375,6 +380,36 @@ class IntanRHXDevice(RHXConfig):
         np.savez(path, emg=emg, sample_rate=self.sample_rate)
         if self.verbose:
             print(f"Saved EMG to: {path}")
+
+    # ── Device ABC conformance ──
+
+    @property
+    def channels(self) -> List[ChannelInfo]:
+        return [
+            ChannelInfo(i, f"{p}-{i:03d}", "input", "uV", -5000.0, 5000.0)
+            for i in range(self.num_channels)
+            for p in getattr(self, "_enabled_ports", ["a"])
+        ] if self.num_channels else []
+
+    def start_acquisition(self) -> None:
+        self.start_streaming()
+
+    def stop_acquisition(self) -> None:
+        self.stop_streaming()
+
+    def read_data(self) -> Optional[np.ndarray]:
+        if self.circular_buffer is None:
+            return None
+        try:
+            return self.get_latest_window(duration_ms=50)
+        except ValueError:
+            return np.zeros((self.num_channels, 1), dtype=np.float32)
+
+    def write_output(self, channel_index: int, value: Union[float, bool]) -> None:
+        pass
+
+    def trigger_action(self, channel_index: int) -> None:
+        pass
 
     def __enter__(self):
         return self

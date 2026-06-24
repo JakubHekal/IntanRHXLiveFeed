@@ -5,7 +5,7 @@ from rhx_realtime_feed.workers.processing_worker import PSD_BUFFER_SEC, WAVEFORM
 from rhx_realtime_feed.plot_settings import load_plot_setting, DEFAULT_PSDS, DEFAULT_WAVEFORM, DEFAULT_SPIKE_BIN
 
 class ConnectDialog(QtWidgets.QDialog):
-    connection_request_signal = QtCore.pyqtSignal(str, int, int, int, str, str, str, int, int, int, int)
+    connection_request_signal = QtCore.pyqtSignal(str, int, int, str, str, str, int, int, int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -39,9 +39,6 @@ class ConnectDialog(QtWidgets.QDialog):
 
         self.data_port_edit = QtWidgets.QLineEdit("5001")
         connection_form.addRow("Data port:", self.data_port_edit)
-
-        self.sample_rate_edit = QtWidgets.QLineEdit("20000")
-        connection_form.addRow("Sample rate (Hz):", self.sample_rate_edit)
 
         self.port_combo = QtWidgets.QComboBox()
         self.port_combo.addItems(["A", "B", "C", "D"])
@@ -116,7 +113,6 @@ class ConnectDialog(QtWidgets.QDialog):
         self.host_edit.setDisabled(busy)
         self.command_port_edit.setDisabled(busy)
         self.data_port_edit.setDisabled(busy)
-        self.sample_rate_edit.setDisabled(busy)
         self.project_name_edit.setDisabled(busy)
         self.project_path_edit.setDisabled(busy)
         self.project_path_browse_button.setDisabled(busy)
@@ -188,14 +184,6 @@ class ConnectDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(self, "Invalid Input", "Ports must be valid integers from 1 to 65535.")
             return
 
-        try:
-            sample_rate = int(self.sample_rate_edit.text().strip())
-            if sample_rate <= 0:
-                raise ValueError
-        except ValueError:
-            QtWidgets.QMessageBox.critical(self, "Invalid Input", "Sample rate must be a positive integer.")
-            return
-
         project_name = self.project_name_edit.text().strip()
         if not project_name:
             QtWidgets.QMessageBox.critical(self, "Invalid Input", "Project name is required.")
@@ -232,7 +220,6 @@ class ConnectDialog(QtWidgets.QDialog):
             host,
             command_port,
             data_port,
-            sample_rate,
             project_name,
             project_path,
             port,

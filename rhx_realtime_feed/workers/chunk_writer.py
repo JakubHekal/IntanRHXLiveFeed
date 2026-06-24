@@ -33,7 +33,6 @@ class ChunkWriter:
         self.flush_interval_sec = float(flush_interval_sec)
         
         self.chunk_max_samples = max(1, int(round(self.sample_rate * self.chunk_max_sec)))
-        
         self.csv_file_handle = None
         self.csv_writer = None
         self.csv_sample_counter = 0
@@ -44,8 +43,11 @@ class ChunkWriter:
         self._chunks_since_flush = 0
         self._last_csv_flush_t = 0.0
         self.raw_chunks_dir = None
-        
         self._io_mutex = QtCore.QMutex()
+
+    @property
+    def sample_index(self) -> int:
+        return getattr(self, "csv_sample_counter", 0)
     
     def start_session(self, project_name, project_path):
         """

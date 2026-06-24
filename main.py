@@ -11,7 +11,9 @@ from rhx_realtime_feed.screens.connect_screen import ConnectDialog
 from rhx_realtime_feed.updater import UpdateCheckThread, UpdateInfo
 from rhx_realtime_feed.screens.marker_dialog import MarkerDialog
 from rhx_realtime_feed.screens.plot_screen import PlotScreen
+from rhx_realtime_feed.device import IntanRHXDevice
 from rhx_realtime_feed.workers.rhx_worker import RHXWorker
+from rhx_realtime_feed.workers.chunk_writer import ChunkWriter
 from rhx_realtime_feed.state_manager import StateManager, AppState
 from rhx_realtime_feed.telemetry_logger import set_telemetry_file, append_telemetry_line
 
@@ -353,7 +355,6 @@ class MainWindow(QtWidgets.QMainWindow):
         host,
         command_port,
         data_port,
-        sample_rate,
         project_name,
         project_path,
         port,
@@ -385,15 +386,30 @@ class MainWindow(QtWidgets.QMainWindow):
             spike_bin_sec=spike_bin_sec,
         )
         
+        from rhx_realtime_feed.workers.rhx_worker import RAW_CHUNK_SEC, CSV_FILE_BUFFER_BYTES, CSV_FLUSH_INTERVAL_SEC
+
+        device = IntanRHXDevice(
+            host=host,
+            command_port=command_port,
+            data_port=data_port,
+            num_channels=1,
+        )
+        device.configure(enable_wide_channel=[channel], port=port, blocks_per_write=1)
+
+        effective_fs = float(device.sample_rate)
+        sink = ChunkWriter(
+            sample_rate=effective_fs,
+            channel=channel,
+            chunk_max_sec=RAW_CHUNK_SEC,
+            buffer_bytes=CSV_FILE_BUFFER_BYTES,
+            flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
+        )
+
         self.rhx_worker = RHXWorker(
-            host,
-            command_port,
-            data_port,
-            sample_rate,
-            project_name,
-            project_path,
-            port,
-            channel,
+            device=device,
+            output_sink=sink,
+            project_name=project_name,
+            project_path=project_path,
         )
         self.rhx_worker.connection_request_result_signal.connect(self._on_connection_result)
         # Connect state/data signals before start so initial worker emits are not missed.
@@ -417,10 +433,11 @@ class MainWindow(QtWidgets.QMainWindow):
             run_dir = str(paths.get("run_dir", "") or "")
             if run_dir:
                 set_telemetry_file(str(Path(run_dir) / "telemetry.txt"))
+            dev = self.rhx_worker.device
             self.plot_screen.set_connection_details(
-                host=self.rhx_worker.host,
-                command_port=self.rhx_worker.command_port,
-                data_port=self.rhx_worker.data_port,
+                host=getattr(dev, "host", "N/A"),
+                command_port=getattr(dev, "command_port", 0),
+                data_port=getattr(dev, "data_port", 0),
                 sample_rate=self.rhx_worker.sample_rate,
                 project_name=self.rhx_worker.project_name,
             )
