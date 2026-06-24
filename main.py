@@ -468,11 +468,13 @@ class MainWindow(QtWidgets.QMainWindow):
             if not self.state_manager.user_pause():
                 print("[UI] Failed to pause receiving")
                 return
+            self.rhx_worker.pause_receiving()
         # If in PAUSED state, resume using user_resume
         elif current_state == AppState.PAUSED:
             if not self.state_manager.user_resume():
                 print("[UI] Failed to resume from paused state")
                 return
+            self.rhx_worker.resume_receiving()
         # If in CONNECTED state, start streaming using request_stream
         elif current_state == AppState.CONNECTED:
             if not self.state_manager.request_stream():

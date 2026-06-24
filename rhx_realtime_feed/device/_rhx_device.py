@@ -44,6 +44,7 @@ class IntanRHXDevice(Device, RHXConfig):
         self.buffer_duration_sec = buffer_duration_sec
         self.circular_buffer = None
         self.circular_idx = 0
+        self._last_read_cursor = 0
         self.buffer_lock = threading.Lock()
         self.streaming_thread = None
         self.streaming = False
@@ -108,25 +109,35 @@ class IntanRHXDevice(Device, RHXConfig):
             print("Failed to initialize connection with 'Remote TCP Control'")
             self._connected = False
 
+        return self._connected
+
     def receive_data(self, buffer: bytearray, read_size: int, max_reads: int = 16):
-        """Try to drain multiple chunks from the socket without blocking forever."""
+        """Try to drain multiple chunks from the socket without blocking forever.
+        Returns (buffer, peer_closed) where peer_closed indicates the remote end
+        closed the connection."""
+        peer_closed = False
         for _ in range(max_reads):
             try:
                 chunk = self.data_socket.recv(read_size)
                 if not chunk:
+                    peer_closed = True
                     break
                 buffer.extend(chunk)
                 if len(chunk) < read_size:
                     break
             except socket.timeout:
                 break
-        return buffer
+            except (ConnectionResetError, ConnectionAbortedError, OSError):
+                peer_closed = True
+                break
+        return buffer, peer_closed
 
     def init_circular_buffer(self):
         """Initialize the circular buffer for real-time data."""
         buffer_length = int(self.sample_rate * self.buffer_duration_sec)
         self.circular_buffer = np.zeros((self.num_channels, buffer_length), dtype=np.float32)
         self.circular_idx = 0
+        self._last_read_cursor = 0
 
     def parse_emg_stream_fast(self, raw_bytes: bytearray, synced=True):
         """Fast EMG stream parser."""
@@ -210,10 +221,15 @@ class IntanRHXDevice(Device, RHXConfig):
         """Background worker thread for streaming data."""
         rolling_buffer = bytearray()
         self.set_run_mode("run")
+        _intentional_stop = True
 
         try:
             while self.streaming:
-                rolling_buffer = self.receive_data(rolling_buffer, self.read_size)
+                rolling_buffer, peer_closed = self.receive_data(rolling_buffer, self.read_size)
+                if peer_closed:
+                    print("[DEVICE] Data socket closed by peer")
+                    _intentional_stop = False
+                    break
                 emg_data, timestamps, consumed, self._synced = self.parse_emg_stream_fast(rolling_buffer)
                 rolling_buffer = rolling_buffer[consumed:]
 
@@ -234,9 +250,17 @@ class IntanRHXDevice(Device, RHXConfig):
                                 self.circular_buffer[:, idx:] = emg_data[:, :part1]
                                 self.circular_buffer[:, :n - part1] = emg_data[:, part1:]
                             self.circular_idx = (idx + n) % buf_len
+        except:
+            _intentional_stop = False
 
         finally:
-            self.set_run_mode("stop")
+            try:
+                self.set_run_mode("stop")
+            except Exception:
+                pass
+            self.streaming = False
+            if not _intentional_stop:
+                self._connected = False
 
     def _update_read_size(self):
         """Update read size based on channel count and blocks per write."""
@@ -277,6 +301,7 @@ class IntanRHXDevice(Device, RHXConfig):
         except Exception:
             pass
 
+        self._connected = True
         self.streaming = True
         self.streaming_thread = threading.Thread(target=self._streaming_worker, daemon=True)
         self.streaming_thread.start()
@@ -338,7 +363,7 @@ class IntanRHXDevice(Device, RHXConfig):
 
         try:
             while write_index < total_samples:
-                rolling_buffer = self.receive_data(rolling_buffer, self.read_size)
+                rolling_buffer, _ = self.receive_data(rolling_buffer, self.read_size)
                 emg_data, timestamps, consumed, self._synced = self.parse_emg_stream_fast(
                     rolling_buffer, synced=self._synced
                 )
@@ -400,10 +425,22 @@ class IntanRHXDevice(Device, RHXConfig):
     def read_data(self) -> Optional[np.ndarray]:
         if self.circular_buffer is None:
             return None
-        try:
-            return self.get_latest_window(duration_ms=50)
-        except ValueError:
-            return np.zeros((self.num_channels, 1), dtype=np.float32)
+        with self.buffer_lock:
+            cur = int(self.circular_idx)
+            prev = int(self._last_read_cursor)
+            buf_len = self.circular_buffer.shape[1]
+            n_new = (cur - prev) % buf_len
+            if n_new <= 0 or n_new > buf_len // 2:
+                return None
+            if prev < cur:
+                data = self.circular_buffer[:, prev:cur].copy()
+            else:
+                data = np.hstack([
+                    self.circular_buffer[:, prev:],
+                    self.circular_buffer[:, :cur],
+                ]).copy()
+            self._last_read_cursor = cur
+            return data
 
     def write_output(self, channel_index: int, value: Union[float, bool]) -> None:
         pass

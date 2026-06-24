@@ -19,7 +19,7 @@ ACQUIRE_CHUNK_MS = max(20, PLOT_INTERVAL_MS)
 NO_DATA_SLEEP_MS = max(1, PLOT_INTERVAL_MS // 4)
 READ_WAIT_SLICE_MS = 2
 WAITING_CHUNK_THRESHOLD = 10
-NO_DATA_LOSS_TIMEOUT_SEC = 3.0
+NO_DATA_LOSS_TIMEOUT_SEC = 60.0
 RAW_CHUNK_SEC = 300
 TELEMETRY_EMIT_INTERVAL_SEC = 5.0
 CSV_FLUSH_INTERVAL_SEC = 1.0
@@ -70,6 +70,7 @@ class RHXWorker(QtCore.QThread):
 
         self.state_manager = StateManager.get_instance()
         self._last_emitted_state = None
+        self._paused = False
 
     def __del__(self):
         self.stop()
@@ -96,10 +97,10 @@ class RHXWorker(QtCore.QThread):
         return False
 
     def pause_receiving(self):
-        pass
+        self._paused = True
 
     def resume_receiving(self):
-        pass
+        self._paused = False
 
     def request_marker(self, marker_name: str = ""):
         marker_id, marker_ts, markers_snapshot = self.marker_manager.add_marker(
@@ -195,14 +196,14 @@ class RHXWorker(QtCore.QThread):
             next_read_t = time.perf_counter()
 
             while not self.isInterruptionRequested():
+                if self.device is not None and not self.device.connected:
+                    break
+
                 marker_catalog, marker_csv_path = self.marker_manager.process_commands()
                 if marker_catalog is not None:
                     self.marker_catalog_signal.emit(marker_catalog)
 
-                should_stream = self.state_manager.get_current_state() in (
-                    AppState.STREAMING,
-                    AppState.WAITING_FOR_DATA,
-                )
+                should_stream = not self._paused
 
                 if not should_stream and is_currently_streaming:
                     try:
@@ -265,7 +266,8 @@ class RHXWorker(QtCore.QThread):
                                 self.acquisition_state_signal.emit("waiting")
 
                         if self._last_fresh_data_monotonic.elapsed() >= int(NO_DATA_LOSS_TIMEOUT_SEC * 1000):
-                            break
+                            if self.device is not None and not self.device.connected:
+                                break
 
                         self.msleep(NO_DATA_SLEEP_MS)
                         continue
@@ -294,7 +296,8 @@ class RHXWorker(QtCore.QThread):
                         and self._last_chunk_data.shape == arr.shape
                         and self._last_chunk_data[0, 0] == arr[0, 0]
                         and self._last_chunk_data[0, -1] == arr[0, -1]
-                        and np.array_equal(self._last_chunk_data, arr)
+                        and (self.repeated_chunk_count < WAITING_CHUNK_THRESHOLD
+                             or np.array_equal(self._last_chunk_data, arr))
                     )
 
                     if is_repeated_chunk:
@@ -308,7 +311,8 @@ class RHXWorker(QtCore.QThread):
                                 self.acquisition_state_signal.emit("waiting")
 
                         if self._last_fresh_data_monotonic.elapsed() >= int(NO_DATA_LOSS_TIMEOUT_SEC * 1000):
-                            break
+                            if self.device is not None and not self.device.connected:
+                                break
 
                         self.msleep(NO_DATA_SLEEP_MS)
                         continue
