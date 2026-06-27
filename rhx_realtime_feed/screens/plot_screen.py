@@ -28,11 +28,11 @@ from rhx_realtime_feed.workers.expensive_task_worker import ExpensiveTaskWorker
 DISPLAY_WINDOW_SEC    = 10          # raw signal x-axis window
 DISPLAY_BUFFER_SEC    = 300         # ring buffer size (5 min)
 DEFAULT_SAMPLING_RATE = 20000
-MAX_DISPLAY_POINTS    = 5000
+MAX_DISPLAY_POINTS    = 2500
 
 # ── Per-subplot render rate limits ────────────────────────────────────────────
-PLOT_UPDATE_FREQ_HZ = 60
-RAW_RENDER_HZ       = 60
+PLOT_UPDATE_FREQ_HZ = 90
+RAW_RENDER_HZ       = 30
 PSD_RENDER_HZ       = 30
 SPIKE_RENDER_HZ     = 30
 WAVEFORM_YLIM_ABS_UV = 100
@@ -57,6 +57,24 @@ def _make_display_buffer(fs: float) -> np.ndarray:
     """Pre-allocate fixed-size ring buffer for DISPLAY_BUFFER_SEC of data."""
     n = max(1, int(round(fs * DISPLAY_BUFFER_SEC)))
     return np.zeros((2, n), dtype=np.float64)
+
+
+def _minmax_downsample(x, y, max_points):
+    """Decimate to max_points using min-max per bin (peak-preserving)."""
+    n = x.size
+    if n <= max_points:
+        return x, y
+    step = n // max_points
+    n_bins = n // step
+    x = x[:n_bins * step]
+    y = y[:n_bins * step]
+    x_binned = x.reshape(-1, step)
+    y_binned = y.reshape(-1, step)
+    x_out = np.repeat(x_binned.mean(axis=1), 2)
+    y_out = np.empty(n_bins * 2)
+    y_out[0::2] = y_binned.min(axis=1)
+    y_out[1::2] = y_binned.max(axis=1)
+    return x_out, y_out
 
 
 class PgCanvas(QtWidgets.QWidget):
@@ -998,8 +1016,8 @@ class PlotScreen(QtWidgets.QWidget):
                 n_vis = int(self.sampling_rate * DISPLAY_WINDOW_SEC)
                 x_vis, y_vis = self._ring_read_tail(n_vis)
 
-                step = max(1, x_vis.size // MAX_DISPLAY_POINTS)
-                self.canvas.raw_curve.setData(x_vis[::step], y_vis[::step])
+                xd, yd = _minmax_downsample(x_vis, y_vis, MAX_DISPLAY_POINTS)
+                self.canvas.raw_curve.setData(xd, yd)
 
                 x_end = float(x_vis[-1]) if x_vis.size else 0.0
                 x_start = max(0.0, x_end - DISPLAY_WINDOW_SEC)
@@ -1081,8 +1099,8 @@ class PlotScreen(QtWidgets.QWidget):
                 if t_src is not None and y_src is not None and np.asarray(t_src).size:
                     x_seg = np.asarray(t_src, dtype=np.float64)
                     y_seg = np.asarray(y_src, dtype=np.float64)
-                    step = max(1, x_seg.size // MAX_RAW_HISTORY_PLOT_POINTS)
-                    self.canvas.raw_curve.setData(x_seg[::step], y_seg[::step])
+                    xd, yd = _minmax_downsample(x_seg, y_seg, MAX_RAW_HISTORY_PLOT_POINTS)
+                    self.canvas.raw_curve.setData(xd, yd)
 
             self._sync_marker_lines(max(0.0, min(x_start, x_end)), max(0.0, max(x_start, x_end)))
             self._last_raw_render_t = now
