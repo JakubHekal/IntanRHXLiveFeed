@@ -453,3 +453,31 @@ class IntanRHXDevice(Device, RHXConfig):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+    @classmethod
+    def get_operations(cls):
+        from .device import DeviceOperation, ParamDef
+        return [
+            DeviceOperation("Configure", "Configure", instantaneous=True, default_duration=0, color="#2B88D8", params=[
+                ParamDef("blocks_per_write", "Blocks per Write", "int", default=1, min_val=1, max_val=100),
+                ParamDef("enable_wide_channel", "Enable Wide Channel", "bool", default=False),
+            ]),
+            DeviceOperation("Stream", "Stream", default_duration=10.0, color="#4BA3E3"),
+            DeviceOperation("Stimulus", "Stimulus", default_duration=3.0, color="#D13438", params=[
+                ParamDef("channel", "Channel", "int", default=1, min_val=1, max_val=256),
+                ParamDef("amplitude", "Amplitude (µV)", "float", default=500.0, min_val=0.0, max_val=5000.0),
+                ParamDef("waveform", "Waveform", "choice", default="biphasic", choices=["biphasic", "monophasic"]),
+                ParamDef("frequency", "Frequency (Hz)", "float", default=100.0, min_val=1.0, max_val=1000.0),
+            ]),
+        ]
+
+    @classmethod
+    def get_config_params(cls):
+        from .device import ParamDef
+        return [
+            ParamDef("host", "Host", "str", default="127.0.0.1"),
+            ParamDef("command_port", "Command Port", "int", default=5000, min_val=1024, max_val=65535),
+            ParamDef("data_port", "Data Port", "int", default=5001, min_val=1024, max_val=65535),
+            ParamDef("num_channels", "Num Channels", "int", default=128, min_val=1, max_val=512),
+            ParamDef("buffer_duration_sec", "Buffer Duration (s)", "float", default=5.0, min_val=1.0, max_val=60.0),
+        ]

@@ -93,6 +93,25 @@ class SimulatedRecordingDevice(Device):
     def trigger_action(self, channel_index: int) -> None:
         pass
 
+    @classmethod
+    def get_operations(cls):
+        from .device import DeviceOperation
+        return [
+            DeviceOperation("Configure", "Configure", instantaneous=True, default_duration=0, color="#2B88D8"),
+            DeviceOperation("Stream", "Stream", default_duration=12.0, color="#4BA3E3"),
+        ]
+
+    @classmethod
+    def get_config_params(cls):
+        from .device import ParamDef
+        return [
+            ParamDef("sample_rate", "Sample Rate (Hz)", "int", default=20000, min_val=1000, max_val=50000),
+            ParamDef("num_channels", "Num Channels", "int", default=1, min_val=1, max_val=256),
+            ParamDef("amplitude", "Amplitude (µV)", "float", default=500.0, min_val=0.0, max_val=5000.0),
+            ParamDef("frequency", "Frequency (Hz)", "float", default=10.0, min_val=0.1, max_val=1000.0),
+            ParamDef("noise_level", "Noise Level (µV)", "float", default=10.0, min_val=0.0, max_val=500.0),
+        ]
+
 
 class SimulatedActorDevice(Device):
     name = "Simulated Actor"
@@ -144,6 +163,27 @@ class SimulatedActorDevice(Device):
 
     def configure(self, **kwargs) -> None:
         self.command_log.append(("configure", kwargs, time.perf_counter()))
+
+    @classmethod
+    def get_operations(cls):
+        from .device import DeviceOperation, ParamDef
+        return [
+            DeviceOperation("Configure", "Configure", instantaneous=True, default_duration=0, color="#B146C2"),
+            DeviceOperation("Write", "Write", default_duration=2.0, color="#C239B3", params=[
+                ParamDef("channel", "Channel", "int", default=1, min_val=1, max_val=64),
+                ParamDef("value", "Value (V)", "float", default=5.0, min_val=-12.0, max_val=12.0),
+            ]),
+            DeviceOperation("Trigger", "Trigger", default_duration=0.5, color="#8764B8", params=[
+                ParamDef("channel", "Channel", "int", default=1, min_val=1, max_val=64),
+            ]),
+        ]
+
+    @classmethod
+    def get_config_params(cls):
+        from .device import ParamDef
+        return [
+            ParamDef("num_outputs", "Num Outputs", "int", default=2, min_val=1, max_val=64),
+        ]
 
 
 class SimulatedCombinedDevice(Device):
@@ -204,3 +244,27 @@ class SimulatedCombinedDevice(Device):
     def configure(self, **kwargs) -> None:
         self._recorder.configure(**{k: v for k, v in kwargs.items() if k in ("frequency", "amplitude", "noise_level")})
         self._actor.configure(**{k: v for k, v in kwargs.items() if k not in ("frequency", "amplitude", "noise_level")})
+
+    @classmethod
+    def get_operations(cls):
+        from .device import DeviceOperation, ParamDef
+        return [
+            DeviceOperation("Configure", "Configure", instantaneous=True, default_duration=0, color="#2B88D8"),
+            DeviceOperation("Stream", "Stream", default_duration=10.0, color="#4BA3E3"),
+            DeviceOperation("Write", "Write", default_duration=2.0, color="#C239B3", params=[
+                ParamDef("channel", "Channel", "int", default=1, min_val=1, max_val=64),
+                ParamDef("value", "Value (V)", "float", default=5.0, min_val=-12.0, max_val=12.0),
+            ]),
+            DeviceOperation("Trigger", "Trigger", default_duration=0.5, color="#8764B8", params=[
+                ParamDef("channel", "Channel", "int", default=1, min_val=1, max_val=64),
+            ]),
+        ]
+
+    @classmethod
+    def get_config_params(cls):
+        from .device import ParamDef
+        return [
+            ParamDef("sample_rate", "Sample Rate (Hz)", "int", default=10000, min_val=1000, max_val=50000),
+            ParamDef("num_inputs", "Num Inputs", "int", default=2, min_val=1, max_val=256),
+            ParamDef("num_outputs", "Num Outputs", "int", default=2, min_val=1, max_val=64),
+        ]

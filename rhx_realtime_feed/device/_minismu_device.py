@@ -162,3 +162,31 @@ class MiniSMUDevice(Device):
                 self._smu.set_oversampling_ratio(2, osr)
             except SMUException:
                 pass
+
+    @classmethod
+    def get_operations(cls):
+        from .device import DeviceOperation, ParamDef
+        return [
+            DeviceOperation("Configure", "Configure", instantaneous=True, default_duration=0, color="#E74856", params=[
+                ParamDef("current_protection", "Current Protection (A)", "float", default=0.1, min_val=0.001, max_val=1.0),
+                ParamDef("voltage_protection", "Voltage Protection (V)", "float", default=12.0, min_val=0.1, max_val=24.0),
+                ParamDef("oversampling", "Oversampling", "int", default=16, min_val=1, max_val=256),
+            ]),
+            DeviceOperation("Stimulus", "Stimulus", default_duration=5.0, color="#F1707A", params=[
+                ParamDef("voltage", "Voltage (V)", "float", default=5.0, min_val=-12.0, max_val=12.0),
+                ParamDef("current_limit", "Current Limit (A)", "float", default=0.1, min_val=0.001, max_val=1.0),
+                ParamDef("duration_s", "Duration (s)", "float", default=1.0, min_val=0.1, max_val=60.0),
+            ]),
+            DeviceOperation("Measure", "Measure", instantaneous=True, default_duration=0, color="#E74856"),
+        ]
+
+    @classmethod
+    def get_config_params(cls):
+        from .device import ParamDef
+        return [
+            ParamDef("connection_type", "Connection Type", "choice", default="usb", choices=["usb", "network"]),
+            ParamDef("port", "Port", "str", default="COM3"),
+            ParamDef("host", "Host", "str", default="192.168.1.1"),
+            ParamDef("tcp_port", "TCP Port", "int", default=3333, min_val=1024, max_val=65535),
+            ParamDef("mode", "Mode", "choice", default="FVMI", choices=["FVMI", "FIMV"]),
+        ]

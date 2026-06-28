@@ -1,6 +1,6 @@
 """rhx_realtime_feed.device - Hardware device abstraction layer."""
 
-from .device import Device, ChannelInfo, OutputSink
+from .device import Device, ChannelInfo, OutputSink, DeviceOperation, ParamDef
 from ._rhx_config import RHXConfig, GetSampleRateFailure
 from ._rhx_device import IntanRHXDevice
 from ._simulated_devices import (
@@ -18,7 +18,7 @@ except ImportError:
 
 
 __all__ = [
-    "Device", "ChannelInfo", "OutputSink",
+    "Device", "ChannelInfo", "OutputSink", "DeviceOperation", "ParamDef",
     "RHXConfig", "GetSampleRateFailure",
     "IntanRHXDevice",
     "SimulatedRecordingDevice",

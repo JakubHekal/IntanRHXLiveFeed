@@ -5,6 +5,27 @@ import numpy as np
 
 
 @dataclass
+class ParamDef:
+    name: str
+    label: str
+    dtype: str  # "float" | "int" | "str" | "bool" | "choice"
+    default: Any = None
+    min_val: Optional[float] = None
+    max_val: Optional[float] = None
+    choices: Optional[List[str]] = None
+
+
+@dataclass
+class DeviceOperation:
+    name: str
+    label: str
+    default_duration: float = 1.0
+    instantaneous: bool = False
+    params: List[ParamDef] = field(default_factory=list)
+    color: str = "#0078D4"
+
+
+@dataclass
 class ChannelInfo:
     index: int
     name: str
@@ -67,6 +88,14 @@ class Device(ABC):
 
     def configure(self, **kwargs) -> None:
         pass
+
+    @classmethod
+    def get_operations(cls) -> List[DeviceOperation]:
+        return []
+
+    @classmethod
+    def get_config_params(cls) -> List[ParamDef]:
+        return []
 
 
 class OutputSink(Protocol):
