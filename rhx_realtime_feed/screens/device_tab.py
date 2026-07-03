@@ -330,6 +330,29 @@ class NeuralDeviceTab(DeviceTab):
             latest = float(self._total) / float(self.sampling_rate)
         return earliest, latest
 
+    def _resize(self, num_channels: int, channel_labels: list[str] | None = None):
+        """Resize ring buffer and per-channel data when channel count changes."""
+        if num_channels == self.num_channels and channel_labels is None:
+            return
+        self.num_channels = num_channels
+        if channel_labels is not None:
+            self._channel_labels = channel_labels
+        self._ring = _make_display_buffer(self.sampling_rate, self.num_channels)
+        self._cap = self._ring.shape[1]
+        self._wpos = 0
+        self._total = 0
+        self._raw_hist_t_low = [[] for _ in range(self.num_channels)]
+        self._raw_hist_y_low = [[] for _ in range(self.num_channels)]
+        self._raw_hist_t_high = [[] for _ in range(self.num_channels)]
+        self._raw_hist_y_high = [[] for _ in range(self.num_channels)]
+        self._channel_combo.blockSignals(True)
+        self._channel_combo.clear()
+        self._channel_combo.addItems(self._channel_labels)
+        self._channel_combo.blockSignals(False)
+        if self._current_channel_idx >= self.num_channels:
+            self._current_channel_idx = 0
+        self._last_spike_scan_sample = 0
+
     def on_data(self, chunk: np.ndarray):
         ingest_t0 = time.perf_counter()
         if chunk is None:
@@ -342,11 +365,15 @@ class NeuralDeviceTab(DeviceTab):
         if n_samples < 1:
             return
 
-        # use min of incoming channels vs configured
-        use_ch = min(n_channels, self.num_channels)
+        # lazy resize ring buffer if incoming channel count doesn't match
+        if n_channels != self.num_channels:
+            _ports = ['A', 'B', 'C', 'D']
+            chan_labels = [f"{_ports[i // 32]}-{i % 32:03d}" for i in range(n_channels) if i // 32 < 4]
+            self._resize(n_channels, chan_labels)
+
         t_chunk = (self.sample_counter + np.arange(n_samples, dtype=np.float64)) / self.sampling_rate
-        self._ring_write(t_chunk, arr[:use_ch, :])
-        self._append_raw_history(t_chunk, arr[:use_ch, :])
+        self._ring_write(t_chunk, arr)
+        self._append_raw_history(t_chunk, arr)
         self.sample_counter += n_samples
         self._telemetry_chunks += 1
         self._telemetry_samples += int(n_samples)

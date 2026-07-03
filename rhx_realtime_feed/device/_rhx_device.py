@@ -49,6 +49,7 @@ class IntanRHXDevice(Device, RHXConfig):
         self.streaming_thread = None
         self.streaming = False
 
+        self._enabled_channel_indices = list(range(num_channels))
         self.bytes_per_frame = 4 + 2 * self.num_channels
         self.bytes_per_block = 4 + FRAMES_PER_BLOCK * self.bytes_per_frame
         self.blocks_per_write = 1
@@ -130,6 +131,38 @@ class IntanRHXDevice(Device, RHXConfig):
                 peer_closed = True
                 break
         return buffer, peer_closed
+
+    @staticmethod
+    def _parse_channel_range(s: str) -> list[int]:
+        """Parse '0-31' -> [0..31], '0-31,32-63' -> [0..63], '0,2,4' -> [0,2,4]."""
+        indices = []
+        for part in s.split(','):
+            part = part.strip()
+            if not part:
+                continue
+            if '-' in part:
+                a, b = part.split('-', 1)
+                indices.extend(range(int(a), int(b) + 1))
+            else:
+                indices.append(int(part))
+        return indices
+
+    _PORTS = ['a', 'b', 'c', 'd']
+
+    def _set_enabled_channels(self, indices: list[int]):
+        """Tell the RHX server which channels to stream and update local state."""
+        indices = sorted(set(indices))
+        self.clear_all_data_outputs()
+        for idx in indices:
+            port_idx = idx // 32
+            ch = idx % 32
+            if port_idx < 4:
+                self.enable_wide_channel(ch, port=self._PORTS[port_idx])
+        self._enabled_channel_indices = indices
+        self.num_channels = len(indices)
+        self.bytes_per_frame = 4 + 2 * self.num_channels
+        self._update_read_size()
+        self.init_circular_buffer()
 
     def init_circular_buffer(self):
         """Initialize the circular buffer for real-time data."""
@@ -270,7 +303,10 @@ class IntanRHXDevice(Device, RHXConfig):
     def configure(self, **kwargs):
         """Configure device parameters."""
         for key, value in kwargs.items():
-            if "blocks_per_write" in key:
+            if "channels" in key:
+                indices = self._parse_channel_range(str(value))
+                self._set_enabled_channels(indices)
+            elif "blocks_per_write" in key:
                 self.set_blocks_per_write(value)
                 self.blocks_per_write = max(1, int(value))
                 self._update_read_size()
@@ -409,11 +445,16 @@ class IntanRHXDevice(Device, RHXConfig):
 
     @property
     def channels(self) -> List[ChannelInfo]:
+        indices = getattr(self, '_enabled_channel_indices', list(range(self.num_channels)))
         return [
-            ChannelInfo(i, f"{p}-{i:03d}", "input", "uV", -5000.0, 5000.0)
-            for i in range(self.num_channels)
-            for p in getattr(self, "_enabled_ports", ["a"])
-        ] if self.num_channels else []
+            ChannelInfo(
+                idx,
+                f"{self._PORTS[idx // 32].upper()}-{idx % 32:03d}",
+                "input", "uV", -5000.0, 5000.0
+            )
+            for idx in indices
+            if idx // 32 < 4
+        ]
 
     def start_acquisition(self) -> None:
         self.start_streaming()
@@ -461,7 +502,9 @@ class IntanRHXDevice(Device, RHXConfig):
                 ParamDef("blocks_per_write", "Blocks per Write", "int", default=1, min_val=1, max_val=100),
                 ParamDef("enable_wide_channel", "Enable Wide Channel", "bool", default=False),
             ]),
-            DeviceOperation("Stream", "Stream", default_duration=10.0, color="#4BA3E3"),
+            DeviceOperation("Stream", "Stream", default_duration=10.0, color="#4BA3E3", params=[
+                ParamDef("channels", "Channels (e.g. 0-31)", "str", default="0-31"),
+            ]),
             DeviceOperation("Stimulus", "Stimulus", default_duration=3.0, color="#D13438", params=[
                 ParamDef("channel", "Channel", "int", default=1, min_val=1, max_val=256),
                 ParamDef("amplitude", "Amplitude (µV)", "float", default=500.0, min_val=0.0, max_val=5000.0),

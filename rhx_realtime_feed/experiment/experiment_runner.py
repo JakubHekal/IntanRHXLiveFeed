@@ -14,6 +14,7 @@ class ExperimentRunner(QtCore.QObject):
     experiment_finished = QtCore.pyqtSignal(bool, str)  # success, message
     error_occurred = QtCore.pyqtSignal(str, str)  # device_name, error_message
     data_received = QtCore.pyqtSignal(str, object)  # device_name, chunk
+    device_configured = QtCore.pyqtSignal(str, int, list)  # device_name, num_channels, labels
     user_input_requested = QtCore.pyqtSignal(str)  # message
 
     def __init__(self, devices: list, sequence: list, run_path: str, parent=None):
@@ -40,6 +41,7 @@ class ExperimentRunner(QtCore.QObject):
         self._thread.experiment_finished.connect(self.experiment_finished)
         self._thread.error_occurred.connect(self.error_occurred)
         self._thread.data_received.connect(self.data_received)
+        self._thread.device_configured.connect(self.device_configured)
         self._thread.user_input_requested.connect(self.user_input_requested)
         self._thread.finished.connect(self._on_thread_finished)
         self._thread.start()
@@ -73,6 +75,7 @@ class _RunnerThread(QtCore.QThread):
     error_occurred = QtCore.pyqtSignal(str, str)
     data_received = QtCore.pyqtSignal(str, object)
     user_input_requested = QtCore.pyqtSignal(str)
+    device_configured = QtCore.pyqtSignal(str, int, list)  # device_name, num_channels, labels
 
     def __init__(self, devices, sequence, run_path, parent=None):
         super().__init__(parent)
@@ -139,8 +142,13 @@ class _RunnerThread(QtCore.QThread):
                             self.msleep(500)
                             continue
 
+                        # configure first so device.channels reflects the right channel count
+                        device.configure(**{k: v for k, v in params.items() if k not in ('duration_s', 'block_label')})
+
                         sr = device.sample_rate if device.sample_rate else 20000.0
-                        num_ch = len(getattr(device, 'channels', [])) or 1
+                        ch_labels = [c.name for c in getattr(device, 'channels', [])]
+                        num_ch = len(ch_labels) or 1
+                        self.device_configured.emit(device_name, num_ch, ch_labels)
 
                         # raw/{device_name}/ per run
                         dev_raw_dir = self._run_path / "raw" / (device_name.replace(" ", "_"))
@@ -157,7 +165,6 @@ class _RunnerThread(QtCore.QThread):
                         sink.filename_prefix = params.get("block_label", "Stream")
                         sink._open_new_chunk_locked()
 
-                        device.configure(**{k: v for k, v in params.items() if k not in ('duration_s', 'block_label')})
                         device.start_acquisition()
 
                         deadline = time.perf_counter() + duration

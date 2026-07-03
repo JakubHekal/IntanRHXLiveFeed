@@ -1202,6 +1202,10 @@ class MainStage(QWidget):
         self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         self.btn_pause = QToolButton()
         self.btn_pause.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+        self.btn_stop = QToolButton()
+        self.btn_stop.setIcon(self.style().standardIcon(QStyle.SP_MediaStop))
+        self.btn_stop.setEnabled(False)
+        self.btn_pause.setEnabled(False)
         btn_prev = QToolButton()
         btn_prev.setIcon(self.style().standardIcon(QStyle.SP_MediaSkipBackward))
         btn_next = QToolButton()
@@ -1213,6 +1217,7 @@ class MainStage(QWidget):
 
         timeline_bar.addWidget(self.btn_play)
         timeline_bar.addWidget(self.btn_pause)
+        timeline_bar.addWidget(self.btn_stop)
         timeline_bar.addWidget(btn_prev)
         timeline_bar.addWidget(btn_next)
         timeline_bar.addWidget(QLabel("0"))
@@ -1578,11 +1583,35 @@ class MainWindow(QMainWindow):
         self._experiment_runner.experiment_finished.connect(self._on_exp_finished)
         self._experiment_runner.error_occurred.connect(self._on_exp_error)
         self._experiment_runner.data_received.connect(self.main_stage.plot_screen.on_data)
+        self._experiment_runner.device_configured.connect(self.main_stage.plot_screen.on_device_configured)
         self._experiment_runner.user_input_requested.connect(self._on_user_input_requested)
         self._experiment_runner.start()
 
+        # disconnect stale button connections
+        try:
+            self.main_stage.btn_play.clicked.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            self.main_stage.btn_pause.clicked.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            self.main_stage.btn_stop.clicked.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+
         self.main_stage.btn_play.clicked.connect(self._experiment_runner.resume)
+        self.main_stage.btn_play.clicked.connect(lambda: self.main_stage.btn_play.setEnabled(False))
+        self.main_stage.btn_play.clicked.connect(lambda: self.main_stage.btn_pause.setEnabled(True))
         self.main_stage.btn_pause.clicked.connect(self._experiment_runner.pause)
+        self.main_stage.btn_pause.clicked.connect(lambda: self.main_stage.btn_pause.setEnabled(False))
+        self.main_stage.btn_pause.clicked.connect(lambda: self.main_stage.btn_play.setEnabled(True))
+        self.main_stage.btn_stop.clicked.connect(self._experiment_runner.stop)
+
+        self.main_stage.btn_play.setEnabled(False)
+        self.main_stage.btn_pause.setEnabled(True)
+        self.main_stage.btn_stop.setEnabled(True)
 
         # save initial "running" metadata
         self._save_run_metadata(True, status="running")
@@ -1621,6 +1650,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Experiment finished: {message}")
         else:
             self.statusBar().showMessage(f"Experiment aborted: {message}")
+        self.main_stage.btn_play.setEnabled(True)
+        self.main_stage.btn_pause.setEnabled(False)
+        self.main_stage.btn_stop.setEnabled(False)
         self._experiment_runner = None
 
     def _save_run_metadata(self, success=None, status=None):
@@ -1666,6 +1698,9 @@ class MainWindow(QMainWindow):
 
     def _on_exp_error(self, device_name, error_message):
         print(f"[UI] Experiment error: {device_name}: {error_message}")
+        self.main_stage.btn_play.setEnabled(True)
+        self.main_stage.btn_pause.setEnabled(False)
+        self.main_stage.btn_stop.setEnabled(False)
 
     def _on_user_input_requested(self, message):
         text, ok = QInputDialog.getText(self, "User Input Required", message)

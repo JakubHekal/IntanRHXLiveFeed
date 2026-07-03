@@ -81,6 +81,11 @@ class PlotScreen(QtWidgets.QWidget):
         tab.deleteLater()
         self._update_tab_bar_visibility()
 
+    def on_device_configured(self, device_name: str, num_channels: int, channel_labels: list[str]):
+        tab = self._tabs.get(device_name)
+        if tab is not None and hasattr(tab, '_resize'):
+            tab._resize(num_channels, channel_labels)
+
     def clear_all(self):
         for name in list(self._tabs):
             self.remove_device(name)
