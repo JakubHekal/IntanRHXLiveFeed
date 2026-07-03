@@ -67,10 +67,12 @@ class DeviceTab(QtWidgets.QWidget):
 # ── NeuralDeviceTab ─────────────────────────────────────────────────────────
 
 class NeuralDeviceTab(DeviceTab):
-    def __init__(self, sample_rate=float(DEFAULT_SAMPLING_RATE), num_channels=1, parent=None):
+    def __init__(self, sample_rate=float(DEFAULT_SAMPLING_RATE), num_channels=1, channel_labels=None, parent=None):
         super().__init__(parent)
         self.sampling_rate = sample_rate
         self.num_channels = num_channels
+        self._current_channel_idx = 0
+        self._channel_labels = channel_labels or [f"CH-{i:03d}" for i in range(num_channels)]
         self.sample_counter = 0
         self.marker_records = []
         self._marker_times_sorted = []
@@ -88,10 +90,10 @@ class NeuralDeviceTab(DeviceTab):
         self._latest_psd_db = None
         self._latest_wf_t_ms = None
         self._latest_wf_mu = None
-        self._raw_hist_t_low = []
-        self._raw_hist_y_low = []
-        self._raw_hist_t_high = []
-        self._raw_hist_y_high = []
+        self._raw_hist_t_low = [[] for _ in range(self.num_channels)]
+        self._raw_hist_y_low = [[] for _ in range(self.num_channels)]
+        self._raw_hist_t_high = [[] for _ in range(self.num_channels)]
+        self._raw_hist_y_high = [[] for _ in range(self.num_channels)]
         self._raw_hist_sample_mod_low = 0
         self._raw_hist_sample_mod_high = 0
         self._raw_hist_stride_low = 1
@@ -101,7 +103,7 @@ class NeuralDeviceTab(DeviceTab):
         self._suspend_follow_detection = False
         self._psd_snapshot_curves = []
         self._wf_snapshot_curves = []
-        self._ring = _make_display_buffer(self.sampling_rate)
+        self._ring = _make_display_buffer(self.sampling_rate, self.num_channels)
         self._cap = self._ring.shape[1]
         self._wpos = 0
         self._total = 0
@@ -126,9 +128,16 @@ class NeuralDeviceTab(DeviceTab):
         self._telemetry_ingest_ms_total = 0.0
         self._telemetry_latest_chunk_received_t = time.perf_counter()
 
-        self.canvas = PgCanvas(self)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        self._channel_combo = QtWidgets.QComboBox()
+        self._channel_combo.addItems(self._channel_labels)
+        self._channel_combo.currentIndexChanged.connect(self._on_channel_changed)
+        layout.addWidget(self._channel_combo)
+
+        self.canvas = PgCanvas(self)
         layout.addWidget(self.canvas, 1)
 
         self._proc_worker = ProcessingWorker(self)
@@ -142,6 +151,24 @@ class NeuralDeviceTab(DeviceTab):
         self._install_plot_follow_context_actions()
         self._install_plot_bin_window_size_context_actions()
         self._update_raw_history_stride()
+
+    def _on_channel_changed(self, idx):
+        self._current_channel_idx = idx
+        # rebuild raw history for new channel from ring
+        ch = idx
+        self._raw_hist_t_low[ch].clear()
+        self._raw_hist_y_low[ch].clear()
+        self._raw_hist_t_high[ch].clear()
+        self._raw_hist_y_high[ch].clear()
+        if self._total > 0:
+            t, y = self._ring_read_channel(ch)
+            if t.size > 0:
+                self._raw_hist_t_low[ch] = t.tolist()
+                self._raw_hist_y_low[ch] = y.tolist()
+                if t.size > 1:
+                    step = max(1, t.size // MAX_RAW_HISTORY_PLOT_POINTS)
+                    self._raw_hist_t_high[ch] = t[::step].tolist()
+                    self._raw_hist_y_high[ch] = y[::step].tolist()
 
     def _emit_telemetry_if_due(self):
         now = time.perf_counter()
@@ -237,59 +264,64 @@ class NeuralDeviceTab(DeviceTab):
         self._raw_hist_sample_mod_high = 0
 
     def _ring_write(self, t, y):
-        n = y.size
+        """t: (n,) array, y: (num_channels, n) array."""
+        n = y.shape[1] if y.ndim == 2 else y.size
         if n == 0:
             return
+        if y.ndim == 1:
+            y = y.reshape(1, -1)
         cap = self._cap
         if n >= cap:
             self._ring[0, :] = t[-cap:]
-            self._ring[1, :] = y[-cap:]
+            self._ring[1:, :] = y[:, -cap:]
             self._wpos = 0
             self._total += n
         else:
             space = cap - self._wpos
             if n <= space:
                 self._ring[0, self._wpos:self._wpos + n] = t
-                self._ring[1, self._wpos:self._wpos + n] = y
+                self._ring[1:, self._wpos:self._wpos + n] = y
             else:
                 self._ring[0, self._wpos:] = t[:space]
-                self._ring[1, self._wpos:] = y[:space]
+                self._ring[1:, self._wpos:] = y[:, :space]
                 rem = n - space
                 self._ring[0, :rem] = t[space:]
-                self._ring[1, :rem] = y[space:]
+                self._ring[1:, :rem] = y[:, space:]
             self._wpos = (self._wpos + n) % cap
             self._total += n
 
-    def _ring_read(self):
+    def _ring_read_channel(self, ch_idx=0):
+        """Return (t, y) for channel ch_idx from ring buffer."""
         if self._total == 0:
             return np.array([]), np.array([])
         cnt = min(self._total, self._cap)
         if cnt >= self._cap:
             idx = self._wpos
-            if idx == 0:
-                return self._ring[:, :cnt].copy()
             t = np.empty(cnt, dtype=np.float64)
             y = np.empty(cnt, dtype=np.float64)
             tail = cnt - idx
             t[:tail] = self._ring[0, idx:]
-            y[:tail] = self._ring[1, idx:]
+            y[:tail] = self._ring[1 + ch_idx, idx:]
             t[tail:] = self._ring[0, :idx]
-            y[tail:] = self._ring[1, :idx]
+            y[tail:] = self._ring[1 + ch_idx, :idx]
             return t, y
-        return self._ring[:, :cnt].copy()
+        return self._ring[0, :cnt].copy(), self._ring[1 + ch_idx, :cnt].copy()
 
-    def _ring_read_tail(self, n):
+    def _ring_read_tail(self, n, ch_idx=None):
+        """Return last n (t, y) for channel ch_idx (or current channel)."""
+        if ch_idx is None:
+            ch_idx = self._current_channel_idx
         cnt = min(self._total, self._cap)
         n = min(n, cnt)
         if n == 0:
             return np.array([]), np.array([])
-        t, y = self._ring_read()
+        t, y = self._ring_read_channel(ch_idx)
         return t[-n:], y[-n:]
 
     def _raw_time_bounds(self):
         if self._total == 0:
             return 0.0, 0.0
-        t, _ = self._ring_read()
+        t, _ = self._ring_read_channel(0)
         if t.size == 0:
             return 0.0, 0.0
         earliest = float(t[0])
@@ -305,17 +337,16 @@ class NeuralDeviceTab(DeviceTab):
         arr = np.asarray(chunk)
         if arr.ndim != 2 or arr.size == 0:
             return
-        if arr.shape[0] != 1:
-            # ponytail: single-channel neural only, multi-channel not yet handled
-            return
+        n_channels = arr.shape[0]
         n_samples = arr.shape[1]
         if n_samples < 1:
             return
 
-        signal = arr[0, :]
+        # use min of incoming channels vs configured
+        use_ch = min(n_channels, self.num_channels)
         t_chunk = (self.sample_counter + np.arange(n_samples, dtype=np.float64)) / self.sampling_rate
-        self._ring_write(t_chunk, signal)
-        self._append_raw_history(t_chunk, signal)
+        self._ring_write(t_chunk, arr[:use_ch, :])
+        self._append_raw_history(t_chunk, arr[:use_ch, :])
         self.sample_counter += n_samples
         self._telemetry_chunks += 1
         self._telemetry_samples += int(n_samples)
@@ -329,6 +360,10 @@ class NeuralDeviceTab(DeviceTab):
         if self._proc_result is None:
             do_psd = do_spike = True
 
+        ch = self._current_channel_idx
+        if ch >= use_ch:
+            ch = 0
+
         gap = self._total - self._last_spike_scan_sample
         should_run_spike = do_spike and (gap >= SPIKE_INCREMENTAL_MIN_SAMPLES)
         should_run_psd = do_psd
@@ -341,7 +376,7 @@ class NeuralDeviceTab(DeviceTab):
                 spike_n = int(max(SPIKE_INCREMENTAL_MIN_SAMPLES, gap) + SPIKE_OVERLAP_SAMPLES)
                 tail_n = min(stored, max(psd_n, wf_n, spike_n))
 
-                t_tail, sig_tail = self._ring_read_tail(tail_n)
+                t_tail, sig_tail = self._ring_read_tail(tail_n, ch_idx=ch)
                 abs_start = self._total - t_tail.size
                 rel_last = max(0, int(self._last_spike_scan_sample - abs_start))
                 rel_last = min(rel_last, t_tail.size)
@@ -355,7 +390,7 @@ class NeuralDeviceTab(DeviceTab):
                 )
             else:
                 psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec)))
-                t_tail, sig_tail = self._ring_read_tail(psd_n)
+                t_tail, sig_tail = self._ring_read_tail(psd_n, ch_idx=ch)
                 self._last_proc_abs_start = self._total - t_tail.size
                 self._proc_worker.schedule(
                     sig_tail.copy(), t_tail.copy(), self.sampling_rate,
@@ -365,27 +400,35 @@ class NeuralDeviceTab(DeviceTab):
         self._telemetry_ingest_ms_total += (time.perf_counter() - ingest_t0) * 1000.0
         self._emit_telemetry_if_due()
 
-    def _append_decimated_history(self, t_hist, y_hist, t_chunk, y_chunk, stride, mod_counter):
-        if y_chunk.size == 0:
+    def _append_decimated_history(self, t_lists, y_lists, t_chunk, y_chunk, stride, mod_counter):
+        """Append decimated data to per-channel history lists.
+        t_lists, y_lists: list of lists (one per channel) modified in-place.
+        y_chunk: (num_channels, n) array.
+        """
+        if y_chunk.shape[1] == 0:
             return mod_counter
         buf_stride = stride
         i_start = buf_stride - 1 - mod_counter
         if i_start < 0:
             i_start = buf_stride - 1
-        decimated = y_chunk[i_start::buf_stride]
-        if decimated.size > 0:
-            t_dec = t_chunk[i_start::buf_stride]
-            t_hist.extend(t_dec.tolist())
-            y_hist.extend(decimated.tolist())
-        next_mod = (mod_counter + y_chunk.size) % buf_stride
-        total_points = len(t_hist)
-        if total_points > MAX_RAW_HISTORY_PLOT_POINTS:
-            excess = total_points - MAX_RAW_HISTORY_PLOT_POINTS
-            del t_hist[:excess]
-            del y_hist[:excess]
+        t_dec = t_chunk[i_start::buf_stride]
+        if t_dec.size > 0:
+            for ch in range(len(t_lists)):
+                t_lists[ch].extend(t_dec.tolist())
+                y_lists[ch].extend(y_chunk[ch, i_start::buf_stride].tolist())
+        next_mod = (mod_counter + y_chunk.shape[1]) % buf_stride
+        for ch in range(len(t_lists)):
+            total_points = len(t_lists[ch])
+            if total_points > MAX_RAW_HISTORY_PLOT_POINTS:
+                excess = total_points - MAX_RAW_HISTORY_PLOT_POINTS
+                del t_lists[ch][:excess]
+                del y_lists[ch][:excess]
         return next_mod
 
     def _append_raw_history(self, t_chunk, y_chunk):
+        """y_chunk: (num_channels, n) or (n,)."""
+        if y_chunk.ndim == 1:
+            y_chunk = y_chunk.reshape(1, -1)
         self._raw_hist_sample_mod_low = self._append_decimated_history(
             self._raw_hist_t_low, self._raw_hist_y_low,
             t_chunk, y_chunk,
@@ -593,7 +636,7 @@ class NeuralDeviceTab(DeviceTab):
                     left_q = max(earliest_t, x_start - RAW_MANUAL_VIEW_MARGIN_SEC)
                     right_q = min(latest_t, x_end + RAW_MANUAL_VIEW_MARGIN_SEC)
                     if right_q > left_q:
-                        t_lin, y_lin = self._ring_read()
+                        t_lin, y_lin = self._ring_read_channel(self._current_channel_idx)
                         if t_lin.size:
                             i0 = int(np.searchsorted(t_lin, left_q, side='left'))
                             i1 = int(np.searchsorted(t_lin, right_q, side='right'))
@@ -603,13 +646,14 @@ class NeuralDeviceTab(DeviceTab):
                             t_src = t_lin[i0:i1]
                             y_src = y_lin[i0:i1]
                 if t_src is None or y_src is None:
-                    use_high = span <= RAW_ADAPTIVE_HIGH_RES_MAX_SPAN_SEC and bool(self._raw_hist_t_high)
+                    ch = self._current_channel_idx
+                    use_high = span <= RAW_ADAPTIVE_HIGH_RES_MAX_SPAN_SEC and ch < len(self._raw_hist_t_high) and bool(self._raw_hist_t_high[ch])
                     if use_high:
-                        t_store = self._raw_hist_t_high
-                        y_store = self._raw_hist_y_high
+                        t_store = self._raw_hist_t_high[ch]
+                        y_store = self._raw_hist_y_high[ch]
                     else:
-                        t_store = self._raw_hist_t_low
-                        y_store = self._raw_hist_y_low
+                        t_store = self._raw_hist_t_low[ch] if ch < len(self._raw_hist_t_low) else []
+                        y_store = self._raw_hist_y_low[ch] if ch < len(self._raw_hist_y_low) else []
                     if t_store:
                         left_q = max(0.0, x_start - RAW_MANUAL_VIEW_MARGIN_SEC)
                         right_q = max(left_q, x_end + RAW_MANUAL_VIEW_MARGIN_SEC)
@@ -718,10 +762,10 @@ class NeuralDeviceTab(DeviceTab):
         self._latest_psd_db = None
         self._latest_wf_t_ms = None
         self._latest_wf_mu = None
-        self._raw_hist_t_low = []
-        self._raw_hist_y_low = []
-        self._raw_hist_t_high = []
-        self._raw_hist_y_high = []
+        self._raw_hist_t_low = [[] for _ in range(self.num_channels)]
+        self._raw_hist_y_low = [[] for _ in range(self.num_channels)]
+        self._raw_hist_t_high = [[] for _ in range(self.num_channels)]
+        self._raw_hist_y_high = [[] for _ in range(self.num_channels)]
         self._raw_hist_sample_mod_low = 0
         self._raw_hist_sample_mod_high = 0
         self._psd_pending = False
@@ -811,7 +855,7 @@ class NeuralDeviceTab(DeviceTab):
         self._session_id += 1
         if sample_rate > 0:
             self.sampling_rate = float(sample_rate)
-        self._ring = _make_display_buffer(self.sampling_rate)
+        self._ring = _make_display_buffer(self.sampling_rate, self.num_channels)
         self._cap = self._ring.shape[1]
         self._wpos = 0
         self._total = 0

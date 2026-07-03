@@ -1578,6 +1578,7 @@ class MainWindow(QMainWindow):
         self._experiment_runner.experiment_finished.connect(self._on_exp_finished)
         self._experiment_runner.error_occurred.connect(self._on_exp_error)
         self._experiment_runner.data_received.connect(self.main_stage.plot_screen.on_data)
+        self._experiment_runner.user_input_requested.connect(self._on_user_input_requested)
         self._experiment_runner.start()
 
         self.main_stage.btn_play.clicked.connect(self._experiment_runner.resume)
@@ -1665,6 +1666,11 @@ class MainWindow(QMainWindow):
 
     def _on_exp_error(self, device_name, error_message):
         print(f"[UI] Experiment error: {device_name}: {error_message}")
+
+    def _on_user_input_requested(self, message):
+        text, ok = QInputDialog.getText(self, "User Input Required", message)
+        if self._experiment_runner is not None and self._experiment_runner._thread is not None:
+            self._experiment_runner._thread._input_result = (text, ok)
 
     def _populate_timeline_from_config(self, config: ExperimentConfig):
         timeline = self.main_stage.timeline

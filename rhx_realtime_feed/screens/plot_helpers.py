@@ -22,9 +22,9 @@ PSD_PLOT_UPDATE_EVERY_N   = 20
 SPIKE_PLOT_UPDATE_EVERY_N = 20
 
 
-def _make_display_buffer(fs: float) -> np.ndarray:
+def _make_display_buffer(fs: float, num_channels=1) -> np.ndarray:
     n = max(1, int(round(fs * DISPLAY_BUFFER_SEC)))
-    return np.zeros((2, n), dtype=np.float64)
+    return np.zeros((1 + num_channels, n), dtype=np.float64)
 
 
 def _minmax_downsample(x, y, max_points):

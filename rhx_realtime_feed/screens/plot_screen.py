@@ -59,13 +59,13 @@ class PlotScreen(QtWidgets.QWidget):
         visible = len(self._tabs) > 1
         self.tab_widget.tabBar().setVisible(visible)
 
-    def add_device(self, name, device_type, sample_rate=20000.0, num_channels=1):
+    def add_device(self, name, device_type, sample_rate=20000.0, num_channels=1, channel_labels=None):
         if name in self._tabs:
             return
         if device_type == "smu":
             tab = SmuDeviceTab(sample_rate=sample_rate, parent=self)
         else:
-            tab = NeuralDeviceTab(sample_rate=sample_rate, num_channels=num_channels, parent=self)
+            tab = NeuralDeviceTab(sample_rate=sample_rate, num_channels=num_channels, channel_labels=channel_labels, parent=self)
         self._tabs[name] = tab
         self.tab_widget.addTab(tab, name)
         self._update_tab_bar_visibility()

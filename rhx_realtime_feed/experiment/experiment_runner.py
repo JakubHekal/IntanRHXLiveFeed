@@ -14,6 +14,7 @@ class ExperimentRunner(QtCore.QObject):
     experiment_finished = QtCore.pyqtSignal(bool, str)  # success, message
     error_occurred = QtCore.pyqtSignal(str, str)  # device_name, error_message
     data_received = QtCore.pyqtSignal(str, object)  # device_name, chunk
+    user_input_requested = QtCore.pyqtSignal(str)  # message
 
     def __init__(self, devices: list, sequence: list, run_path: str, parent=None):
         """
@@ -39,6 +40,7 @@ class ExperimentRunner(QtCore.QObject):
         self._thread.experiment_finished.connect(self.experiment_finished)
         self._thread.error_occurred.connect(self.error_occurred)
         self._thread.data_received.connect(self.data_received)
+        self._thread.user_input_requested.connect(self.user_input_requested)
         self._thread.finished.connect(self._on_thread_finished)
         self._thread.start()
 
@@ -70,6 +72,7 @@ class _RunnerThread(QtCore.QThread):
     experiment_finished = QtCore.pyqtSignal(bool, str)
     error_occurred = QtCore.pyqtSignal(str, str)
     data_received = QtCore.pyqtSignal(str, object)
+    user_input_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, devices, sequence, run_path, parent=None):
         super().__init__(parent)
@@ -213,16 +216,24 @@ class _RunnerThread(QtCore.QThread):
                         self.msleep(100)
 
                     elif action == "wait_input":
-                        # ponytail: skip wait_input for now, add when experiment explicitly needs it
-                        print(f"[Runner] Wait for user input (skipped)")
+                        msg = params.get("message", "Click OK to continue")
+                        self._input_result = None
+                        self.user_input_requested.emit(msg)
+                        while self._input_result is None and not self._abort and not self.isInterruptionRequested():
+                            self.msleep(100)
+                        print(f"[Runner] Wait input result: {self._input_result}")
 
                     elif action == "log_event":
-                        # ponytail: log_event is a no-op without a defined logging interface
+                        with open(self._run_path / "events.log", "a") as f:
+                            f.write(f"{time.time()},{params}\n")
                         print(f"[Runner] Log event: {params}")
 
-                    elif action in ("start_recording", "stop_recording", "pause"):
-                        # ponytail: system ops are no-ops in basic sequential execution
-                        print(f"[Runner] System op {action} (skipped)")
+                    elif action == "pause":
+                        self.msleep(int(duration * 1000))
+
+                    elif action in ("start_recording", "stop_recording"):
+                        # ponytail: recording handled by Stream block's ChunkWriter lifecycle
+                        print(f"[Runner] Recording op {action} (handled by Stream)")
 
                     else:
                         print(f"[Runner] Unknown action '{action}', skipping")
