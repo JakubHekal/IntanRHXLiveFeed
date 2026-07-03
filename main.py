@@ -399,7 +399,7 @@ class MainWindow(QtWidgets.QMainWindow):
         effective_fs = float(device.sample_rate)
         sink = ChunkWriter(
             sample_rate=effective_fs,
-            channel=channel,
+            num_channels=1,
             chunk_max_sec=RAW_CHUNK_SEC,
             buffer_bytes=CSV_FILE_BUFFER_BYTES,
             flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,

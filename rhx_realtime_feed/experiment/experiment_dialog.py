@@ -214,7 +214,12 @@ class _DeviceConnectionFrame(QtWidgets.QFrame):
         params = self._read_params()
         try:
             device = cls(**params)
-            device.connect()
+            ok = device.connect()
+            if not ok:
+                self._status_label.setText("\u2717 Connection failed")
+                self._connect_button.setEnabled(True)
+                self.status_changed.emit()
+                return
             self._device_instance = device
             self._status_label.setText("\u2713 Connected")
             self._connect_button.setText("Connected")
@@ -228,7 +233,7 @@ class _DeviceConnectionFrame(QtWidgets.QFrame):
         self.status_changed.emit()
 
     def is_connected(self) -> bool:
-        return self._device_instance is not None
+        return self._device_instance is not None and getattr(self._device_instance, 'connected', False)
 
     def get_params(self) -> dict:
         return self._read_params()

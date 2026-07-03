@@ -3,6 +3,11 @@ import os
 import sys
 from pathlib import Path
 
+# Ensure project root is on sys.path so package imports resolve
+_project_root = Path(__file__).resolve().parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 from PyQt5.QtCore import pyqtSignal, QModelIndex, QPoint, QPropertyAnimation, QRect, QSize, Qt, QEasingCurve
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPen, QPolygonF, QStandardItem, QStandardItemModel
 from PyQt5.QtWidgets import (
@@ -44,8 +49,9 @@ import qdarkstyle
 from qdarkstyle.dark.palette import DarkPalette 
 from qdarkstyle.light.palette import LightPalette
 
-from experiment import ExperimentManager, ExperimentDialog
+from experiment import ExperimentManager, ExperimentDialog, RunExperimentDialog
 from experiment.experiment import ExperimentConfig, SequenceStep
+from experiment.experiment_runner import ExperimentRunner
 
 BG_DARK = "#1E1E1E"
 BG_SURFACE = "#252526"
@@ -1321,6 +1327,9 @@ class MainWindow(QMainWindow):
         self.toolbar.addWidget(self.connection_label)
 
         self._current_experiment_path = None
+        self._current_run_path = None
+        self._run_device_configs = {}
+        self._run_device_instances = []
         self.main_stage = MainStage()
         root_layout.addWidget(self.main_stage, 1)
 
@@ -1382,6 +1391,8 @@ class MainWindow(QMainWindow):
         self._exp_open_action = experiment_menu.addAction("Open Experiment")
         experiment_menu.addSeparator()
         self._exp_save_action = experiment_menu.addAction("Save Experiment")
+        experiment_menu.addSeparator()
+        self._exp_run_action = experiment_menu.addAction("Run Experiment\u2026")
         experiment_btn = self._create_menu_button("Experiment", experiment_menu)
         menubar_layout.addWidget(experiment_btn)
 
@@ -1453,6 +1464,7 @@ class MainWindow(QMainWindow):
         self._exp_new_action.triggered.connect(self._on_experiment_new)
         self._exp_open_action.triggered.connect(self._on_experiment_open)
         self._exp_save_action.triggered.connect(self._on_experiment_save)
+        self._exp_run_action.triggered.connect(self._on_experiment_run)
         self.main_stage.left_sidebar.tree.selectionModel().currentChanged.connect(self._on_tree_selection)
         self.main_stage.right_sidebar.cutoff_hz.valueChanged.connect(self._on_parameter_change)
 
@@ -1514,38 +1526,211 @@ class MainWindow(QMainWindow):
             return
         config = ExperimentManager.load(self._current_experiment_path)
         timeline = self.main_stage.timeline
-        devices = timeline._devices
+        devs = timeline._devices
+
+        config.devices = [
+            {"name": d[0], "device_type": d[2]}
+            for d in devs if d[2] != "__system__"
+        ]
         config.execution_control.required_devices = list(set(
-            dev[2] for dev in devices if dev[2] != "__system__"
+            d[2] for d in devs if d[2] != "__system__"
         ))
+
         sequence = []
         step_id = 1
-        for dev in devices:
+        for dev in devs:
             if dev[2] == "__system__":
                 continue
             for block in dev[1]:
                 op_name = block[4] if len(block) >= 5 else block[0]
                 params = block[5] if len(block) >= 6 else {}
-                sequence.append(SequenceStep(step_id=step_id, action=op_name, parameters=dict(params)))
+                sequence.append(SequenceStep(
+                    step_id=step_id,
+                    action=op_name,
+                    parameters=dict(params),
+                    device_name=dev[0],
+                ))
                 step_id += 1
         config.sequence = sequence
         ExperimentManager.save(self._current_experiment_path, config)
         QMessageBox.information(self, "Saved", f"Experiment saved to {self._current_experiment_path}")
 
+    def _on_experiment_run(self):
+        if not self._current_experiment_path:
+            QMessageBox.information(self, "No Experiment",
+                                    "Open or create an experiment first.")
+            return
+
+        exp_name = Path(self._current_experiment_path).name
+        device_groups = []
+        for d in self.main_stage.timeline._devices:
+            if d[2] == "__system__":
+                continue
+            device_type = d[2]
+            cls = _DEVICE_CLASSES.get(device_type)
+            param_defs = cls.get_config_params() if cls else []
+            current_config = d[3] if len(d) >= 4 else {}
+            device_groups.append({
+                "name": d[0],
+                "device_type": device_type,
+                "device_class": cls,
+                "param_defs": param_defs,
+                "current_config": current_config,
+            })
+
+        dialog = RunExperimentDialog(
+            experiment_name=exp_name,
+            experiment_path=self._current_experiment_path,
+            device_groups=device_groups,
+            parent=self,
+        )
+
+        if dialog.exec_():
+            self._current_run_path = dialog.run_path()
+            self._run_device_configs = dialog.device_configs()
+            self._run_device_instances = dialog.device_instances()
+            run_name = Path(self._current_run_path).name
+            self.setWindowTitle(
+                f"NeuroSense Data \u2014 {exp_name} \u2014 Run: {run_name}"
+            )
+
+            self._start_experiment_sequence(exp_name)
+
+    def _build_sequence_for_runner(self):
+        devs = self.main_stage.timeline._devices
+        sequence = []
+        step_id = 1
+        for dev in devs:
+            if dev[2] == "__system__":
+                for block in dev[1]:
+                    op_name = block[4] if len(block) >= 5 else block[0]
+                    params = block[5] if len(block) >= 6 else {}
+                    p = dict(params)
+                    p.setdefault("duration_s", block[2] * 60.0)
+                    sequence.append(SequenceStep(
+                        step_id=step_id,
+                        action=op_name,
+                        parameters=p,
+                        device_name="",
+                    ))
+                    step_id += 1
+                continue
+            for block in dev[1]:
+                op_name = block[4] if len(block) >= 5 else block[0]
+                params = block[5] if len(block) >= 6 else {}
+                p = dict(params)
+                p.setdefault("duration_s", block[2] * 60.0)
+                sequence.append(SequenceStep(
+                    step_id=step_id,
+                    action=op_name,
+                    parameters=p,
+                    device_name=dev[0],
+                ))
+                step_id += 1
+        return sequence
+
+    def _devices_with_instances(self):
+        result = []
+        for d in self.main_stage.timeline._devices:
+            if d[2] == "__system__":
+                result.append(d)
+                continue
+            inst = None
+            for runner_inst in self._run_device_instances:
+                if hasattr(runner_inst, 'name') and runner_inst.name == d[0]:
+                    inst = runner_inst
+                    break
+                if hasattr(runner_inst, 'device_type') and runner_inst.device_type == d[2]:
+                    inst = runner_inst
+            result.append(list(d) + [inst])
+        return result
+
+    def _start_experiment_sequence(self, exp_name):
+        if hasattr(self, '_experiment_runner') and self._experiment_runner is not None:
+            if self._experiment_runner.is_running():
+                QMessageBox.information(self, "Already Running", "An experiment is already in progress.")
+                return
+
+        timeline_devs = self._devices_with_instances()
+        sequence = self._build_sequence_for_runner()
+
+        if not sequence:
+            QMessageBox.information(self, "No Steps", "The experiment has no sequence steps to run.")
+            return
+
+        self._experiment_runner = ExperimentRunner(
+            devices=timeline_devs,
+            sequence=sequence,
+            run_path=self._current_run_path,
+            parent=self,
+        )
+        self._experiment_runner.step_started.connect(self._on_exp_step_started)
+        self._experiment_runner.step_completed.connect(self._on_exp_step_completed)
+        self._experiment_runner.experiment_finished.connect(self._on_exp_finished)
+        self._experiment_runner.error_occurred.connect(self._on_exp_error)
+        self._experiment_runner.start()
+
+        self._exp_run_action.setEnabled(False)
+        self.statusBar().showMessage(f"Running: {exp_name}")
+
+    def _on_exp_step_started(self, step_index, device_name, action, duration):
+        self.statusBar().showMessage(
+            f"Step {step_index + 1}: {device_name} → {action} ({duration:.1f}s)"
+        )
+        if hasattr(self, 'progress'):
+            total = len(self._build_sequence_for_runner())
+            self.progress.setMaximum(total)
+            self.progress.setValue(step_index)
+
+    def _on_exp_step_completed(self, step_index, device_name, action):
+        pass
+
+    def _on_exp_finished(self, success, message):
+        self._exp_run_action.setEnabled(True)
+        self.progress.setValue(0)
+        if success:
+            self.statusBar().showMessage(f"Experiment finished: {message}")
+        else:
+            self.statusBar().showMessage(f"Experiment aborted: {message}")
+        self._experiment_runner = None
+
+    def _on_exp_error(self, device_name, error_message):
+        print(f"[UI] Experiment error: {device_name}: {error_message}")
+
     def _populate_timeline_from_config(self, config: ExperimentConfig):
         timeline = self.main_stage.timeline
         timeline.clear_all()
-        for dev_type in config.execution_control.required_devices:
-            timeline.add_device(name=dev_type, device_type=dev_type)
-        dev_idxs = [i for i, d in enumerate(timeline._devices) if d[2] != "__system__"]
-        target_dev = dev_idxs[0] if dev_idxs else None
-        if target_dev is None:
+
+        # restore devices from stored name + type
+        if config.devices:
+            for d in config.devices:
+                timeline.add_device(name=d["name"], device_type=d.get("device_type", "rhx"))
+        else:
+            # legacy: create one device per required_device type
+            for dev_type in config.execution_control.required_devices:
+                timeline.add_device(name=dev_type, device_type=dev_type)
+
+        # map device name → index
+        name_to_idx = {
+            d[0]: i for i, d in enumerate(timeline._devices)
+            if d[2] != "__system__"
+        }
+
+        # ensure at least one device exists
+        if not name_to_idx:
             timeline.add_device(name="Default", device_type="rhx")
-            target_dev = len(timeline._devices) - 1
+            name_to_idx = {
+                d[0]: i for i, d in enumerate(timeline._devices)
+                if d[2] != "__system__"
+            }
+
         current_time = 0.0
         for step in config.sequence:
             duration = step.parameters.get("duration_s", 2.0)
-            timeline.add_block(target_dev, step.action, start=current_time, duration=duration, params=dict(step.parameters))
+            dev_idx = name_to_idx.get(step.device_name) if step.device_name else None
+            if dev_idx is None:
+                dev_idx = next(iter(name_to_idx.values()))
+            timeline.add_block(dev_idx, step.action, start=current_time, duration=duration, params=dict(step.parameters))
             current_time += duration
 
 
