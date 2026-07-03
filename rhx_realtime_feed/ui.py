@@ -1,5 +1,3 @@
-import math
-import os
 import sys
 from pathlib import Path
 
@@ -8,8 +6,8 @@ _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from PyQt5.QtCore import pyqtSignal, QModelIndex, QPoint, QPropertyAnimation, QRect, QSize, Qt, QEasingCurve
-from PyQt5.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPen, QPolygonF, QStandardItem, QStandardItemModel
+from PyQt5.QtCore import pyqtSignal, QModelIndex, QPropertyAnimation, QRect, QSize, Qt, QEasingCurve
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QStandardItem, QStandardItemModel
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -49,9 +47,11 @@ import qdarkstyle
 from qdarkstyle.dark.palette import DarkPalette 
 from qdarkstyle.light.palette import LightPalette
 
-from experiment import ExperimentManager, ExperimentDialog, RunExperimentDialog
-from experiment.experiment import ExperimentConfig, SequenceStep
-from experiment.experiment_runner import ExperimentRunner
+from rhx_realtime_feed.experiment import ExperimentManager, ExperimentDialog, RunExperimentDialog
+from rhx_realtime_feed.experiment.experiment import ExperimentConfig, SequenceStep
+from rhx_realtime_feed.experiment.experiment_runner import ExperimentRunner
+from rhx_realtime_feed.screens.legacy_main_window import LegacyMainWindow
+from rhx_realtime_feed.screens.plot_screen import PlotScreen
 
 BG_DARK = "#1E1E1E"
 BG_SURFACE = "#252526"
@@ -59,7 +59,7 @@ BG_HEADER = "#2D2D2D"
 TEXT_PRIMARY = "#EDEBE9"
 ACCENT_BLUE = "#0078D4"
 
-from device import (
+from rhx_realtime_feed.device import (
     IntanRHXDevice, SimulatedRecordingDevice, SimulatedActorDevice,
     SimulatedCombinedDevice, MiniSMUDevice, DeviceOperation, ParamDef,
 )
@@ -164,84 +164,7 @@ class FluentExpander(QFrame):
         self._content_frame.setMaximumHeight(target_height)
 
 
-class EEGTraceCanvas(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMinimumHeight(420)
-        self._labels = ["FP1", "FP2", "FP3", "FP4", "FP5", "Ban1", "Ban2", "Ban3", "FP1", "FP2"]
-        self._phase = 0.0
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        rect = self.rect()
-
-        painter.fillRect(rect, QColor(BG_DARK))
-
-        margin_left = 50
-        margin_right = 18
-        margin_top = 10
-        margin_bottom = 20
-        plot_rect = QRect(margin_left, margin_top, rect.width() - margin_left - margin_right, rect.height() - margin_top - margin_bottom)
-
-        painter.setPen(QPen(QColor(BG_HEADER), 1))
-        for i in range(10):
-            x = plot_rect.left() + int(i * plot_rect.width() / 9)
-            painter.drawLine(x, plot_rect.top(), x, plot_rect.bottom())
-
-        samples = plot_rect.width()
-        painter.setClipRect(plot_rect)
-        trace_colors = ["#0078D4", "#2B88D8", "#4BA3E3", "#107C10", "#498205"]
-        for idx, label in enumerate(self._labels):
-            base_y = plot_rect.top() + 20 + idx * (plot_rect.height() / len(self._labels))
-            painter.setPen(QPen(QColor(TEXT_PRIMARY), 1))
-            painter.drawText(6, int(base_y) + 4, label)
-            pen = QPen(QColor(trace_colors[idx % len(trace_colors)]), 1.2)
-            painter.setPen(pen)
-            points = []
-            for x in range(samples):
-                t = x / max(1, samples - 1)
-                y = base_y + math.sin((t * 8.0) + self._phase + idx * 0.4) * 10 * (0.7 + 0.3 * math.sin(self._phase * 0.2 + idx))
-                y += math.sin(t * 52.0 + idx * 0.9) * 2.0
-                points.append(QPoint(plot_rect.left() + x, int(y)))
-            for a, b in zip(points, points[1:]):
-                painter.drawLine(a, b)
-
-
-class BrainPreview(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMinimumHeight(420)
-        self._selected_state = "brain"
-
-    def setState(self, state: str):
-        self._selected_state = state
-        self.update()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        rect = self.rect()
-
-        painter.fillRect(rect, QColor(BG_DARK))
-
-        center = rect.center()
-
-        painter.setPen(QPen(QColor(BG_HEADER), 1.2))
-        painter.setBrush(QColor(BG_SURFACE))
-        painter.drawEllipse(center.x() - 82, center.y() - 56, 165, 112)
-
-        painter.setBrush(QColor(0, 0, 0, 40))
-        painter.setPen(Qt.NoPen)
-        painter.drawPolygon(QPolygonF([
-            QPoint(center.x() - 70, center.y() - 6),
-            QPoint(center.x() + 78, center.y() - 76),
-            QPoint(center.x() + 56, center.y() + 8),
-            QPoint(center.x() - 66, center.y() + 48),
-        ]))
-        painter.setPen(QPen(QColor(BG_HEADER), 2))
-        painter.drawLine(center.x(), center.y() - 116, center.x(), center.y() + 116)
-        painter.drawLine(center.x() - 116, center.y(), center.x() + 116, center.y())
 
 
 class LeftSidebar(QFrame):
@@ -1192,34 +1115,7 @@ class MainStage(QWidget):
         center_layout.setContentsMargins(4, 4, 4, 4)
         center_layout.setSpacing(4)
 
-        self.center_splitter = QSplitter(Qt.Horizontal)
-        self.center_splitter.setChildrenCollapsible(False)
-
-        self.eeg_tabs = QTabWidget()
-        self.eeg_tabs.setTabsClosable(True)
-        self.eeg_canvas = EEGTraceCanvas()
-        self.eeg_tabs.addTab(self.eeg_canvas, "EEG_Subject01_Task")
-
-        brain_wrapper = QFrame()
-        brain_layout = QVBoxLayout(brain_wrapper)
-        brain_layout.setContentsMargins(2, 2, 2, 2)
-        brain_layout.setSpacing(0)
-
-        brain_header = QHBoxLayout()
-        brain_header.setContentsMargins(4, 4, 4, 4)
-        brain_combo = QComboBox()
-        brain_combo.addItems(["Brain Surface", "Volume Rendering"])
-        brain_header.addWidget(brain_combo)
-        brain_header.addStretch()
-        brain_layout.addLayout(brain_header)
-
-        self.brain_preview = BrainPreview()
-        brain_layout.addWidget(self.brain_preview, 1)
-
-        self.center_splitter.addWidget(self.eeg_tabs)
-        self.center_splitter.addWidget(brain_wrapper)
-        self.center_splitter.setStretchFactor(0, 6)
-        self.center_splitter.setStretchFactor(1, 4)
+        self.plot_screen = PlotScreen()
 
         timeline_bar = QHBoxLayout()
         timeline_bar.setContentsMargins(4, 4, 4, 4)
@@ -1246,7 +1142,7 @@ class MainStage(QWidget):
         timeline_bar.addWidget(self.timeline_slider)
         timeline_bar.addWidget(QLabel("120"))
 
-        center_layout.addWidget(self.center_splitter, 1)
+        center_layout.addWidget(self.plot_screen, 1)
 
         self.timeline = ExperimentTimeline()
         center_layout.addWidget(self.timeline)
@@ -1373,6 +1269,8 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction("Full Screen")
         view_menu.addAction("Reset Layout")
+        view_menu.addSeparator()
+        self._legacy_ui_action = view_menu.addAction("Legacy UI\u2026")
         view_btn = self._create_menu_button("View", view_menu)
         menubar_layout.addWidget(view_btn)
 
@@ -1465,6 +1363,7 @@ class MainWindow(QMainWindow):
         self._exp_open_action.triggered.connect(self._on_experiment_open)
         self._exp_save_action.triggered.connect(self._on_experiment_save)
         self._exp_run_action.triggered.connect(self._on_experiment_run)
+        self._legacy_ui_action.triggered.connect(self._on_open_legacy_ui)
         self.main_stage.left_sidebar.tree.selectionModel().currentChanged.connect(self._on_tree_selection)
         self.main_stage.right_sidebar.cutoff_hz.valueChanged.connect(self._on_parameter_change)
 
@@ -1480,16 +1379,13 @@ class MainWindow(QMainWindow):
         status.addPermanentWidget(QLabel("Connected devices: 2  |  Memory: 320 GB"))
 
     def _set_initial_state(self):
-        self.main_stage.brain_preview.setState("fMRI_Subject02_Task")
+        pass
 
     def _on_tree_selection(self, current: QModelIndex, previous: QModelIndex):
         text = current.data() if current.isValid() else ""
-        self.main_stage.brain_preview.setState(text if "fMRI" in text else "brain")
-        if "EEG" in text:
-            self.main_stage.eeg_tabs.setTabText(0, text)
 
     def _on_parameter_change(self, *args):
-        self.main_stage.brain_preview.update()
+        pass
 
     def _on_experiment_new(self):
         dialog = ExperimentDialog(self)
@@ -1554,6 +1450,13 @@ class MainWindow(QMainWindow):
         config.sequence = sequence
         ExperimentManager.save(self._current_experiment_path, config)
         QMessageBox.information(self, "Saved", f"Experiment saved to {self._current_experiment_path}")
+
+    def _on_open_legacy_ui(self):
+        if not hasattr(self, '_legacy_window') or self._legacy_window is None:
+            self._legacy_window = LegacyMainWindow()
+        self._legacy_window.show()
+        self._legacy_window.raise_()
+        self._legacy_window.activateWindow()
 
     def _on_experiment_run(self):
         if not self._current_experiment_path:
@@ -1734,7 +1637,22 @@ class MainWindow(QMainWindow):
             current_time += duration
 
 
-if __name__ == "__main__":
+def main():
+    import importlib, os
+
+    if '_PYI_SPLASH_IPC' in os.environ and importlib.util.find_spec("pyi_splash"):
+        import pyi_splash
+        pyi_splash.update_text('UI Loaded ...')
+        pyi_splash.close()
+
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+
+    if hasattr(Qt, 'setHighDpiScaleFactorRoundingPolicy'):
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+
     app = QApplication(sys.argv)
     base_ss = qdarkstyle.load_stylesheet(qt_api='pyqt5', palette=DarkPalette)
     override_ss = f"""
@@ -1773,3 +1691,7 @@ if __name__ == "__main__":
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
