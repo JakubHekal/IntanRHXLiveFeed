@@ -30,7 +30,7 @@ class ReplayWorker(QtCore.QObject):
             self.error.emit(f"No raw/ dir in {self._run_path}")
             return
 
-        self._chunk_files = sorted(chunks_dir.glob("chunk_*.csv"))
+        self._chunk_files = sorted(chunks_dir.rglob("chunk_*.csv"))
         if not self._chunk_files:
             self.error.emit(f"No CSV chunks in {chunks_dir}")
             return

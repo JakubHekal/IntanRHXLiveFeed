@@ -33,6 +33,7 @@ class ChunkWriter:
         self._chunks_since_flush = 0
         self._last_csv_flush_t = 0.0
         self.raw_chunks_dir = None
+        self.filename_prefix = None
         self._io_mutex = QtCore.QMutex()
 
     @property
@@ -147,7 +148,8 @@ class ChunkWriter:
         if self.raw_chunks_dir is None:
             return
         self._chunk_index += 1
-        path = self.raw_chunks_dir / f"chunk_{self._chunk_index:06d}.csv"
+        tag = f"_{self.filename_prefix}" if self.filename_prefix else ""
+        path = self.raw_chunks_dir / f"chunk{tag}_{self._chunk_index:06d}.csv"
         self.csv_file_handle = open(
             path,
             "w",

@@ -139,9 +139,9 @@ class _RunnerThread(QtCore.QThread):
                         sr = device.sample_rate if device.sample_rate else 20000.0
                         num_ch = len(getattr(device, 'channels', [])) or 1
 
-                        # flat raw/ dir per run
-                        raw_dir = self._run_path / "raw"
-                        raw_dir.mkdir(parents=True, exist_ok=True)
+                        # raw/{device_name}/ per run
+                        dev_raw_dir = self._run_path / "raw" / (device_name.replace(" ", "_"))
+                        dev_raw_dir.mkdir(parents=True, exist_ok=True)
 
                         sink = ChunkWriter(
                             sample_rate=sr,
@@ -150,10 +150,11 @@ class _RunnerThread(QtCore.QThread):
                             buffer_bytes=CSV_FILE_BUFFER_BYTES,
                             flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
                         )
-                        sink.raw_chunks_dir = raw_dir
+                        sink.raw_chunks_dir = dev_raw_dir
+                        sink.filename_prefix = params.get("block_label", "Stream")
                         sink._open_new_chunk_locked()
 
-                        device.configure(**{k: v for k, v in params.items() if k != 'duration_s'})
+                        device.configure(**{k: v for k, v in params.items() if k not in ('duration_s', 'block_label')})
                         device.start_acquisition()
 
                         deadline = time.perf_counter() + duration

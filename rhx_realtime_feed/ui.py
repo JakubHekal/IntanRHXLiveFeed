@@ -1513,6 +1513,7 @@ class MainWindow(QMainWindow):
                     op_name = block[4] if len(block) >= 5 else block[0]
                     params = block[5] if len(block) >= 6 else {}
                     p = dict(params)
+                    p["block_label"] = block[0]
                     p.setdefault("duration_s", block[2] * 60.0)
                     sequence.append(SequenceStep(
                         step_id=step_id,
@@ -1526,6 +1527,7 @@ class MainWindow(QMainWindow):
                 op_name = block[4] if len(block) >= 5 else block[0]
                 params = block[5] if len(block) >= 6 else {}
                 p = dict(params)
+                p["block_label"] = block[0]
                 p.setdefault("duration_s", block[2] * 60.0)
                 sequence.append(SequenceStep(
                     step_id=step_id,
