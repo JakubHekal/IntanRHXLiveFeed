@@ -4,8 +4,7 @@ from pathlib import Path
 from PyQt5 import QtCore
 import numpy as np
 
-from rhx_realtime_feed.device import Device
-from rhx_realtime_feed.workers.device_worker import DeviceWorker, RAW_CHUNK_SEC, CSV_FILE_BUFFER_BYTES, CSV_FLUSH_INTERVAL_SEC
+from rhx_realtime_feed.workers.device_worker import RAW_CHUNK_SEC, CSV_FILE_BUFFER_BYTES, CSV_FLUSH_INTERVAL_SEC
 from rhx_realtime_feed.workers.chunk_writer import ChunkWriter
 
 
@@ -14,6 +13,7 @@ class ExperimentRunner(QtCore.QObject):
     step_completed = QtCore.pyqtSignal(int, str, str)
     experiment_finished = QtCore.pyqtSignal(bool, str)  # success, message
     error_occurred = QtCore.pyqtSignal(str, str)  # device_name, error_message
+    data_received = QtCore.pyqtSignal(str, object)  # device_name, chunk
 
     def __init__(self, devices: list, sequence: list, run_path: str, parent=None):
         """
@@ -38,6 +38,7 @@ class ExperimentRunner(QtCore.QObject):
         self._thread.step_completed.connect(self.step_completed)
         self._thread.experiment_finished.connect(self.experiment_finished)
         self._thread.error_occurred.connect(self.error_occurred)
+        self._thread.data_received.connect(self.data_received)
         self._thread.finished.connect(self._on_thread_finished)
         self._thread.start()
 
@@ -68,6 +69,7 @@ class _RunnerThread(QtCore.QThread):
     step_completed = QtCore.pyqtSignal(int, str, str)
     experiment_finished = QtCore.pyqtSignal(bool, str)
     error_occurred = QtCore.pyqtSignal(str, str)
+    data_received = QtCore.pyqtSignal(str, object)
 
     def __init__(self, devices, sequence, run_path, parent=None):
         super().__init__(parent)
@@ -105,9 +107,6 @@ class _RunnerThread(QtCore.QThread):
                     if inst is not None:
                         device_map[d[0]] = inst
 
-            raw_chunks_base = self._run_path / "raw_chunks"
-            raw_chunks_base.mkdir(parents=True, exist_ok=True)
-
             for step_idx, step in enumerate(self._sequence):
                 if self._abort or self.isInterruptionRequested():
                     break
@@ -139,8 +138,10 @@ class _RunnerThread(QtCore.QThread):
 
                         sr = device.sample_rate if device.sample_rate else 20000.0
                         num_ch = len(getattr(device, 'channels', [])) or 1
-                        step_dir = raw_chunks_base / f"{device_name}_step_{step_idx + 1:02d}"
-                        step_dir.mkdir(parents=True, exist_ok=True)
+
+                        # flat raw/ dir per run
+                        raw_dir = self._run_path / "raw"
+                        raw_dir.mkdir(parents=True, exist_ok=True)
 
                         sink = ChunkWriter(
                             sample_rate=sr,
@@ -149,34 +150,37 @@ class _RunnerThread(QtCore.QThread):
                             buffer_bytes=CSV_FILE_BUFFER_BYTES,
                             flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
                         )
-
-                        worker = DeviceWorker(device, sink, project_name=device_name, project_path=str(step_dir), close_device_on_stop=False)
-                        stream_ok = [True]  # assume success, signal overrides on failure
-
-                        def _on_connection_result(ok, msg):
-                            stream_ok[0] = ok
-                            print(f"[Runner] {device_name} stream: ok={ok}, msg={msg}")
-
-                        worker.connection_request_result_signal.connect(_on_connection_result)
+                        sink.raw_chunks_dir = raw_dir
+                        sink._open_new_chunk_locked()
 
                         device.configure(**{k: v for k, v in params.items() if k != 'duration_s'})
-                        worker.start()
-
-                        # give the worker a moment to connect, then check
-                        self.msleep(500)
-                        if not stream_ok[0]:
-                            self.error_occurred.emit(device_name, "Stream connection failed")
-                            worker.stop(timeout_ms=1000)
-                            worker.deleteLater()
-                            continue
+                        device.start_acquisition()
 
                         deadline = time.perf_counter() + duration
                         while time.perf_counter() < deadline and not self._abort and not self.isInterruptionRequested() and getattr(device, 'connected', True):
+                            # pause extends deadline so pause doesn't eat into stream time
+                            if self._paused:
+                                pause_start = time.perf_counter()
+                                while self._paused and not self._abort and not self.isInterruptionRequested():
+                                    self.msleep(100)
+                                deadline += time.perf_counter() - pause_start
+                            try:
+                                data = device.read_data()
+                            except Exception:
+                                data = None
+                            if data is not None:
+                                arr = np.asarray(data)
+                                if arr.ndim == 2 and arr.shape[1] > 0:
+                                    sink.append_data(arr)
+                                    self.data_received.emit(device_name, arr)
                             remaining = deadline - time.perf_counter()
-                            self.msleep(int(min(100, remaining * 1000)) if remaining > 0 else 10)
+                            self.msleep(int(min(100, max(0, remaining * 1000))) if remaining > 0 else 10)
 
-                        worker.stop(timeout_ms=3000)
-                        worker.deleteLater()
+                        sink.close()
+                        try:
+                            device.stop_acquisition()
+                        except Exception:
+                            pass
 
                     elif action in ("Configure",):
                         device.configure(**params)

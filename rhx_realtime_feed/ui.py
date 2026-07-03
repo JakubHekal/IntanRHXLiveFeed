@@ -1254,12 +1254,22 @@ class MainWindow(QMainWindow):
         self._current_run_path = None
         self._run_device_configs = {}
         self._run_device_instances = []
+        self._legacy_window = None
+        self._experiment_runner = None
         self.main_stage = MainStage()
         root_layout.addWidget(self.main_stage, 1)
 
         self._wire_behavior()
         self._setup_status_bar()
         self.main_stage.plot_screen.fps_updated.connect(self._fps_status_label.setText)
+
+    def closeEvent(self, event):
+        if getattr(self, '_experiment_runner', None) is not None and self._experiment_runner.is_running():
+            self._experiment_runner.stop()
+        self.main_stage.plot_screen.shutdown_workers()
+        if self._legacy_window is not None:
+            self._legacy_window.close()
+        super().closeEvent(event)
 
     def _create_text_toolbar(self, parent_layout):
         """Create a menu bar style toolbar at the top."""
@@ -1565,6 +1575,7 @@ class MainWindow(QMainWindow):
         self._experiment_runner.step_completed.connect(self._on_exp_step_completed)
         self._experiment_runner.experiment_finished.connect(self._on_exp_finished)
         self._experiment_runner.error_occurred.connect(self._on_exp_error)
+        self._experiment_runner.data_received.connect(self.main_stage.plot_screen.on_data)
         self._experiment_runner.start()
 
         self.main_stage.btn_play.clicked.connect(self._experiment_runner.resume)
