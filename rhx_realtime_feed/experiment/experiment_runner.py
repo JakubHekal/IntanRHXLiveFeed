@@ -48,6 +48,14 @@ class ExperimentRunner(QtCore.QObject):
             if not self._thread.wait(5000):
                 print("[Runner] Thread did not stop within 5s")
 
+    def pause(self):
+        if self._thread is not None:
+            self._thread._paused = True
+
+    def resume(self):
+        if self._thread is not None:
+            self._thread._paused = False
+
     def _on_thread_finished(self):
         self._thread = None
 
@@ -67,6 +75,7 @@ class _RunnerThread(QtCore.QThread):
         self._sequence = sequence
         self._run_path = Path(run_path)
         self._abort = False
+        self._paused = False
 
     def abort(self):
         self._abort = True
@@ -162,7 +171,7 @@ class _RunnerThread(QtCore.QThread):
                             continue
 
                         deadline = time.perf_counter() + duration
-                        while time.perf_counter() < deadline and not self._abort and not self.isInterruptionRequested():
+                        while time.perf_counter() < deadline and not self._abort and not self.isInterruptionRequested() and getattr(device, 'connected', True):
                             remaining = deadline - time.perf_counter()
                             self.msleep(int(min(100, remaining * 1000)) if remaining > 0 else 10)
 
@@ -218,6 +227,10 @@ class _RunnerThread(QtCore.QThread):
                     print(f"[Runner] Error in step {step_idx}: {e}")
 
                 self.step_completed.emit(step_idx, device_name, action)
+
+                # ponytail: busy-wait, replace with QWaitCondition if throughput matters
+                while self._paused and not self._abort and not self.isInterruptionRequested():
+                    self.msleep(100)
 
             success = not self._abort
             msg = "Completed" if success else "Aborted"

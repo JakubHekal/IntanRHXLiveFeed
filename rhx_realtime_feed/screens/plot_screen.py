@@ -81,6 +81,10 @@ class PlotScreen(QtWidgets.QWidget):
         tab.deleteLater()
         self._update_tab_bar_visibility()
 
+    def clear_all(self):
+        for name in list(self._tabs):
+            self.remove_device(name)
+
     def _active_tab(self):
         widget = self.tab_widget.currentWidget()
         if widget is None and self._tabs:

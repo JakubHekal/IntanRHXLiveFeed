@@ -214,6 +214,11 @@ class LeftSidebar(QFrame):
             label = f"[{ts}] {name} \u2014 {status}" if ts else f"{name} \u2014 {status}"
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, str(rp))
+            if status == "running":
+                f = item.font()
+                f.setBold(True)
+                item.setFont(f)
+                item.setForeground(QColor("#00FF00"))
             self.run_list.addItem(item)
 
 
@@ -546,6 +551,8 @@ class ExperimentTimeline(QWidget):
         self._devices.append(["__System__", [], "__system__", {}])
         self._sel_dev = None
         self._sel_block = None
+        self._active_dev = None
+        self._active_block = None
         self._drag_state = None
         self._drag_dev = None
         self._drag_block = None
@@ -618,6 +625,27 @@ class ExperimentTimeline(QWidget):
         self._update_total_time()
         self._update_height()
         self.data_changed.emit()
+        self.update()
+
+    def set_active_step(self, step_index):
+        count = 0
+        for i, row in enumerate(self._devices):
+            if row[2] == "__system__":
+                continue
+            blocks = row[1]
+            if step_index < count + len(blocks):
+                self._active_dev = i
+                self._active_block = step_index - count
+                self.update()
+                return
+            count += len(blocks)
+        self._active_dev = None
+        self._active_block = None
+        self.update()
+
+    def clear_active_step(self):
+        self._active_dev = None
+        self._active_block = None
         self.update()
 
     def add_block(self, dev_idx, op_name="New Block", start=None, duration=None, params=None):
@@ -1034,6 +1062,18 @@ class ExperimentTimeline(QWidget):
                         painter.drawRect(bx - 1, handle_y, handle_w, handle_h)
                         painter.drawRect(bx + bw - handle_w + 1, handle_y, handle_w, handle_h)
 
+                # Active step highlight (green border)
+                if self._active_dev == i and self._active_block == bi:
+                    pen = QPen(QColor("#00FF00"), 3)
+                    pen.setStyle(Qt.SolidLine)
+                    painter.setBrush(Qt.NoBrush)
+                    painter.setPen(pen)
+                    if is_instant:
+                        painter.drawRoundedRect(pill_x - 2, pill_y - 2, pill_w + 4, pill_h + 4, 5, 5)
+                    else:
+                        bw_act = max(4, int((dur / self._total_time) * plot_w))
+                        painter.drawRoundedRect(bx - 2, by - 2, bw_act + 4, bh + 4, 5, 5)
+
         # Phase 3: System block full-height bands (overlay across all rows)
         for row in self._devices:
             if row[2] != "__system__":
@@ -1124,6 +1164,18 @@ class ExperimentTimeline(QWidget):
                         painter.drawRect(bx - 1, handle_y, handle_w, handle_h)
                         painter.drawRect(bx + bw - handle_w + 1, handle_y, handle_w, handle_h)
 
+                # Active step highlight (green border) for system blocks
+                if self._active_dev == i and self._active_block == bi:
+                    pen = QPen(QColor("#00FF00"), 3)
+                    pen.setStyle(Qt.SolidLine)
+                    painter.setBrush(Qt.NoBrush)
+                    painter.setPen(pen)
+                    if is_instant:
+                        painter.drawRoundedRect(pill_x - 2, pill_y - 2, pill_w + 4, pill_h + 4, 5, 5)
+                    else:
+                        bw_act = max(4, int((dur / self._total_time) * plot_w))
+                        painter.drawRoundedRect(bx - 2, by - 2, bw_act + 4, bh + 4, 5, 5)
+
 
 class MainStage(QWidget):
     def __init__(self, parent=None):
@@ -1146,10 +1198,10 @@ class MainStage(QWidget):
         timeline_bar.setContentsMargins(4, 4, 4, 4)
         timeline_bar.setSpacing(4)
 
-        btn_play = QToolButton()
-        btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
-        btn_pause = QToolButton()
-        btn_pause.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+        self.btn_play = QToolButton()
+        self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        self.btn_pause = QToolButton()
+        self.btn_pause.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
         btn_prev = QToolButton()
         btn_prev.setIcon(self.style().standardIcon(QStyle.SP_MediaSkipBackward))
         btn_next = QToolButton()
@@ -1159,8 +1211,8 @@ class MainStage(QWidget):
         self.timeline_slider.setRange(0, 120)
         self.timeline_slider.setValue(15)
 
-        timeline_bar.addWidget(btn_play)
-        timeline_bar.addWidget(btn_pause)
+        timeline_bar.addWidget(self.btn_play)
+        timeline_bar.addWidget(self.btn_pause)
         timeline_bar.addWidget(btn_prev)
         timeline_bar.addWidget(btn_next)
         timeline_bar.addWidget(QLabel("0"))
@@ -1515,6 +1567,16 @@ class MainWindow(QMainWindow):
         self._experiment_runner.error_occurred.connect(self._on_exp_error)
         self._experiment_runner.start()
 
+        self.main_stage.btn_play.clicked.connect(self._experiment_runner.resume)
+        self.main_stage.btn_pause.clicked.connect(self._experiment_runner.pause)
+
+        # save initial "running" metadata
+        self._save_run_metadata(True, status="running")
+        if self._current_experiment_path:
+            self.main_stage.left_sidebar.reload_runs(
+                str(Path(self._current_experiment_path) / "runs")
+            )
+
         self._exp_run_action.setEnabled(False)
         self.statusBar().showMessage(f"Running: {exp_name}")
 
@@ -1526,6 +1588,7 @@ class MainWindow(QMainWindow):
             total = len(self._build_sequence_for_runner())
             self.progress.setMaximum(total)
             self.progress.setValue(step_index)
+        self.main_stage.timeline.set_active_step(step_index)
 
     def _on_exp_step_completed(self, step_index, device_name, action):
         if hasattr(self, 'progress'):
@@ -1534,6 +1597,7 @@ class MainWindow(QMainWindow):
     def _on_exp_finished(self, success, message):
         self._exp_run_action.setEnabled(True)
         self.progress.setValue(0)
+        self.main_stage.timeline.clear_active_step()
         self._save_run_metadata(success)
         if self._current_experiment_path:
             self.main_stage.left_sidebar.reload_runs(
@@ -1545,15 +1609,17 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Experiment aborted: {message}")
         self._experiment_runner = None
 
-    def _save_run_metadata(self, success):
+    def _save_run_metadata(self, success=None, status=None):
         if not self._current_run_path:
             return
         import json, datetime
         meta_path = Path(self._current_run_path) / "metadata.json"
+        if status is None:
+            status = "success" if success else "failed"
         meta = {
             "name": Path(self._current_experiment_path).name if self._current_experiment_path else "",
             "timestamp": datetime.datetime.now().strftime("%Y%m%d_%H%M%S"),
-            "status": "success" if success else "failed",
+            "status": status,
             "device_type": "rhx",
             "sample_rate": 20000.0,
             "num_channels": 1,
@@ -1590,15 +1656,18 @@ class MainWindow(QMainWindow):
     def _populate_timeline_from_config(self, config: ExperimentConfig):
         timeline = self.main_stage.timeline
         timeline.clear_all()
+        self.main_stage.plot_screen.clear_all()
 
         # restore devices from stored name + type
         if config.devices:
             for d in config.devices:
                 timeline.add_device(name=d["name"], device_type=d.get("device_type", "rhx"))
+                self.main_stage.plot_screen.add_device(d["name"], d.get("device_type", "rhx"))
         else:
             # legacy: create one device per required_device type
             for dev_type in config.execution_control.required_devices:
                 timeline.add_device(name=dev_type, device_type=dev_type)
+                self.main_stage.plot_screen.add_device(dev_type, dev_type)
 
         # map device name → index
         name_to_idx = {
@@ -1609,6 +1678,7 @@ class MainWindow(QMainWindow):
         # ensure at least one device exists
         if not name_to_idx:
             timeline.add_device(name="Default", device_type="rhx")
+            self.main_stage.plot_screen.add_device("Default", "rhx")
             name_to_idx = {
                 d[0]: i for i, d in enumerate(timeline._devices)
                 if d[2] != "__system__"
