@@ -382,9 +382,20 @@ class LegacyMainWindow(QtWidgets.QMainWindow):
             data_port=data_port,
             num_channels=1,
         )
+        if not device.connect():
+            self.connect_dialog.set_busy(False)
+            self.state_manager.connection_failed()
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Connection Failed",
+                "Could not connect to Intan RHX at "
+                f"{host}:{command_port}/{data_port}.",
+            )
+            return
         device.configure(enable_wide_channel=[channel], port=port, blocks_per_write=1)
 
         effective_fs = float(device.sample_rate)
+        self.plot_screen.add_device("Intan RHX", "rhx", sample_rate=effective_fs, num_channels=1)
         sink = ChunkWriter(
             sample_rate=effective_fs,
             num_channels=1,

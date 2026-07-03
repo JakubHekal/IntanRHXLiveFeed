@@ -1,158 +1,10 @@
 import time
-import bisect
-from datetime import datetime
-from pathlib import Path
 
 import pyqtgraph as pg
-from pyqtgraph.exporters.ImageExporter import ImageExporter
-from PyQt5 import QtWidgets, QtCore, QtGui
-import numpy as np
-from rhx_realtime_feed.telemetry_logger import append_telemetry_line
+from PyQt5 import QtWidgets, QtCore
 
-from rhx_realtime_feed.plot_settings import load_plot_setting, save_plot_setting, DEFAULT_PSDS, DEFAULT_WAVEFORM, DEFAULT_SPIKE_BIN
-
-from rhx_realtime_feed.workers.processing_worker import (
-    ProcessingWorker,
-    configure_processing_windows,
-    SPIKE_INCREMENTAL_MIN_SAMPLES,
-    SPIKE_OVERLAP_SAMPLES,
-    PSD_BUFFER_SEC,
-    WAVEFORM_BUFFER_SEC,
-    SPIKE_BIN_SEC,
-    PSD_YLIM_MIN,
-    PSD_YLIM_MAX,
-)
-from rhx_realtime_feed.workers.expensive_task_worker import ExpensiveTaskWorker
-
-# ── Display constants ──────────────────────────────────────────────────────────
-DISPLAY_WINDOW_SEC    = 10          # raw signal x-axis window
-DISPLAY_BUFFER_SEC    = 300         # ring buffer size (5 min)
-DEFAULT_SAMPLING_RATE = 20000
-MAX_DISPLAY_POINTS    = 2500
-
-# ── Per-subplot render rate limits ────────────────────────────────────────────
-PLOT_UPDATE_FREQ_HZ = 90
-RAW_RENDER_HZ       = 30
-PSD_RENDER_HZ       = 30
-SPIKE_RENDER_HZ     = 30
-WAVEFORM_YLIM_ABS_UV = 100
-SPIKE_SCROLL_WINDOW_MIN = 10.0
-RAW_HISTORY_TARGET_HZ = 100.0
-RAW_HISTORY_HIGH_TARGET_HZ = 1000.0
-RAW_ADAPTIVE_HIGH_RES_MAX_SPAN_SEC = 30.0
-RAW_FULL_RES_MAX_SPAN_SEC = 30.0
-RAW_MANUAL_VIEW_MARGIN_SEC = 2.0
-MAX_RAW_HISTORY_PLOT_POINTS = 200000
-
-# ── Background compute throttle (every N data chunks) ─────────────────────────
-PSD_PLOT_UPDATE_EVERY_N   = 20
-SPIKE_PLOT_UPDATE_EVERY_N = 20  
-
-# ── Pyqtgraph global style ────────────────────────────────────────────────────
-pg.setConfigOption('background', 'white')
-pg.setConfigOption('foreground', 'black')
-pg.setConfigOption('antialias', True)
-
-def _make_display_buffer(fs: float) -> np.ndarray:
-    """Pre-allocate fixed-size ring buffer for DISPLAY_BUFFER_SEC of data."""
-    n = max(1, int(round(fs * DISPLAY_BUFFER_SEC)))
-    return np.zeros((2, n), dtype=np.float64)
-
-
-def _minmax_downsample(x, y, max_points):
-    """Decimate to max_points using min-max per bin (peak-preserving)."""
-    n = x.size
-    if n <= max_points:
-        return x, y
-    step = n // max_points
-    n_bins = n // step
-    x = x[:n_bins * step]
-    y = y[:n_bins * step]
-    x_binned = x.reshape(-1, step)
-    y_binned = y.reshape(-1, step)
-    x_out = np.repeat(x_binned.mean(axis=1), 2)
-    y_out = np.empty(n_bins * 2)
-    y_out[0::2] = y_binned.min(axis=1)
-    y_out[1::2] = y_binned.max(axis=1)
-    return x_out, y_out
-
-
-class PgCanvas(QtWidgets.QWidget):
-    """Four pyqtgraph plots: Raw (top, full width) + PSD / Spike counts / Waveform (bottom row)."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self.glw = pg.GraphicsLayoutWidget()
-        self.glw.setViewportUpdateMode(QtWidgets.QGraphicsView.FullViewportUpdate)
-        self.glw.setRenderHint(QtGui.QPainter.Antialiasing)
-        layout.addWidget(self.glw)
-
-        # Keep default context menu handling so each plot ViewBox can show its menu.
-        self.glw.setContextMenuPolicy(QtCore.Qt.DefaultContextMenu)
-
-        # Row 0: Raw signal (spans 3 columns)
-        self.raw_plot = self.glw.addPlot(row=0, col=0, colspan=3)
-        self.raw_plot.setTitle("Raw signal")
-        self.raw_plot.setLabel('left',   'U [uV]')
-        self.raw_plot.setLabel('bottom', 't [s]')
-        self.raw_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.raw_plot.setDownsampling(auto=True, mode='peak')
-        self.raw_plot.setClipToView(True)
-        self.raw_plot.setMouseEnabled(x=True, y=True)
-
-        # Row 1: PSD
-        self.psd_plot = self.glw.addPlot(row=1, col=0)
-        self.psd_plot.setTitle(f"Power spectrum (last {PSD_BUFFER_SEC}s)")
-        self.psd_plot.setLabel('left',   'P [dB]')
-        self.psd_plot.setLabel('bottom', 'f [Hz]')
-        self.psd_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.psd_plot.setMouseEnabled(x=False, y=False)
-        self.psd_plot.setYRange(PSD_YLIM_MIN, PSD_YLIM_MAX, padding=0)
-
-        # Row 1: Spike counts
-        self.spike_plot = self.glw.addPlot(row=1, col=1)
-        self.spike_plot.setTitle(f"Spike counts ({SPIKE_BIN_SEC}s bins)")
-        self.spike_plot.setLabel('left',   'Count')
-        self.spike_plot.setLabel('bottom', 't [min]')
-        self.spike_plot.showGrid(x=True, y=True, alpha=0.3)
-        # Allow horizontal pan/zoom so users can review full spike history.
-        self.spike_plot.setMouseEnabled(x=True, y=True)
-
-        # Row 1: Waveform
-        self.wf_plot = self.glw.addPlot(row=1, col=2)
-        self.wf_plot.setTitle(f"Averaged spike waveform (last {WAVEFORM_BUFFER_SEC}s)")
-        self.wf_plot.setLabel('left',   'U [uV]')
-        self.wf_plot.setLabel('bottom', 't [ms]')
-        self.wf_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.wf_plot.setMouseEnabled(x=False, y=True)
-        self.wf_plot.setYRange(-WAVEFORM_YLIM_ABS_UV, WAVEFORM_YLIM_ABS_UV, padding=0)
-
-        # ── Curves ────────────────────────────────────────────────────────────
-        self.raw_curve   = self.raw_plot.plot(  pen=pg.mkPen("#1D20ED", width=1))
-        self.psd_curve   = self.psd_plot.plot(  pen=pg.mkPen("#f62d2d", width=2))
-        self.spike_curve = self.spike_plot.plot(pen=pg.mkPen("#20C814", width=2))
-        self.wf_curve    = self.wf_plot.plot(   pen=pg.mkPen("#e840b3", width=2))
-
-        # SEM fill (FillBetweenItem requires two PlotDataItems)
-        self.wf_upper = self.wf_plot.plot(pen=None)
-        self.wf_lower = self.wf_plot.plot(pen=None)
-        self.wf_fill  = pg.FillBetweenItem(
-            self.wf_upper, self.wf_lower,
-            brush=pg.mkBrush(80, 200, 120, 50),
-        )
-        self.wf_plot.addItem(self.wf_fill)
-
-        # Marker lines (InfiniteLine pool)
-        self._marker_lines    = []
-        self._marker_pen      = pg.mkPen(color='crimson', style=QtCore.Qt.DashLine, width=1)
-        self._last_marker_set = []   # timestamps of currently displayed lines
-        self._marker_labels = []
-        self._spike_marker_lines = []
-        self._last_spike_marker_set = []
-        self._spike_marker_labels = []
+from rhx_realtime_feed.screens.plot_helpers import PLOT_UPDATE_FREQ_HZ
+from rhx_realtime_feed.screens.device_tab import NeuralDeviceTab, SmuDeviceTab
 
 
 class PlotScreen(QtWidgets.QWidget):
@@ -166,1102 +18,217 @@ class PlotScreen(QtWidgets.QWidget):
         super().__init__(parent)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
 
-        # ── Session state ──────────────────────────────────────────────────────
-        self.sampling_rate    = float(DEFAULT_SAMPLING_RATE)
-        self.sample_counter   = 0       # total samples ever received (absolute)
-        self.marker_records   = []      # marker dicts: id,timestamp_s,name,active
-        self._marker_times_sorted = []
-        self.is_receiving     = False
-        self._receiving_wall_active_sec = 0.0
-        self._receiving_wall_run_start = None
-        self.base_connection_details = ""
-        self.base_project_line = ""
-        self.project_run_dir = ""
-        self.project_snapshots_dir = ""
+        # ponytail: multi-device tab container, stores DeviceTab instances keyed by name
+        self._tabs = {}  # name -> DeviceTab
 
-        self._spike_times_cache      = []
-        self._last_spike_scan_sample = 0  # absolute sample count (never resets)
-        self._last_proc_abs_start    = 0
-        self._proc_result            = None
-        self._psd_buffer_sec         = load_plot_setting("psd_buffer_sec", DEFAULT_PSDS)
-        self._waveform_buffer_sec    = load_plot_setting("waveform_buffer_sec", DEFAULT_WAVEFORM)
-        self._spike_bin_sec          = load_plot_setting("spike_bin_sec", DEFAULT_SPIKE_BIN)
-        self._latest_psd_f           = None
-        self._latest_psd_db          = None
-        self._latest_wf_t_ms         = None
-        self._latest_wf_mu           = None
-
-        # Full-session raw history (dual-resolution for adaptive manual browsing).
-        self._raw_hist_t_low = []
-        self._raw_hist_y_low = []
-        self._raw_hist_t_high = []
-        self._raw_hist_y_high = []
-        self._raw_hist_sample_mod_low = 0
-        self._raw_hist_sample_mod_high = 0
-        self._raw_hist_stride_low = 1
-        self._raw_hist_stride_high = 1
-
-        # Axis follow state: when disabled, user-adjusted ranges are preserved.
-        self._follow_axes = {
-            'raw': True,
-            'psd': True,
-            'spike': True,
-            'wf': True,
-        }
-        self._follow_menu_actions = {}
-        self._suspend_follow_detection = False
-
-        # Snapshot overlays (underlaid on top of corresponding plots)
-        self._psd_snapshot_curves = []
-        self._wf_snapshot_curves  = []
-
-        # Ring buffer (fixed-size, never grows)
-        self._ring  = _make_display_buffer(DEFAULT_SAMPLING_RATE)
-        self._cap   = self._ring.shape[1]
-        self._wpos  = 0   # next write position
-        self._total = 0   # total samples written
-
-        # Lazy render state
-        self._last_raw_render_t   = 0.0
-        self._last_psd_render_t   = 0.0
-        self._last_spike_render_t = 0.0
-        self._psd_pending         = False
-        self._spike_pending       = False
-
-        # Compute throttle counters
-        self.psd_update_counter       = 0
-        self.spike_plot_frame_counter = 0
-
-        # ── Background worker ──────────────────────────────────────────────────
-        self._proc_worker = ProcessingWorker(self)
-        self._proc_worker.result_ready.connect(self._on_processing_result)
-        self._proc_worker.start()
-        self._exp_worker = ExpensiveTaskWorker(self)
-        self._exp_worker.result_ready.connect(self._on_expensive_task_result)
-        self._exp_worker.start()
-
-        self._session_id = 0
-        self._task_id_counter = 0
-        self._active_expensive_task_id = {}
-
-        # ── Layout ─────────────────────────────────────────────────────────────
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(6)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
+        top_bar = QtWidgets.QHBoxLayout()
+        top_bar.setContentsMargins(12, 6, 12, 2)
         self.connection_details_label = QtWidgets.QLabel()
-        self.connection_details_label.setContentsMargins(0, 0, 12, 0)
-        self.fps_label = QtWidgets.QLabel()
-        self.fps_label.setContentsMargins(12, 0, 12, 0)
+        self.fps_label = QtWidgets.QLabel("FPS: 0.0")
+        top_bar.addWidget(self.connection_details_label)
+        top_bar.addStretch()
+        top_bar.addWidget(self.fps_label)
+        layout.addLayout(top_bar)
 
-        self.canvas = PgCanvas(self)
-        self.canvas.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        layout.addWidget(self.canvas, 1)
+        self.tab_widget = QtWidgets.QTabWidget()
+        self.tab_widget.setDocumentMode(True)
+        # ponytail: tabs are closeable only when multi-device, single-device hides bar entirely
+        self.tab_widget.setTabsClosable(True)
+        self.tab_widget.tabCloseRequested.connect(self._on_tab_close_requested)
+        layout.addWidget(self.tab_widget, 1)
 
-        self._connect_plot_range_signals()
-        self._install_plot_follow_context_actions()
-        self._install_plot_bin_window_size_context_actions()
-
-        self._update_raw_history_stride()
+        pg.setConfigOption('background', 'white')
+        pg.setConfigOption('foreground', 'black')
+        pg.setConfigOption('antialias', True)
 
         self.render_timer = QtCore.QTimer(self)
         self.render_timer.setInterval(1000 // PLOT_UPDATE_FREQ_HZ)
-        self.render_timer.timeout.connect(self._render_plot)
+        self.render_timer.timeout.connect(self._render_all)
         self.render_timer.start()
 
         self._fps_frame_count = 0
-        self._fps_last_t      = time.perf_counter()
-        self._render_dur_ms   = 0.0
+        self._fps_last_t = time.perf_counter()
+        self._render_dur_ms = 0.0
 
-        # Lightweight runtime telemetry for Phase 1 baselining.
-        now = time.perf_counter()
-        self._telemetry_last_emit = now
-        self._telemetry_emit_interval_sec = 5.0
-        self._telemetry_chunks = 0
-        self._telemetry_samples = 0
-        self._telemetry_render_calls = 0
-        self._telemetry_raw_renders = 0
-        self._telemetry_render_ms_total = 0.0
-        self._telemetry_ingest_ms_total = 0.0
-        self._telemetry_latest_chunk_received_t = now
+    def _on_tab_close_requested(self, index):
+        widget = self.tab_widget.widget(index)
+        name = self.tab_widget.tabText(index)
+        if widget is not None:
+            widget.shutdown()
+        self.tab_widget.removeTab(index)
+        self._tabs.pop(name, None)
+        self._update_tab_bar_visibility()
 
-    def _emit_telemetry_if_due(self):
-        now = time.perf_counter()
-        elapsed = now - self._telemetry_last_emit
-        if elapsed < self._telemetry_emit_interval_sec:
+    def _update_tab_bar_visibility(self):
+        visible = len(self._tabs) > 1
+        self.tab_widget.tabBar().setVisible(visible)
+
+    def add_device(self, name, device_type, sample_rate=20000.0, num_channels=1):
+        if name in self._tabs:
             return
-
-        render_calls = max(1, int(self._telemetry_render_calls))
-        raw_renders = max(1, int(self._telemetry_raw_renders))
-        avg_render_ms = self._telemetry_render_ms_total / render_calls
-        avg_ingest_ms = self._telemetry_ingest_ms_total / max(1, int(self._telemetry_chunks))
-        chunk_rate = float(self._telemetry_chunks) / max(elapsed, 1e-6)
-        sample_rate = float(self._telemetry_samples) / max(elapsed, 1e-6)
-        render_rate = float(self._telemetry_render_calls) / max(elapsed, 1e-6)
-        raw_render_rate = float(self._telemetry_raw_renders) / max(elapsed, 1e-6)
-        data_to_render_ms = (now - self._telemetry_latest_chunk_received_t) * 1000.0
-        sample_clock_sec = float(self.sample_counter) / max(float(self.sampling_rate), 1e-9)
-        wall_elapsed_sec = float(self._receiving_wall_active_sec)
-        if self._receiving_wall_run_start is not None:
-            wall_elapsed_sec += max(0.0, now - float(self._receiving_wall_run_start))
-        drift_pct = 0.0
-        if wall_elapsed_sec > 0.25:
-            drift_pct = ((sample_clock_sec / wall_elapsed_sec) - 1.0) * 100.0
-
-        line = (
-            "[telemetry][plot] "
-            f"window_s={elapsed:.2f} chunks={int(self._telemetry_chunks)} samples={int(self._telemetry_samples)} "
-            f"chunk_hz={chunk_rate:.2f} sample_hz={sample_rate:.1f} render_hz={render_rate:.2f} raw_render_hz={raw_render_rate:.2f} "
-            f"avg_ingest_ms={avg_ingest_ms:.3f} avg_render_ms={avg_render_ms:.3f} data_to_render_ms={data_to_render_ms:.3f} "
-            f"sample_clock_s={sample_clock_sec:.1f} wall_s={wall_elapsed_sec:.1f} drift_pct={drift_pct:.2f}"
-        )
-        print(line)
-        append_telemetry_line(line)
-
-        self._telemetry_last_emit = now
-        self._telemetry_chunks = 0
-        self._telemetry_samples = 0
-        self._telemetry_render_calls = 0
-        self._telemetry_raw_renders = 0
-        self._telemetry_render_ms_total = 0.0
-        self._telemetry_ingest_ms_total = 0.0
-
-    def _plot_item_for_key(self, key: str):
-        if key == 'raw':
-            return self.canvas.raw_plot
-        if key == 'psd':
-            return self.canvas.psd_plot
-        if key == 'spike':
-            return self.canvas.spike_plot
-        if key == 'wf':
-            return self.canvas.wf_plot
-        raise KeyError(key)
-
-    def _update_raw_history_stride(self):
-        target_low = max(1.0, float(RAW_HISTORY_TARGET_HZ))
-        target_high = max(1.0, float(RAW_HISTORY_HIGH_TARGET_HZ))
-        self._raw_hist_stride_low = max(1, int(round(float(self.sampling_rate) / target_low)))
-        self._raw_hist_stride_high = max(1, int(round(float(self.sampling_rate) / target_high)))
-
-    def _append_decimated_history(self, t_chunk: np.ndarray, signal: np.ndarray, stride: int, sample_mod: int, t_store: list, y_store: list) -> int:
-        n = int(signal.size)
-        if n <= 0:
-            return int(sample_mod)
-        stride = max(1, int(stride))
-        start = (stride - int(sample_mod)) % stride
-        if start < n:
-            idx = np.arange(start, n, stride, dtype=int)
-            if idx.size:
-                t_store.extend(np.asarray(t_chunk[idx], dtype=np.float64).tolist())
-                y_store.extend(np.asarray(signal[idx], dtype=np.float64).tolist())
-        return (int(sample_mod) + n) % stride
-
-    def _append_raw_history(self, t_chunk: np.ndarray, signal: np.ndarray):
-        self._raw_hist_sample_mod_low = self._append_decimated_history(
-            t_chunk,
-            signal,
-            self._raw_hist_stride_low,
-            self._raw_hist_sample_mod_low,
-            self._raw_hist_t_low,
-            self._raw_hist_y_low,
-        )
-        self._raw_hist_sample_mod_high = self._append_decimated_history(
-            t_chunk,
-            signal,
-            self._raw_hist_stride_high,
-            self._raw_hist_sample_mod_high,
-            self._raw_hist_t_high,
-            self._raw_hist_y_high,
-        )
-
-        # Keep only the last DISPLAY_BUFFER_SEC seconds in decimated history.
-        latest_t = float(t_chunk[-1]) if np.asarray(t_chunk).size else 0.0
-        cutoff_t = latest_t - float(DISPLAY_BUFFER_SEC)
-        self._trim_history_store(self._raw_hist_t_low, self._raw_hist_y_low, cutoff_t)
-        self._trim_history_store(self._raw_hist_t_high, self._raw_hist_y_high, cutoff_t)
-
-    def _trim_history_store(self, t_store: list, y_store: list, cutoff_t: float):
-        if not t_store:
-            return
-        keep_from = bisect.bisect_left(t_store, float(cutoff_t))
-        if keep_from <= 0:
-            return
-        del t_store[:keep_from]
-        del y_store[:keep_from]
-
-    def _raw_time_bounds(self):
-        stored = min(self._total, self._cap)
-        if stored <= 0:
-            return 0.0, 0.0
-        latest_t = (self.sample_counter - 1) / float(self.sampling_rate)
-        earliest_t = latest_t - ((stored - 1) / float(self.sampling_rate))
-        return float(earliest_t), float(latest_t)
-
-    def _connect_plot_range_signals(self):
-        for key in ('raw', 'psd', 'spike', 'wf'):
-            vb = self._plot_item_for_key(key).vb
-            if hasattr(vb, 'sigRangeChangedManually'):
-                vb.sigRangeChangedManually.connect(lambda *_args, k=key: self._on_manual_plot_range_change(k))
-            else:
-                vb.sigRangeChanged.connect(lambda *_args, k=key: self._on_manual_plot_range_change(k))
-
-    def _install_plot_follow_context_actions(self):
-        for key in ('raw', 'spike', 'wf'):
-            vb = self._plot_item_for_key(key).vb
-            menu = getattr(vb, 'menu', None)
-            if menu is None:
-                continue
-            menu.addSeparator()
-            action = QtWidgets.QAction("Auto-follow", self)
-            action.setCheckable(True)
-            action.setChecked(bool(self._follow_axes.get(key, True)))
-            action.toggled.connect(lambda checked, k=key: self.set_plot_auto_follow(k, checked))
-            menu.addAction(action)
-            self._follow_menu_actions[key] = action
-
-    def _install_plot_bin_window_size_context_actions(self):
-        for key in ('psd', 'spike', 'wf'):
-            vb = self._plot_item_for_key(key).vb
-            menu = getattr(vb, 'menu', None)
-            if menu is None:
-                continue
-            action = QtWidgets.QAction("Configure bin size..." if key == 'spike' else "Configure window size...", self)
-            action.triggered.connect(lambda _, k=key: self._on_bin_window_size_config_requested(k))
-            menu.addAction(action)
-
-    def _on_bin_window_size_config_requested(self, key: str):
-        if key == 'psd':
-            current_sec = self._psd_buffer_sec
-            title = "Configure PSD window size"
-            label = "PSD buffer length (seconds):"
-        elif key == 'spike':
-            current_sec = self._spike_bin_sec
-            title = "Configure spike count bin size"
-            label = "Spike count bin size (seconds):"
-        elif key == 'wf':
-            current_sec = self._waveform_buffer_sec
-            title = "Configure waveform window size"
-            label = "Waveform buffer length (seconds):"
+        if device_type == "smu":
+            tab = SmuDeviceTab(sample_rate=sample_rate, parent=self)
         else:
+            tab = NeuralDeviceTab(sample_rate=sample_rate, num_channels=num_channels, parent=self)
+        self._tabs[name] = tab
+        self.tab_widget.addTab(tab, name)
+        self._update_tab_bar_visibility()
+
+    def remove_device(self, name):
+        tab = self._tabs.pop(name, None)
+        if tab is None:
             return
+        idx = self.tab_widget.indexOf(tab)
+        if idx >= 0:
+            self.tab_widget.removeTab(idx)
+        tab.shutdown()
+        tab.deleteLater()
+        self._update_tab_bar_visibility()
 
-        sec, ok = QtWidgets.QInputDialog.getInt(self, title, label, value=int(current_sec), min=1, max=3600)
-        if not ok:
-            return
-        
-        # Apply the change to the appropriate parameter
-        psd_buffer_sec = sec if key == 'psd' else self._psd_buffer_sec
-        waveform_buffer_sec = sec if key == 'wf' else self._waveform_buffer_sec
-        spike_bin_sec = sec if key == 'spike' else self._spike_bin_sec
-        
-        self.configure_processing_settings(
-            psd_buffer_sec=psd_buffer_sec,
-            waveform_buffer_sec=waveform_buffer_sec,
-            spike_bin_sec=spike_bin_sec,
-        )
+    def _active_tab(self):
+        widget = self.tab_widget.currentWidget()
+        if widget is None and self._tabs:
+            return next(iter(self._tabs.values()))
+        return widget
 
-    def _set_follow_menu_action_state(self, key: str, enabled: bool):
-        action = self._follow_menu_actions.get(key)
-        if action is None:
-            return
-        blocked = action.blockSignals(True)
-        try:
-            action.setChecked(bool(enabled))
-        finally:
-            action.blockSignals(blocked)
+    def on_data(self, device_name, chunk):
+        tab = self._tabs.get(device_name)
+        if tab is not None:
+            tab.on_data(chunk)
 
-    def _on_manual_plot_range_change(self, key: str):
-        if self._suspend_follow_detection:
-            return
-        if self._follow_axes.get(key, True):
-            self._follow_axes[key] = False
-            self._set_follow_menu_action_state(key, False)
-            self.auto_follow_changed_signal.emit(self.is_auto_follow_enabled())
+    # ── Render ─────────────────────────────────────────────────────────────
 
-    def is_auto_follow_enabled(self) -> bool:
-        return all(bool(v) for v in self._follow_axes.values())
+    def _render_all(self):
+        t0 = time.perf_counter()
+        did_work = False
+        for tab in self._tabs.values():
+            if hasattr(tab, 'render'):
+                tab.render()
+                did_work = True
+        now = time.perf_counter()
+        self._render_dur_ms = (now - t0) * 1000.0
+        if did_work:
+            self._fps_frame_count += 1
+            elapsed = now - self._fps_last_t
+            if elapsed >= 1.0:
+                fps = self._fps_frame_count / elapsed
+                self.fps_label.setText(f"FPS: {fps:.1f}\nFrame time: {self._render_dur_ms:.2f} ms")
+                self._fps_frame_count = 0
+                self._fps_last_t = now
 
-    def set_plot_auto_follow(self, key: str, enabled: bool):
-        if key not in self._follow_axes:
-            return
-        enabled = bool(enabled)
-        if self._follow_axes[key] == enabled:
-            self._set_follow_menu_action_state(key, enabled)
-            return
-        self._follow_axes[key] = enabled
-        self._set_follow_menu_action_state(key, enabled)
-        self.auto_follow_changed_signal.emit(self.is_auto_follow_enabled())
-
-    def set_auto_follow(self, enabled: bool):
-        enabled = bool(enabled)
-        for key in self._follow_axes:
-            self._follow_axes[key] = enabled
-            self._set_follow_menu_action_state(key, enabled)
-        self.auto_follow_changed_signal.emit(self.is_auto_follow_enabled())
-
-    def reset_plot_views(self):
-        self._suspend_follow_detection = True
-        try:
-            self.canvas.raw_plot.setXRange(0, DISPLAY_WINDOW_SEC, padding=0)
-            self.canvas.raw_plot.setYRange(-1, 1, padding=0)
-            self.canvas.psd_plot.setYRange(PSD_YLIM_MIN, PSD_YLIM_MAX, padding=0)
-            self.canvas.wf_plot.setYRange(-WAVEFORM_YLIM_ABS_UV, WAVEFORM_YLIM_ABS_UV, padding=0)
-        finally:
-            self._suspend_follow_detection = False
-        self.set_auto_follow(True)
-
-    def changeEvent(self, event):
-        # 13 is the raw integer ID for WindowChangeInternal in PyQt5
-        # WindowStateChange (21) handles maximizing/restoring
-        if event.type() in [13, QtCore.QEvent.WindowStateChange]:
-            if hasattr(self, 'canvas') and self.canvas.glw:
-                # Force the internal GraphicsView to recalculate its scene
-                self.canvas.glw.update()
-                
-                # Re-sync every plot's ViewBox
-                for plot in [self.canvas.raw_plot, self.canvas.psd_plot, 
-                            self.canvas.spike_plot, self.canvas.wf_plot]:
-                    # This 'fake' range set forces the background grid to re-anchor
-                    self._suspend_follow_detection = True
-                    try:
-                        plot.vb.setRange(plot.vb.viewRect(), padding=0)
-                    finally:
-                        self._suspend_follow_detection = False
-                    plot.update()
-                    
-        super().changeEvent(event)
-
-    def configure_processing_settings(self, psd_buffer_sec: int, waveform_buffer_sec: int, spike_bin_sec: int):
-        """Apply runtime processing settings and refresh plot labels."""
-        prev_spike_bin_sec = int(self._spike_bin_sec)
-        self._psd_buffer_sec = int(psd_buffer_sec)
-        self._waveform_buffer_sec = int(waveform_buffer_sec)
-        self._spike_bin_sec = int(spike_bin_sec)
-
-        save_plot_setting("psd_buffer_sec", self._psd_buffer_sec)
-        save_plot_setting("waveform_buffer_sec", self._waveform_buffer_sec)
-        save_plot_setting("spike_bin_sec", self._spike_bin_sec)
-
-        configure_processing_windows(
-            psd_buffer_sec=self._psd_buffer_sec,
-            waveform_buffer_sec=self._waveform_buffer_sec,
-            spike_bin_sec=self._spike_bin_sec,
-        )
-
-        self.canvas.psd_plot.setTitle(f"Power spectrum (last {self._psd_buffer_sec}s)")
-        self.canvas.spike_plot.setTitle(f"Spike counts ({self._spike_bin_sec}s bins)")
-        self.canvas.wf_plot.setTitle(f"Averaged spike waveform (last {self._waveform_buffer_sec}s)")
-
-        if self._spike_bin_sec != prev_spike_bin_sec:
-            self._schedule_spike_rebin_task()
-
-    def _next_task_id(self) -> int:
-        self._task_id_counter += 1
-        return int(self._task_id_counter)
-
-    def _schedule_spike_rebin_task(self):
-        if not hasattr(self, '_exp_worker') or self._exp_worker is None:
-            return
-
-        task_id = self._next_task_id()
-        self._active_expensive_task_id['spike_rebin'] = task_id
-
-        job = {
-            "task_type": "spike_rebin",
-            "task_id": task_id,
-            "session_id": int(self._session_id),
-            "spike_times": list(self._spike_times_cache),
-            "bin_sec": float(self._spike_bin_sec),
-            "last_time_s": float(self.sample_counter) / max(float(self.sampling_rate), 1e-9),
-        }
-        self._exp_worker.schedule(job)
-
-    def _on_expensive_task_result(self, result):
-        task_type = str(result.get("task_type", ""))
-        task_id = int(result.get("task_id", 0))
-        session_id = int(result.get("session_id", -1))
-
-        if session_id != int(self._session_id):
-            return
-
-        active_task_id = int(self._active_expensive_task_id.get(task_type, 0))
-        if task_id != active_task_id:
-            return
-
-        if str(result.get("status", "")) != "ok":
-            print(f"[ExpensiveTask] {task_type} failed: {result.get('error', '')}")
-            return
-
-        if task_type == "spike_rebin":
-            data = result.get("data") or {}
-            minute_idx = np.asarray(data.get("minute_idx", []), dtype=np.float64)
-            counts = np.asarray(data.get("counts", []), dtype=np.int64)
-            if minute_idx.size and counts.size and minute_idx.size == counts.size:
-                if self._proc_result is None:
-                    class _Result:  # lightweight container for first-time availability
-                        pass
-                    self._proc_result = _Result()
-                self._proc_result.spike_minute_idx = minute_idx
-                self._proc_result.spike_counts = counts
-                self._spike_pending = True
-
-    # ── Connection management ──────────────────────────────────────────────────
+    # ── Connection details display ─────────────────────────────────────────
 
     def set_connection_details(self, host, command_port, data_port, sample_rate, project_name):
-        self.clear_project_buffers()
-        self._session_id += 1
-        self.base_connection_details = f"Connected to {host}:{command_port}/{data_port} at {sample_rate} Hz"
-        self.base_project_line = f"Project: {project_name}"
-        self.set_connection_status("Receiving")
-        self.sampling_rate = float(sample_rate)
-        # Re-allocate ring buffer for actual sample rate
-        self._ring  = _make_display_buffer(self.sampling_rate)
-        self._cap   = self._ring.shape[1]
-        self._wpos  = 0
-        self._total = 0
-        self._update_raw_history_stride()
-        self._raw_hist_sample_mod_low = 0
-        self._raw_hist_sample_mod_high = 0
-        self.set_receiving_state(True)
+        tab = self._active_tab()
+        if tab is not None:
+            tab.set_connection_details(
+                host=host, command_port=command_port,
+                data_port=data_port, sample_rate=sample_rate,
+                project_name=project_name,
+            )
 
     def set_connection_status(self, status_text=""):
-        if not self.base_connection_details:
-            self.connection_details_label.clear()
-            return
-        text = self.base_connection_details
-        if status_text:
-            text += f" \u2014 {status_text}"
-        if self.base_project_line:
-            text += f"\n{self.base_project_line}"
-        self.connection_details_label.setText(text)
+        pass  # delegating to tab-based layout; label kept for backward compat
 
-    def set_project_storage_paths(self, run_dir: str, snapshots_dir: str):
-        self.project_run_dir = str(run_dir or "")
-        self.project_snapshots_dir = str(snapshots_dir or "")
-
-    def clear_project_buffers(self):
-        # Clear all curves
-        self.canvas.raw_curve.setData([], [])
-        self.canvas.psd_curve.setData([], [])
-        self.canvas.spike_curve.setData([], [])
-        self.canvas.wf_curve.setData([], [])
-        self.canvas.wf_upper.setData([], [])
-        self.canvas.wf_lower.setData([], [])
-        self._clear_marker_lines()
-        self._clear_spike_marker_lines()
-        self.clear_snapshots()
-
-        # Reset ring buffer
-        self._ring[:] = 0
-        self._wpos    = 0
-        self._total   = 0
-        self.sample_counter = 0
-
-        # Reset all state
-        self.marker_records          = []
-        self._marker_times_sorted    = []
-        self._spike_times_cache      = []
-        self._last_spike_scan_sample = 0
-        self._last_proc_abs_start    = 0
-        self._proc_result            = None
-        self._latest_psd_f           = None
-        self._latest_psd_db          = None
-        self._latest_wf_t_ms         = None
-        self._latest_wf_mu           = None
-        self._raw_hist_t_low         = []
-        self._raw_hist_y_low         = []
-        self._raw_hist_t_high        = []
-        self._raw_hist_y_high        = []
-        self._raw_hist_sample_mod_low = 0
-        self._raw_hist_sample_mod_high = 0
-        self._psd_pending            = False
-        self._spike_pending          = False
-        self._active_expensive_task_id = {}
-        self._last_raw_render_t      = 0.0
-        self._last_psd_render_t      = 0.0
-        self._last_spike_render_t    = 0.0
-        self.psd_update_counter      = 0
-        self.spike_plot_frame_counter = 0
-        self.set_auto_follow(True)
-
-        # Reset axes
-        self._suspend_follow_detection = True
-        try:
-            self.canvas.raw_plot.setXRange(0, DISPLAY_WINDOW_SEC, padding=0)
-            self.canvas.raw_plot.setYRange(-1, 1, padding=0)
-            self.canvas.psd_plot.setYRange(PSD_YLIM_MIN, PSD_YLIM_MAX, padding=0)
-            self.canvas.wf_plot.setYRange(-WAVEFORM_YLIM_ABS_UV, WAVEFORM_YLIM_ABS_UV, padding=0)
-        finally:
-            self._suspend_follow_detection = False
-
-        self.base_connection_details = ""
-        self.base_project_line = ""
-        self.project_run_dir = ""
-        self.project_snapshots_dir = ""
-        self.connection_details_label.clear()
-        self.set_receiving_state(False)
-        self._receiving_wall_active_sec = 0.0
-        self._receiving_wall_run_start = None
-        self._fps_frame_count = 0
-        self._fps_last_t      = time.perf_counter()
-        self._render_dur_ms   = 0.0
-        self.fps_label.setText("FPS: 0.0\nFrame time: 0.0 ms")
+    def set_project_storage_paths(self, run_dir, snapshots_dir):
+        pass
 
     def set_receiving_state(self, receiving: bool):
-        receiving = bool(receiving)
-        if receiving == self.is_receiving:
-            return
+        tab = self._active_tab()
+        if tab is not None:
+            tab.set_receiving_state(receiving)
 
-        now = time.perf_counter()
-        if receiving:
-            if self._receiving_wall_run_start is None:
-                self._receiving_wall_run_start = now
-        else:
-            if self._receiving_wall_run_start is not None:
-                self._receiving_wall_active_sec += max(0.0, now - float(self._receiving_wall_run_start))
-                self._receiving_wall_run_start = None
-
-        self.is_receiving = receiving
-
-    def shutdown_workers(self) -> bool:
-        ok_proc = True
-        ok_exp = True
-        if hasattr(self, '_proc_worker') and self._proc_worker is not None:
-            ok_proc = self._proc_worker.stop(timeout_ms=4000)
-        if hasattr(self, '_exp_worker') and self._exp_worker is not None:
-            ok_exp = self._exp_worker.stop(timeout_ms=4000)
-        return bool(ok_proc and ok_exp)
-
-    def _save_plot_snapshot_png(self, plot_item, prefix: str) -> bool:
-        if not self.project_snapshots_dir:
-            return False
-        try:
-            out_dir = Path(self.project_snapshots_dir)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            out_path = out_dir / f"{prefix}_{stamp}.png"
-
-            try:
-                exporter = ImageExporter(plot_item)
-                exporter.parameters()['width'] = 1920
-                exporter.export(str(out_path))
-            except Exception:
-                # Fallback: grab full widget if plot exporter fails.
-                pix = self.canvas.glw.grab()
-                if pix.isNull() or not pix.save(str(out_path), "PNG"):
-                    return False
-
-            return out_path.exists() and out_path.stat().st_size > 0
-        except Exception:
-            return False
-
-    def take_psd_snapshot(self) -> bool:
-        """Capture current PSD curve and underlay it on the PSD plot."""
-        if self._latest_psd_f is None or self._latest_psd_db is None:
-            return False
-        if self._latest_psd_f.size < 1 or self._latest_psd_db.size < 1:
-            return False
-
-        # Keep only the newest snapshot.
-        for old_curve in self._psd_snapshot_curves:
-            self.canvas.psd_plot.removeItem(old_curve)
-        self._psd_snapshot_curves.clear()
-
-        curve = self.canvas.psd_plot.plot(
-            self._latest_psd_f.copy(),
-            self._latest_psd_db.copy(),
-            pen=pg.mkPen(80, 80, 80, 130, width=1),
-        )
-        curve.setZValue(-10)
-        self._psd_snapshot_curves.append(curve)
-
-        # Saving to disk is best-effort; snapshot availability should depend on data.
-        self._save_plot_snapshot_png(self.canvas.psd_plot, "psd_snapshot")
-        return True
-
-    def take_waveform_snapshot(self) -> bool:
-        """Capture current average waveform and underlay it on the waveform plot."""
-        if self._latest_wf_t_ms is None or self._latest_wf_mu is None:
-            return False
-        if self._latest_wf_t_ms.size < 1 or self._latest_wf_mu.size < 1:
-            return False
-
-        # Keep only the newest snapshot.
-        for old_curve in self._wf_snapshot_curves:
-            self.canvas.wf_plot.removeItem(old_curve)
-        self._wf_snapshot_curves.clear()
-
-        curve = self.canvas.wf_plot.plot(
-            self._latest_wf_t_ms.copy(),
-            self._latest_wf_mu.copy(),
-            pen=pg.mkPen(80, 80, 80, 130, width=1),
-        )
-        curve.setZValue(-10)
-        self._wf_snapshot_curves.append(curve)
-
-        # Saving to disk is best-effort; snapshot availability should depend on data.
-        self._save_plot_snapshot_png(self.canvas.wf_plot, "waveform_snapshot")
-        return True
-
-    def clear_snapshots(self):
-        """Remove all snapshot overlays from PSD and waveform plots."""
-        for curve in self._psd_snapshot_curves:
-            self.canvas.psd_plot.removeItem(curve)
-        self._psd_snapshot_curves.clear()
-
-        for curve in self._wf_snapshot_curves:
-            self.canvas.wf_plot.removeItem(curve)
-        self._wf_snapshot_curves.clear()
+    # ── Markers ────────────────────────────────────────────────────────────
 
     def add_marker(self, marker):
-        if isinstance(marker, dict):
-            ts = float(marker.get("timestamp_s", marker.get("timestamp", 0.0)))
-            marker_id = int(marker.get("id", len(self.marker_records) + 1))
-            name = str(marker.get("name", f"Marker {marker_id}"))
-            self.marker_records.append(
-                {
-                    "id": marker_id,
-                    "timestamp_s": ts,
-                    "name": name,
-                }
-            )
-        else:
-            ts = float(marker)
-            marker_id = len(self.marker_records) + 1
-            self.marker_records.append(
-                {
-                    "id": marker_id,
-                    "timestamp_s": ts,
-                    "name": f"Marker {marker_id}",
-                }
-            )
-        self._marker_times_sorted = sorted(float(m.get("timestamp_s", 0.0)) for m in self.marker_records)
+        tab = self._active_tab()
+        if tab is not None and hasattr(tab, 'add_marker'):
+            tab.add_marker(marker)
 
     def set_marker_catalog(self, markers):
-        safe = []
-        for item in markers or []:
-            try:
-                safe.append(
-                    {
-                        "id": int(item.get("id", 0)),
-                        "timestamp_s": float(item.get("timestamp_s", 0.0)),
-                        "name": str(item.get("name", "")),
-                    }
-                )
-            except Exception:
-                continue
-        self.marker_records = sorted(safe, key=lambda m: float(m.get("timestamp_s", 0.0)))
-        self._marker_times_sorted = [float(m.get("timestamp_s", 0.0)) for m in self.marker_records]
+        tab = self._active_tab()
+        if tab is not None and hasattr(tab, 'set_marker_catalog'):
+            tab.set_marker_catalog(markers)
 
     def get_markers(self):
-        return [dict(m) for m in self.marker_records]
+        tab = self._active_tab()
+        if tab is not None and hasattr(tab, 'get_markers'):
+            return tab.get_markers()
+        return []
 
-    def _active_marker_times(self):
-        return list(self._marker_times_sorted)
+    # ── Processing settings ────────────────────────────────────────────────
 
-    def _sorted_markers(self):
-        return sorted(self.marker_records, key=lambda m: float(m.get("timestamp_s", 0.0)))
-
-    # ── Ring buffer ────────────────────────────────────────────────────────────
-
-    def _ring_write(self, t_chunk: np.ndarray, signal: np.ndarray):
-        n   = signal.size
-        cap = self._cap
-        if n >= cap:
-            # Chunk larger than entire buffer: keep the newest cap samples
-            self._ring[0, :] = t_chunk[-cap:]
-            self._ring[1, :] = signal[-cap:]
-            self._wpos   = 0
-            self._total += n
-            return
-        end = self._wpos + n
-        if end <= cap:
-            self._ring[0, self._wpos:end] = t_chunk
-            self._ring[1, self._wpos:end] = signal
-        else:
-            first = cap - self._wpos
-            self._ring[0, self._wpos:] = t_chunk[:first]
-            self._ring[1, self._wpos:] = signal[:first]
-            self._ring[0, :end - cap]  = t_chunk[first:]
-            self._ring[1, :end - cap]  = signal[first:]
-        self._wpos   = end % cap
-        self._total += n
-
-    def _ring_read(self) -> tuple:
-        """Return (t, y) arrays in chronological order (full 5-min window)."""
-        n = min(self._total, self._cap)
-        if self._total <= self._cap:
-            return self._ring[0, :n], self._ring[1, :n]
-        s = self._wpos
-        t = np.concatenate([self._ring[0, s:], self._ring[0, :s]])
-        y = np.concatenate([self._ring[1, s:], self._ring[1, :s]])
-        return t, y
-
-    def _ring_read_tail(self, n: int) -> tuple:
-        """Return the last n samples in chronological order without a full buffer copy."""
-        stored = min(self._total, self._cap)
-        n = min(n, stored)
-        if n == 0:
-            return self._ring[0, :0], self._ring[1, :0]
-        end = self._wpos  # one past the newest sample
-        start = end - n
-        if start >= 0:
-            # Contiguous slice
-            return self._ring[0, start:end], self._ring[1, start:end]
-        # Wraps around: two pieces
-        t = np.concatenate([self._ring[0, start:], self._ring[0, :end]])
-        y = np.concatenate([self._ring[1, start:], self._ring[1, :end]])
-        return t, y
-
-    # ── Data ingestion ─────────────────────────────────────────────────────────
-
-    def _on_data_received(self, chunk: np.ndarray):
-        ingest_t0 = time.perf_counter()
-        if chunk is None:
-            return
-        arr = np.asarray(chunk)
-        if arr.ndim != 2 or arr.size == 0:
-            return
-        if arr.shape[0] != 1:
-            print(f"[Plot Warning] Expected (1, N) chunk, got {arr.shape}")
-            return
-        n_samples = arr.shape[1]
-        if n_samples < 1:
-            return
-
-        signal  = arr[0, :]
-        t_chunk = (self.sample_counter + np.arange(n_samples, dtype=np.float64)) / self.sampling_rate
-        self._ring_write(t_chunk, signal)
-        self._append_raw_history(t_chunk, signal)
-        self.sample_counter += n_samples
-        self._telemetry_chunks += 1
-        self._telemetry_samples += int(n_samples)
-        self._telemetry_latest_chunk_received_t = time.perf_counter()
-
-        # Throttle compute
-        self.psd_update_counter       += 1
-        self.spike_plot_frame_counter += 1
-        do_psd   = (self.psd_update_counter       % max(1, PSD_PLOT_UPDATE_EVERY_N)   == 0)
-        do_spike = (self.spike_plot_frame_counter % max(1, SPIKE_PLOT_UPDATE_EVERY_N) == 0)
-
-        if self._proc_result is None:
-            do_psd = do_spike = True
-
-        gap = self._total - self._last_spike_scan_sample
-        should_run_spike = do_spike and (gap >= SPIKE_INCREMENTAL_MIN_SAMPLES)
-        should_run_psd   = do_psd
-
-        if should_run_psd or should_run_spike:
-            if should_run_spike:
-                stored = min(self._total, self._cap)
-                psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec))) if should_run_psd else 0
-                wf_n = max(8, int(round(self.sampling_rate * max(1, self._waveform_buffer_sec + 1))))
-                spike_n = int(max(SPIKE_INCREMENTAL_MIN_SAMPLES, gap) + SPIKE_OVERLAP_SAMPLES)
-                tail_n = min(stored, max(psd_n, wf_n, spike_n))
-
-                t_tail, sig_tail = self._ring_read_tail(tail_n)
-                abs_start = self._total - t_tail.size
-                rel_last = max(0, int(self._last_spike_scan_sample - abs_start))
-                rel_last = min(rel_last, t_tail.size)
-                self._last_proc_abs_start = abs_start
-
-                self._proc_worker.schedule(
-                    sig_tail.copy(), t_tail.copy(), self.sampling_rate,
-                    list(self._spike_times_cache),
-                    rel_last, t_tail.size,
-                    do_psd=should_run_psd, do_spike=True,
+    def configure_processing_settings(self, psd_buffer_sec, waveform_buffer_sec, spike_bin_sec):
+        for tab in self._tabs.values():
+            if hasattr(tab, 'configure_processing_settings'):
+                tab.configure_processing_settings(
+                    psd_buffer_sec=psd_buffer_sec,
+                    waveform_buffer_sec=waveform_buffer_sec,
+                    spike_bin_sec=spike_bin_sec,
                 )
-            else:
-                psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec)))
-                t_tail, sig_tail = self._ring_read_tail(psd_n)
-                self._last_proc_abs_start = self._total - t_tail.size
-                self._proc_worker.schedule(
-                    sig_tail.copy(), t_tail.copy(),
-                    self.sampling_rate,
-                    [], 0, sig_tail.size,
-                    do_psd=True, do_spike=False,
-                )
-        self._telemetry_ingest_ms_total += (time.perf_counter() - ingest_t0) * 1000.0
-        self._emit_telemetry_if_due()
 
-    def _on_processing_result(self, result):
-        self._proc_result = result
-        if result.spike_times_cache is not None:
-            self._spike_times_cache = result.spike_times_cache
-        if result.last_scan_sample is not None:
-            # Convert relative scan index back to absolute using the scheduled tail window.
-            self._last_spike_scan_sample = self._last_proc_abs_start + int(result.last_scan_sample)
-        if getattr(result, 'has_psd_update', False) and result.psd_f is not None:
-            self._psd_pending = True
-        if getattr(result, 'has_spike_update', False) and result.spike_minute_idx is not None:
-            self._spike_pending = True
+    # ── Session state ──────────────────────────────────────────────────────
 
-    # ── Render ─────────────────────────────────────────────────────────────────
+    def clear_project_buffers(self):
+        for tab in self._tabs.values():
+            if hasattr(tab, 'clear'):
+                tab.clear()
 
-    def _render_plot(self):
-        if self._total == 0:
-            return
+    def shutdown_workers(self) -> bool:
+        ok = True
+        for tab in self._tabs.values():
+            if hasattr(tab, 'shutdown'):
+                if not tab.shutdown():
+                    ok = False
+        return ok
 
-        t0 = time.perf_counter()
-        now = t0
-        did_work = False
+    # ── Snapshots ──────────────────────────────────────────────────────────
 
-        # ── Raw signal @ RAW_RENDER_HZ ─────────────────────────────────────────
-        if (now - self._last_raw_render_t) >= 1.0 / RAW_RENDER_HZ:
-            did_work = True
-            self._telemetry_raw_renders += 1
-            x_start = 0.0
-            x_end = 0.0
-            if self._follow_axes['raw']:
-                n_vis = int(self.sampling_rate * DISPLAY_WINDOW_SEC)
-                x_vis, y_vis = self._ring_read_tail(n_vis)
+    def take_psd_snapshot(self) -> bool:
+        tab = self._active_tab()
+        if tab is not None and hasattr(tab, 'take_psd_snapshot'):
+            return tab.take_psd_snapshot()
+        return False
 
-                xd, yd = _minmax_downsample(x_vis, y_vis, MAX_DISPLAY_POINTS)
-                self.canvas.raw_curve.setData(xd, yd)
+    def take_waveform_snapshot(self) -> bool:
+        tab = self._active_tab()
+        if tab is not None and hasattr(tab, 'take_waveform_snapshot'):
+            return tab.take_waveform_snapshot()
+        return False
 
-                x_end = float(x_vis[-1]) if x_vis.size else 0.0
-                x_start = max(0.0, x_end - DISPLAY_WINDOW_SEC)
-                x_min_lim, _x_max_data = self._raw_time_bounds()
-                self.canvas.raw_plot.setLimits(xMin=max(0.0, x_min_lim), xMax=max(0.0, x_end + 0.1))
+    def clear_snapshots(self):
+        for tab in self._tabs.values():
+            if hasattr(tab, 'clear_snapshots'):
+                tab.clear_snapshots()
 
-                self._suspend_follow_detection = True
-                try:
-                    self.canvas.raw_plot.setXRange(x_start, x_end, padding=0)
-                finally:
-                    self._suspend_follow_detection = False
+    # ── Auto-follow ────────────────────────────────────────────────────────
 
-                peak  = float(np.max(np.abs(y_vis))) if y_vis.size else 0.0
-                y_lim = max(0.2, peak * 1.2)
-                self._suspend_follow_detection = True
-                try:
-                    self.canvas.raw_plot.setYRange(-y_lim, y_lim, padding=0)
-                finally:
-                    self._suspend_follow_detection = False
-            else:
-                history_end = 0.0
-                history_start = 0.0
-                if self._raw_hist_t_low:
-                    history_start = float(self._raw_hist_t_low[0])
-                    history_end = float(self._raw_hist_t_low[-1])
-                    self.canvas.raw_plot.setLimits(xMin=max(0.0, history_start), xMax=max(0.0, history_end + 0.1))
+    def is_auto_follow_enabled(self) -> bool:
+        tab = self._active_tab()
+        if tab is not None and hasattr(tab, 'is_auto_follow_enabled'):
+            return tab.is_auto_follow_enabled()
+        return True
 
-                vr = self.canvas.raw_plot.vb.viewRange()[0]
-                if len(vr) >= 2:
-                    x_start = float(vr[0])
-                    x_end = float(vr[1])
-                elif history_end > 0.0:
-                    x_end = history_end
-                    x_start = max(0.0, x_end - DISPLAY_WINDOW_SEC)
+    def set_auto_follow(self, enabled: bool):
+        for tab in self._tabs.values():
+            if hasattr(tab, 'set_auto_follow'):
+                tab.set_auto_follow(enabled)
 
-                span = max(0.0, x_end - x_start)
-                t_src = None
-                y_src = None
+    def reset_plot_views(self):
+        pass
 
-                # For recent/small windows, render from full-resolution ring data
-                # so zooming back in restores fine waveform detail.
-                stored = min(self._total, self._cap)
-                if stored > 1 and span <= RAW_FULL_RES_MAX_SPAN_SEC:
-                    earliest_t, latest_t = self._raw_time_bounds()
-                    left_q = max(earliest_t, x_start - RAW_MANUAL_VIEW_MARGIN_SEC)
-                    right_q = min(latest_t, x_end + RAW_MANUAL_VIEW_MARGIN_SEC)
-                    if right_q > left_q:
-                        t_lin, y_lin = self._ring_read()
-                        if t_lin.size:
-                            i0 = int(np.searchsorted(t_lin, left_q, side='left'))
-                            i1 = int(np.searchsorted(t_lin, right_q, side='right'))
-                            if i1 <= i0:
-                                i0 = max(0, min(i0, t_lin.size - 1))
-                                i1 = min(t_lin.size, i0 + 1)
-                            t_src = t_lin[i0:i1]
-                            y_src = y_lin[i0:i1]
+    # ── Legacy compat (single-device data routing) ────────────────────────
 
-                # Otherwise use adaptive decimated full-session history.
-                if t_src is None or y_src is None:
-                    use_high = span <= RAW_ADAPTIVE_HIGH_RES_MAX_SPAN_SEC and bool(self._raw_hist_t_high)
-                    if use_high:
-                        t_store = self._raw_hist_t_high
-                        y_store = self._raw_hist_y_high
-                    else:
-                        t_store = self._raw_hist_t_low
-                        y_store = self._raw_hist_y_low
+    def _on_data_received(self, chunk):
+        if self._tabs:
+            name = next(iter(self._tabs))
+            self._tabs[name].on_data(chunk)
 
-                    if t_store:
-                        left_q = max(0.0, x_start - RAW_MANUAL_VIEW_MARGIN_SEC)
-                        right_q = max(left_q, x_end + RAW_MANUAL_VIEW_MARGIN_SEC)
-                        i0 = bisect.bisect_left(t_store, left_q)
-                        i1 = bisect.bisect_right(t_store, right_q)
-                        if i1 <= i0:
-                            i0 = max(0, min(i0, len(t_store) - 1))
-                            i1 = min(len(t_store), i0 + 1)
-                        t_src = np.asarray(t_store[i0:i1], dtype=np.float64)
-                        y_src = np.asarray(y_store[i0:i1], dtype=np.float64)
-
-                if t_src is not None and y_src is not None and np.asarray(t_src).size:
-                    x_seg = np.asarray(t_src, dtype=np.float64)
-                    y_seg = np.asarray(y_src, dtype=np.float64)
-                    xd, yd = _minmax_downsample(x_seg, y_seg, MAX_RAW_HISTORY_PLOT_POINTS)
-                    self.canvas.raw_curve.setData(xd, yd)
-
-            self._sync_marker_lines(max(0.0, min(x_start, x_end)), max(0.0, max(x_start, x_end)))
-            self._last_raw_render_t = now
-
-        r = self._proc_result
-
-        # ── PSD @ PSD_RENDER_HZ ────────────────────────────────────────────────
-        if r is not None and self._psd_pending and (now - self._last_psd_render_t) >= 1.0 / PSD_RENDER_HZ:
-            did_work = True
-            if r.psd_f is not None and r.psd_db is not None:
-                self.canvas.psd_curve.setData(r.psd_f, r.psd_db)
-                self._latest_psd_f = np.asarray(r.psd_f).copy()
-                self._latest_psd_db = np.asarray(r.psd_db).copy()
-                if self._follow_axes['psd']:
-                    self._suspend_follow_detection = True
-                    try:
-                        if r.psd_f.size:
-                            self.canvas.psd_plot.setXRange(float(r.psd_f[0]), float(r.psd_f[-1]), padding=0)
-                        self.canvas.psd_plot.setYRange(PSD_YLIM_MIN, PSD_YLIM_MAX, padding=0)
-                    finally:
-                        self._suspend_follow_detection = False
-            self._psd_pending       = False
-            self._last_psd_render_t = now
-
-        # ── Spike histogram + waveform @ SPIKE_RENDER_HZ ──────────────────────
-        if r is not None and self._spike_pending and (now - self._last_spike_render_t) >= 1.0 / SPIKE_RENDER_HZ:
-            did_work = True
-            if r.spike_minute_idx is not None and r.spike_counts is not None:
-                self.canvas.spike_curve.setData(r.spike_minute_idx, r.spike_counts)
-                max_count = max(1, int(np.max(r.spike_counts)) if r.spike_counts.size else 1)
-                right_min = 0.0
-                if r.spike_minute_idx.size:
-                    right_min = float(r.spike_minute_idx[-1]) + float(self._spike_bin_sec) / 60.0
-                # Keep x-limits synced with available history so manual panning can
-                # browse the full session while preventing negative time.
-                self.canvas.spike_plot.setLimits(xMin=0.0, xMax=max(0.0, right_min + 0.1))
-                if self._follow_axes['spike']:
-                    self._suspend_follow_detection = True
-                    try:
-                        self.canvas.spike_plot.setYRange(0, max_count * 1.2, padding=0)
-                        if right_min > 0.0:
-                            left_min = max(0.0, right_min - SPIKE_SCROLL_WINDOW_MIN)
-                            self.canvas.spike_plot.setXRange(left_min, right_min, padding=0)
-                    finally:
-                        self._suspend_follow_detection = False
-
-            if r.wf_t_ms is not None and r.wf_mu is not None and r.wf_sem is not None:
-                self.canvas.wf_curve.setData(r.wf_t_ms, r.wf_mu)
-                self.canvas.wf_upper.setData(r.wf_t_ms, r.wf_mu + r.wf_sem)
-                self.canvas.wf_lower.setData(r.wf_t_ms, r.wf_mu - r.wf_sem)
-                self._latest_wf_t_ms = np.asarray(r.wf_t_ms).copy()
-                self._latest_wf_mu = np.asarray(r.wf_mu).copy()
-                if self._follow_axes['wf']:
-                    self._suspend_follow_detection = True
-                    try:
-                        self.canvas.wf_plot.setXRange(float(r.wf_t_ms[0]), float(r.wf_t_ms[-1]), padding=0)
-                        self.canvas.wf_plot.setYRange(-WAVEFORM_YLIM_ABS_UV, WAVEFORM_YLIM_ABS_UV, padding=0)
-                    finally:
-                        self._suspend_follow_detection = False
-            else:
-                self.canvas.wf_curve.setData([], [])
-                self.canvas.wf_upper.setData([], [])
-                self.canvas.wf_lower.setData([], [])
-                self._latest_wf_t_ms = None
-                self._latest_wf_mu = None
-
-            self._spike_pending       = False
-            self._last_spike_render_t = now
-
-        spike_vr = self.canvas.spike_plot.vb.viewRange()[0]
-        if len(spike_vr) >= 2:
-            self._sync_spike_marker_lines(float(spike_vr[0]), float(spike_vr[1]))
-
-        self._render_dur_ms = (time.perf_counter() - t0) * 1000.0
-        if did_work:
-            self._telemetry_render_calls += 1
-            self._telemetry_render_ms_total += self._render_dur_ms
-        self._emit_telemetry_if_due()
-        self._update_fps_label()
-
-    # ── Marker helpers ─────────────────────────────────────────────────────────
-
-    def _sync_marker_lines(self, x_start: float, x_end: float):
-        """Show InfiniteLines only for markers visible in [x_start, x_end]."""
-        markers = self._sorted_markers()
-        marker_times = [float(m.get("timestamp_s", 0.0)) for m in markers]
-        left_i  = bisect.bisect_left(marker_times, x_start)
-        right_i = bisect.bisect_right(marker_times, x_end)
-        visible = markers[left_i:right_i]
-        visible_key = [(int(m.get("id", 0)), float(m.get("timestamp_s", 0.0)), str(m.get("name", ""))) for m in visible]
-
-        if visible_key == self.canvas._last_marker_set:
-            return  # nothing changed
-
-        self._clear_marker_lines()
-        y_top = float(self.canvas.raw_plot.vb.viewRange()[1][1]) if self.canvas.raw_plot.vb.viewRange() else 1.0
-        for m in visible:
-            t = float(m.get("timestamp_s", 0.0))
-            name = str(m.get("name", ""))
-            line = pg.InfiniteLine(pos=t, angle=90, pen=self.canvas._marker_pen)
-            self.canvas.raw_plot.addItem(line)
-            self.canvas._marker_lines.append(line)
-            if name:
-                label = pg.TextItem(text=name, color=(220, 20, 60), anchor=(0, 0))
-                label.setPos(t, y_top)
-                self.canvas.raw_plot.addItem(label)
-                self.canvas._marker_labels.append(label)
-        self.canvas._last_marker_set = list(visible_key)
-
-    def _sync_spike_marker_lines(self, x_start_min: float, x_end_min: float):
-        markers = self._sorted_markers()
-        marker_times_min = [float(m.get("timestamp_s", 0.0)) / 60.0 for m in markers]
-        left_i = bisect.bisect_left(marker_times_min, x_start_min)
-        right_i = bisect.bisect_right(marker_times_min, x_end_min)
-        visible = markers[left_i:right_i]
-        visible_key = [(int(m.get("id", 0)), float(m.get("timestamp_s", 0.0)), str(m.get("name", ""))) for m in visible]
-
-        if visible_key == self.canvas._last_spike_marker_set:
-            return
-
-        self._clear_spike_marker_lines()
-        y_top = float(self.canvas.spike_plot.vb.viewRange()[1][1]) if self.canvas.spike_plot.vb.viewRange() else 1.0
-        for m in visible:
-            t_min = float(m.get("timestamp_s", 0.0)) / 60.0
-            name = str(m.get("name", ""))
-            line = pg.InfiniteLine(pos=t_min, angle=90, pen=self.canvas._marker_pen)
-            self.canvas.spike_plot.addItem(line)
-            self.canvas._spike_marker_lines.append(line)
-            if name:
-                label = pg.TextItem(text=name, color=(220, 20, 60), anchor=(0, 0))
-                label.setPos(t_min, y_top)
-                self.canvas.spike_plot.addItem(label)
-                self.canvas._spike_marker_labels.append(label)
-        self.canvas._last_spike_marker_set = list(visible_key)
-
-    def _clear_marker_lines(self):
-        for line in self.canvas._marker_lines:
-            self.canvas.raw_plot.removeItem(line)
-        self.canvas._marker_lines.clear()
-        for label in self.canvas._marker_labels:
-            self.canvas.raw_plot.removeItem(label)
-        self.canvas._marker_labels.clear()
-        self.canvas._last_marker_set = []
-
-    def _clear_spike_marker_lines(self):
-        for line in self.canvas._spike_marker_lines:
-            self.canvas.spike_plot.removeItem(line)
-        self.canvas._spike_marker_lines.clear()
-        for label in self.canvas._spike_marker_labels:
-            self.canvas.spike_plot.removeItem(label)
-        self.canvas._spike_marker_labels.clear()
-        self.canvas._last_spike_marker_set = []
-
-    # ── FPS ────────────────────────────────────────────────────────────────────
-
-    def _update_fps_label(self):
-        self._fps_frame_count += 1
-        now = time.perf_counter()
-        elapsed = now - self._fps_last_t
-        if elapsed >= 1.0:
-            fps = self._fps_frame_count / elapsed
-            self.fps_label.setText(f"FPS: {fps:.1f}\nFrame time: {self._render_dur_ms:.1f}ms")
-            self._fps_frame_count = 0
-            self._fps_last_t      = now
+    def changeEvent(self, event):
+        if event.type() in (13, QtCore.QEvent.WindowStateChange):
+            self.tab_widget.update()
+        super().changeEvent(event)

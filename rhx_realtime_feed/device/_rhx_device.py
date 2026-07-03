@@ -55,17 +55,10 @@ class IntanRHXDevice(Device, RHXConfig):
         self.read_size = self.bytes_per_block * 1
         self._synced = False
 
-        self.connect()
-
-        if self._connected:
-            RHXConfig.__init__(self, self.command_socket, verbose=verbose)
-            self._sample_rate = self.get_sample_rate()
-            self._sample_counter = 0
-            self.effective_fs = float(self._sample_rate)
-            self.init_circular_buffer()
-
         if auto_start:
-            self.start_streaming()
+            self.connect()
+            if self._connected:
+                self.start_streaming()
 
     # ── Device ABC property conformance ──
 
@@ -86,7 +79,7 @@ class IntanRHXDevice(Device, RHXConfig):
         self._sample_rate = float(value) if value is not None else None
 
     def connect(self):
-        """Establish TCP connections to the RHX command and data ports."""
+        """Establish TCP connections to the RHX command and data ports and read device config."""
         try:
             self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.command_socket.connect((self.host, self.command_port))
@@ -104,6 +97,12 @@ class IntanRHXDevice(Device, RHXConfig):
             self._connected = True
             self.connection_lost = False
             self.reconnect_attempts = 0
+
+            RHXConfig.__init__(self, self.command_socket, verbose=self.verbose)
+            self._sample_rate = self.get_sample_rate()
+            self._sample_counter = 0
+            self.effective_fs = float(self._sample_rate)
+            self.init_circular_buffer()
 
         except Exception as e:
             print("Failed to initialize connection with 'Remote TCP Control'")
