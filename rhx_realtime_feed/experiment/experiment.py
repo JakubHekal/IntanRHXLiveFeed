@@ -27,6 +27,7 @@ class SequenceStep:
     step_id: int = 1
     action: str = ""
     parameters: dict = field(default_factory=dict)
+    device_name: str = ""
 
 
 @dataclass
@@ -44,6 +45,7 @@ class ExperimentConfig:
     execution_control: ExecutionControl = field(default_factory=ExecutionControl)
     sequence: list[SequenceStep] = field(default_factory=list)
     post_processing: list[PostProcessingScript] = field(default_factory=list)
+    devices: list[dict] = field(default_factory=list)
 
 
 def _default_config(name: str, author: str = "", description: str = "") -> dict:
@@ -58,10 +60,11 @@ def _default_config(name: str, author: str = "", description: str = "") -> dict:
         },
         "execution_control": {
             "is_locked": False,
-            "required_devices": ["Intan RHX"],
+            "required_devices": ["rhx"],
         },
         "sequence": [],
         "post_processing": [],
+        "devices": [],
     }
 
 
@@ -88,6 +91,7 @@ def _config_to_dataclass(data: dict) -> ExperimentConfig:
                 step_id=s.get("step_id", i + 1),
                 action=s.get("action", ""),
                 parameters=s.get("parameters", {}),
+                device_name=s.get("device_name", ""),
             )
             for i, s in enumerate(seq)
         ],
@@ -101,6 +105,7 @@ def _config_to_dataclass(data: dict) -> ExperimentConfig:
             )
             for i, p in enumerate(pp)
         ],
+        devices=data.get("devices", []),
     )
 
 
@@ -123,6 +128,7 @@ def _config_to_dict(config: ExperimentConfig) -> dict:
                 "step_id": s.step_id,
                 "action": s.action,
                 "parameters": dict(s.parameters),
+                "device_name": s.device_name,
             }
             for s in config.sequence
         ],
@@ -136,6 +142,7 @@ def _config_to_dict(config: ExperimentConfig) -> dict:
             }
             for p in config.post_processing
         ],
+        "devices": list(config.devices),
     }
 
 
@@ -187,3 +194,22 @@ class ExperimentManager:
         path = Path(experiment_path)
         if path.exists() and path.is_dir():
             shutil.rmtree(path)
+
+    @staticmethod
+    def start_run(experiment_path: str | Path, run_name: str) -> Path:
+        exp_path = Path(experiment_path)
+        runs_dir = exp_path / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        run_path = runs_dir / run_name
+        run_path.mkdir(parents=True, exist_ok=True)
+        src = exp_path / "config.json"
+        if src.exists():
+            shutil.copy2(src, run_path / "config.json")
+        return run_path
+
+    @staticmethod
+    def list_runs(experiment_path: str | Path) -> list[Path]:
+        runs_dir = Path(experiment_path) / "runs"
+        if not runs_dir.exists():
+            return []
+        return sorted(p for p in runs_dir.iterdir() if p.is_dir())
