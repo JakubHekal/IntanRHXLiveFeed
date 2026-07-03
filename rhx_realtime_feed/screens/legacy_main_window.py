@@ -151,9 +151,12 @@ class LegacyMainWindow(QtWidgets.QMainWindow):
         self.check_update_action.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_BrowserReload))
         self.check_update_action.triggered.connect(self._check_for_updates_manual)
 
-        self.toolbar.addWidget(self.plot_screen.connection_details_label)
+        self._connection_label = QtWidgets.QLabel()
+        self._fps_label = QtWidgets.QLabel("FPS: 0.0")
+        self.toolbar.addWidget(self._connection_label)
         self.toolbar.addSeparator()
-        self.toolbar.addWidget(self.plot_screen.fps_label)
+        self.toolbar.addWidget(self._fps_label)
+        self.plot_screen.fps_updated.connect(self._fps_label.setText)
 
         # Connect state machine signals
         self.state_manager.get_state_changed_signal().connect(self._on_state_changed)
@@ -385,11 +388,12 @@ class LegacyMainWindow(QtWidgets.QMainWindow):
         if not device.connect():
             self.connect_dialog.set_busy(False)
             self.state_manager.connection_failed()
+            err = getattr(device, "_last_connect_error", "Unknown error")
             QtWidgets.QMessageBox.critical(
                 self,
                 "Connection Failed",
-                "Could not connect to Intan RHX at "
-                f"{host}:{command_port}/{data_port}.",
+                f"Could not connect to Intan RHX at "
+                f"{host}:{command_port}/{data_port}.\n\n{err}",
             )
             return
         device.configure(enable_wide_channel=[channel], port=port, blocks_per_write=1)

@@ -6,8 +6,8 @@ _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from PyQt5.QtCore import pyqtSignal, QModelIndex, QPropertyAnimation, QRect, QSize, Qt, QEasingCurve
-from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QStandardItem, QStandardItemModel
+from PyQt5.QtCore import pyqtSignal, QPropertyAnimation, QRect, QSize, Qt, QEasingCurve
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -22,6 +22,8 @@ from PyQt5.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -39,7 +41,6 @@ from PyQt5.QtWidgets import (
     QMenu,
     QSlider,
     QTabWidget,
-    QToolBar,
     QToolButton,
 )
 
@@ -168,28 +169,52 @@ class FluentExpander(QFrame):
 
 
 class LeftSidebar(QFrame):
+    run_selected = pyqtSignal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        nav_header = QLabel("Project Explorer")
-        layout.addWidget(nav_header)
+        header = QLabel("Run History")
+        layout.addWidget(header)
 
-        self.tree = QTreeView()
-        self.tree.setHeaderHidden(True)
-        self.tree.setSelectionBehavior(QAbstractItemView.SelectRows)
-        layout.addWidget(self.tree, 3)
-
-        notes_header = QLabel("Data Properties / Notes")
-        layout.addWidget(notes_header)
-
-        self.notes = QTextEdit()
-        self.notes.setPlainText("Session notes...")
-        layout.addWidget(self.notes, 1)
+        self.run_list = QListWidget()
+        self.run_list.setAlternatingRowColors(True)
+        self.run_list.itemDoubleClicked.connect(self._on_run_activated)
+        layout.addWidget(self.run_list, 1)
 
         self.setMinimumWidth(260)
+
+    def _on_run_activated(self, item):
+        run_path = item.data(Qt.UserRole)
+        if run_path:
+            self.run_selected.emit(run_path)
+
+    def reload_runs(self, runs_dir):
+        self.run_list.clear()
+        if not runs_dir or not Path(runs_dir).exists():
+            return
+        run_paths = sorted(Path(runs_dir).iterdir(), reverse=True)
+        for rp in run_paths:
+            if not rp.is_dir() or rp.name.startswith('.'):
+                continue
+            meta_file = rp / "metadata.json"
+            meta = {}
+            if meta_file.exists():
+                try:
+                    import json
+                    meta = json.loads(meta_file.read_text())
+                except Exception:
+                    pass
+            name = meta.get("name", rp.name)
+            ts = meta.get("timestamp", "")
+            status = meta.get("status", "unknown")
+            label = f"[{ts}] {name} \u2014 {status}" if ts else f"{name} \u2014 {status}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, str(rp))
+            self.run_list.addItem(item)
 
 
 class RightSidebar(QFrame):
@@ -1173,55 +1198,6 @@ class MainWindow(QMainWindow):
         # Add text-based top toolbar
         self._create_text_toolbar(root_layout)
 
-        self.toolbar = QToolBar()
-        self.toolbar.setMovable(False)
-        self.toolbar.setContextMenuPolicy(Qt.PreventContextMenu)
-        self.toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.addToolBar(Qt.TopToolBarArea, self.toolbar)
-
-        self.connect_action = self.toolbar.addAction("Connect")
-        self.connect_action.setIcon(self.style().standardIcon(QStyle.SP_DriveNetIcon))
-
-        self.toggle_receiving_action = self.toolbar.addAction("Start receiving")
-        self.toggle_receiving_action.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
-
-        self.toolbar.addSeparator()
-
-        self.marker_action = self.toolbar.addAction("Add marker")
-        self.marker_action.setIcon(self.style().standardIcon(QStyle.SP_ArrowDown))
-
-        self.marker_manager_action = self.toolbar.addAction("Markers")
-        self.marker_manager_action.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
-
-        self.snapshot_menu = QMenu(self)
-        self.snapshot_menu.addAction("Take PSD snapshot")
-        self.snapshot_menu.addAction("Take waveform snapshot")
-        self.snapshot_menu.addSeparator()
-        self.snapshot_menu.addAction("Clear snapshots")
-
-        self.snapshot_button = QToolButton(self)
-        self.snapshot_button.setText("Snapshots")
-        self.snapshot_button.setPopupMode(QToolButton.InstantPopup)
-        self.snapshot_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.snapshot_button.setMenu(self.snapshot_menu)
-        self.snapshot_button.setIcon(self.style().standardIcon(QStyle.SP_DesktopIcon))
-        self.toolbar.addWidget(self.snapshot_button)
-
-        self.toolbar.addSeparator()
-        self.save_disconnect_action = self.toolbar.addAction("Save and Disconnect")
-        self.save_disconnect_action.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
-
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.toolbar.addWidget(spacer)
-
-        self.toolbar.addSeparator()
-        self.check_update_action = self.toolbar.addAction("Check for Updates")
-        self.check_update_action.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
-
-        self.connection_label = QLabel("FPS: 0.0")
-        self.toolbar.addWidget(self.connection_label)
-
         self._current_experiment_path = None
         self._current_run_path = None
         self._run_device_configs = {}
@@ -1229,10 +1205,9 @@ class MainWindow(QMainWindow):
         self.main_stage = MainStage()
         root_layout.addWidget(self.main_stage, 1)
 
-        self._build_project_tree()
         self._wire_behavior()
         self._setup_status_bar()
-        self._set_initial_state()
+        self.main_stage.plot_screen.fps_updated.connect(self._fps_status_label.setText)
 
     def _create_text_toolbar(self, parent_layout):
         """Create a menu bar style toolbar at the top."""
@@ -1329,42 +1304,13 @@ class MainWindow(QMainWindow):
         """)
         return button
 
-    def _build_project_tree(self):
-        model = QStandardItemModel()
-        projects = QStandardItem("Projects")
-        experiment = QStandardItem("Experiment Name")
-        subjects = QStandardItem("Subjects")
-        data_files = QStandardItem("Data Files")
-
-        for name in [
-            "EEG_Subject01_Baseline",
-            "EEG_Subject01_Task",
-            "fMRI_Subject01_Baseline",
-            "fMRI_Subject02_Task",
-            "fMRI_Subject02_Baseline",
-        ]:
-            data_files.appendRow(QStandardItem(name))
-
-        subjects.appendRow(data_files)
-        experiment.appendRow(subjects)
-        projects.appendRow(experiment)
-        model.appendRow(projects)
-
-        tree = self.main_stage.left_sidebar.tree
-        tree.setModel(model)
-        tree.expandAll()
-
-        matches = model.match(model.index(0, 0), Qt.DisplayRole, "EEG_Subject01_Task", 1, Qt.MatchRecursive)
-        if matches:
-            tree.setCurrentIndex(matches[0])
-
     def _wire_behavior(self):
         self._exp_new_action.triggered.connect(self._on_experiment_new)
         self._exp_open_action.triggered.connect(self._on_experiment_open)
         self._exp_save_action.triggered.connect(self._on_experiment_save)
         self._exp_run_action.triggered.connect(self._on_experiment_run)
         self._legacy_ui_action.triggered.connect(self._on_open_legacy_ui)
-        self.main_stage.left_sidebar.tree.selectionModel().currentChanged.connect(self._on_tree_selection)
+        self.main_stage.left_sidebar.run_selected.connect(self._on_replay_run)
         self.main_stage.right_sidebar.cutoff_hz.valueChanged.connect(self._on_parameter_change)
 
     def _setup_status_bar(self):
@@ -1372,17 +1318,11 @@ class MainWindow(QMainWindow):
         self.setStatusBar(status)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
-        self.progress.setValue(72)
+        self.progress.setValue(0)
         self.progress.setFixedWidth(120)
-        status.addPermanentWidget(QLabel("Analysis Progress"))
         status.addPermanentWidget(self.progress)
-        status.addPermanentWidget(QLabel("Connected devices: 2  |  Memory: 320 GB"))
-
-    def _set_initial_state(self):
-        pass
-
-    def _on_tree_selection(self, current: QModelIndex, previous: QModelIndex):
-        text = current.data() if current.isValid() else ""
+        self._fps_status_label = QLabel("FPS: 0.0")
+        status.addPermanentWidget(self._fps_status_label)
 
     def _on_parameter_change(self, *args):
         pass
@@ -1396,6 +1336,7 @@ class MainWindow(QMainWindow):
                 config = ExperimentManager.load(path)
                 self._populate_timeline_from_config(config)
                 self.setWindowTitle(f"NeuroSense Data \u2014 {config.metadata.experiment_name}")
+                self.main_stage.left_sidebar.reload_runs(str(Path(path) / "runs"))
 
     def _on_experiment_open(self):
         default_dir = str(self._current_experiment_path) if self._current_experiment_path else str(Path.cwd() / "experiments")
@@ -1414,6 +1355,7 @@ class MainWindow(QMainWindow):
         config = ExperimentManager.load(path)
         self._populate_timeline_from_config(config)
         self.setWindowTitle(f"NeuroSense Data \u2014 {config.metadata.experiment_name}")
+        self.main_stage.left_sidebar.reload_runs(str(Path(path) / "runs"))
 
     def _on_experiment_save(self):
         if not self._current_experiment_path:
@@ -1586,16 +1528,61 @@ class MainWindow(QMainWindow):
             self.progress.setValue(step_index)
 
     def _on_exp_step_completed(self, step_index, device_name, action):
-        pass
+        if hasattr(self, 'progress'):
+            self.progress.setValue(step_index + 1)
 
     def _on_exp_finished(self, success, message):
         self._exp_run_action.setEnabled(True)
         self.progress.setValue(0)
+        self._save_run_metadata(success)
+        if self._current_experiment_path:
+            self.main_stage.left_sidebar.reload_runs(
+                str(Path(self._current_experiment_path) / "runs")
+            )
         if success:
             self.statusBar().showMessage(f"Experiment finished: {message}")
         else:
             self.statusBar().showMessage(f"Experiment aborted: {message}")
         self._experiment_runner = None
+
+    def _save_run_metadata(self, success):
+        if not self._current_run_path:
+            return
+        import json, datetime
+        meta_path = Path(self._current_run_path) / "metadata.json"
+        meta = {
+            "name": Path(self._current_experiment_path).name if self._current_experiment_path else "",
+            "timestamp": datetime.datetime.now().strftime("%Y%m%d_%H%M%S"),
+            "status": "success" if success else "failed",
+            "device_type": "rhx",
+            "sample_rate": 20000.0,
+            "num_channels": 1,
+        }
+        try:
+            meta_path.write_text(json.dumps(meta, indent=2))
+        except Exception:
+            pass
+
+    def _on_replay_run(self, run_path):
+        from rhx_realtime_feed.workers.replay_worker import ReplayWorker
+        meta_path = Path(run_path) / "metadata.json"
+        if not meta_path.exists():
+            QMessageBox.warning(self, "Replay", f"No metadata in {run_path}")
+            return
+        import json
+        meta = json.loads(meta_path.read_text())
+        device_type = meta.get("device_type", "rhx")
+        sr = meta.get("sample_rate", 20000.0)
+        nc = meta.get("num_channels", 1)
+        replay_name = f"Replay: {Path(run_path).name}"
+        self.main_stage.plot_screen.add_device(replay_name, device_type, sample_rate=sr, num_channels=nc)
+        worker = ReplayWorker(run_path, replay_name, self)
+        worker.data_received.connect(self.main_stage.plot_screen.on_data)
+        worker.error.connect(lambda msg: self.statusBar().showMessage(f"Replay error: {msg}"))
+        worker.finished.connect(lambda: self.statusBar().showMessage("Replay finished"))
+        worker.start()
+        # ponytail: keep worker alive via attribute; add worker registry if multiple replays needed
+        self._replay_worker = worker
 
     def _on_exp_error(self, device_name, error_message):
         print(f"[UI] Experiment error: {device_name}: {error_message}")

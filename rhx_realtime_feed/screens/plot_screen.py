@@ -13,6 +13,7 @@ class PlotScreen(QtWidgets.QWidget):
     save_disconnect_request_signal  = QtCore.pyqtSignal()
     marker_request_signal           = QtCore.pyqtSignal()
     auto_follow_changed_signal      = QtCore.pyqtSignal(bool)
+    fps_updated = QtCore.pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -24,15 +25,6 @@ class PlotScreen(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-
-        top_bar = QtWidgets.QHBoxLayout()
-        top_bar.setContentsMargins(12, 6, 12, 2)
-        self.connection_details_label = QtWidgets.QLabel()
-        self.fps_label = QtWidgets.QLabel("FPS: 0.0")
-        top_bar.addWidget(self.connection_details_label)
-        top_bar.addStretch()
-        top_bar.addWidget(self.fps_label)
-        layout.addLayout(top_bar)
 
         self.tab_widget = QtWidgets.QTabWidget()
         self.tab_widget.setDocumentMode(True)
@@ -116,7 +108,7 @@ class PlotScreen(QtWidgets.QWidget):
             elapsed = now - self._fps_last_t
             if elapsed >= 1.0:
                 fps = self._fps_frame_count / elapsed
-                self.fps_label.setText(f"FPS: {fps:.1f}\nFrame time: {self._render_dur_ms:.2f} ms")
+                self.fps_updated.emit(f"FPS: {fps:.1f}  Frame: {self._render_dur_ms:.1f} ms")
                 self._fps_frame_count = 0
                 self._fps_last_t = now
 

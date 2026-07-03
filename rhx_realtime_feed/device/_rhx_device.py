@@ -105,7 +105,7 @@ class IntanRHXDevice(Device, RHXConfig):
             self.init_circular_buffer()
 
         except Exception as e:
-            print("Failed to initialize connection with 'Remote TCP Control'")
+            self._last_connect_error = str(e)
             self._connected = False
 
         return self._connected
