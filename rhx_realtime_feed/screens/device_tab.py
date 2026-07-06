@@ -859,6 +859,11 @@ class NeuralDeviceTab(DeviceTab):
     def get_markers(self):
         return list(self.marker_records)
 
+    def set_marker_catalog(self, markers):
+        self.marker_records = list(markers or [])
+        self._clear_marker_lines()
+        self._clear_spike_marker_lines()
+
     def take_psd_snapshot(self) -> bool:
         if self._latest_psd_f is None or self._latest_psd_db is None:
             return False

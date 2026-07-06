@@ -1,7 +1,7 @@
 import json
 import shutil
 from datetime import datetime, timezone
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 

@@ -64,26 +64,6 @@ class StateManager:
         """Check if device is actively streaming (not paused)."""
         return self._state_machine.is_streaming_active()
     
-    def is_idle(self) -> bool:
-        """Check if in IDLE state."""
-        return self.get_current_state() == AppState.IDLE
-    
-    def is_connecting(self) -> bool:
-        """Check if in CONNECTING state."""
-        return self.get_current_state() == AppState.CONNECTING
-    
-    def is_paused(self) -> bool:
-        """Check if in PAUSED state."""
-        return self.get_current_state() == AppState.PAUSED
-    
-    def is_connection_lost(self) -> bool:
-        """Check if in CONNECTION_LOST state."""
-        return self.get_current_state() == AppState.CONNECTION_LOST
-    
-    def can_transition_to(self, target_state: AppState) -> bool:
-        """Check if a transition to target_state is valid."""
-        return self._state_machine.can_transition_to(target_state)
-    
     # ─── State Transition Methods ──────────────────────────────────────────────
     
     def request_connect(self) -> bool:
@@ -169,12 +149,6 @@ class StateManager:
             print(f"[STATE] Transition error: {trigger} -> {e}")
             return False
     
-    # ─── Signal Access ────────────────────────────────────────────────────────
-    
-    def get_state_machine(self) -> AppStateMachine:
-        """Get the underlying state machine for signal connections."""
-        return self._state_machine
-    
     def get_state_changed_signal(self) -> QtCore.pyqtSignal:
         """Get the state_changed PyQt signal."""
         return self._state_machine.state_changed
@@ -183,27 +157,4 @@ class StateManager:
         """Get the state_changed_str PyQt signal for string state."""
         return self._state_machine.state_changed_str
     
-    def get_state_entering_signal(self) -> QtCore.pyqtSignal:
-        """Get the state_entering PyQt signal."""
-        return self._state_machine.state_entering
-    
-    def get_state_exiting_signal(self) -> QtCore.pyqtSignal:
-        """Get the state_exiting PyQt signal."""
-        return self._state_machine.state_exiting
-    
-    # ─── Debugging ────────────────────────────────────────────────────────────
-    
-    def print_state(self):
-        """Print current state to console."""
-        print(f"[STATE] Current state: {self.get_current_state_str()}")
-    
-    def get_transition_history(self):
-        """Get the history of recent state transitions."""
-        return self._state_machine.get_transition_history()
-    
-    def print_history(self):
-        """Print the recent transition history."""
-        history = self.get_transition_history()
-        print("[STATE] Recent transitions:")
-        for entry in history:
-            print(f"  {entry['timestamp']}: -> {entry['new_state']}")
+

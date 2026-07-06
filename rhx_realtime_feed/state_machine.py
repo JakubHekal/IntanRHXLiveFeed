@@ -13,7 +13,7 @@ States:
 """
 
 from enum import Enum
-from typing import Optional, Dict, Callable, Any
+from typing import Dict
 from PyQt5 import QtCore
 
 
@@ -177,6 +177,4 @@ class AppStateMachine(QtCore.QObject):
         """Get the list of recent state transitions for debugging."""
         return list(self._transition_history)
 
-    def reset_history(self):
-        """Clear the transition history."""
-        self._transition_history.clear()
+

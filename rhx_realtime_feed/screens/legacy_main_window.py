@@ -9,9 +9,8 @@ from rhx_realtime_feed.updater import UpdateCheckThread, UpdateInfo
 from rhx_realtime_feed.screens.marker_dialog import MarkerDialog
 from rhx_realtime_feed.screens.plot_screen import PlotScreen
 from rhx_realtime_feed.device import IntanRHXDevice
-from rhx_realtime_feed.workers.rhx_worker import RHXWorker
 from rhx_realtime_feed.workers.chunk_writer import ChunkWriter
-from rhx_realtime_feed.workers.rhx_worker import RAW_CHUNK_SEC, CSV_FILE_BUFFER_BYTES, CSV_FLUSH_INTERVAL_SEC
+from rhx_realtime_feed.workers.device_worker import DeviceWorker, RAW_CHUNK_SEC, CSV_FILE_BUFFER_BYTES, CSV_FLUSH_INTERVAL_SEC
 from rhx_realtime_feed.state_manager import StateManager, AppState
 from rhx_realtime_feed.telemetry_logger import set_telemetry_file, append_telemetry_line
 
@@ -408,7 +407,7 @@ class LegacyMainWindow(QtWidgets.QMainWindow):
             flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
         )
 
-        self.rhx_worker = RHXWorker(
+        self.rhx_worker = DeviceWorker(
             device=device,
             output_sink=sink,
             project_name=project_name,

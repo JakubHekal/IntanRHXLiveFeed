@@ -9,7 +9,6 @@ if str(_project_root) not in sys.path:
 from PyQt5.QtCore import pyqtSignal, QPropertyAnimation, QRect, QSize, Qt, QEasingCurve
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt5.QtWidgets import (
-    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -27,33 +26,31 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressBar,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
-    QSplitter,
     QStatusBar,
     QStyle,
-    QTextEdit,
-    QTreeView,
     QVBoxLayout,
     QWidget,
     QAction,
     QMenu,
-    QSlider,
     QTabWidget,
     QToolButton,
 )
 
 import qdarkstyle
 from qdarkstyle.dark.palette import DarkPalette 
-from qdarkstyle.light.palette import LightPalette
-
 from rhx_realtime_feed.experiment import ExperimentManager, ExperimentDialog, RunExperimentDialog
 from rhx_realtime_feed.experiment.experiment import ExperimentConfig, SequenceStep, _config_to_dict
 from rhx_realtime_feed.telemetry_logger import append_telemetry_line, set_telemetry_file
+from rhx_realtime_feed import __version__
+from rhx_realtime_feed.updater import UpdateCheckThread, UpdateInfo
 from rhx_realtime_feed.experiment.experiment_runner import ExperimentRunner
 from rhx_realtime_feed.screens.legacy_main_window import LegacyMainWindow
 from rhx_realtime_feed.screens.plot_screen import PlotScreen
+from rhx_realtime_feed.screens.marker_dialog import MarkerDialog
 
 BG_DARK = "#1E1E1E"
 BG_SURFACE = "#252526"
@@ -262,45 +259,6 @@ class RightSidebar(QFrame):
         form_layout.setContentsMargins(0, 0, 0, 0)
         form_layout.setSpacing(4)
 
-        self.filter_expander = FluentExpander("Filter", expanded=True)
-        filter_widget = QWidget()
-        filter_form = QFormLayout(filter_widget)
-        filter_form.setContentsMargins(0, 4, 0, 0)
-        filter_form.setSpacing(6)
-
-        self.cutoff_hz = QSpinBox()
-        self.cutoff_hz.setRange(0, 1000)
-        self.cutoff_hz.setValue(200)
-
-        self.cutoff_secondary = QDoubleSpinBox()
-        self.cutoff_secondary.setValue(1.0)
-
-        self.method = QComboBox()
-        self.method.addItems(["Default method"])
-
-        filter_form.addRow("Cut-off (Hz)", self.cutoff_hz)
-        filter_form.addRow("Secondary", self.cutoff_secondary)
-        filter_form.addRow("Method", self.method)
-        self.filter_expander.setContentWidget(filter_widget)
-
-        self.analytics_expander = FluentExpander("Analytics", expanded=True)
-        analytics_widget = QWidget()
-        analytics_form = QFormLayout(analytics_widget)
-        analytics_form.setContentsMargins(0, 4, 0, 0)
-        analytics_form.setSpacing(6)
-
-        self.function_name = QLineEdit("Power spectrum")
-        self.sessions = QComboBox()
-        self.sessions.addItems(["Session 1", "Session 2", "Session 3"])
-        self.features = QLineEdit("Spike amplitude")
-        self.memory = QLineEdit("320 GB")
-
-        analytics_form.addRow("Function", self.function_name)
-        analytics_form.addRow("Session", self.sessions)
-        analytics_form.addRow("Features", self.features)
-        analytics_form.addRow("Memory", self.memory)
-        self.analytics_expander.setContentWidget(analytics_widget)
-
         # ── Block Properties with dynamic operation params ──
         self._block_expander = FluentExpander("Block Properties", expanded=True)
         self._bp_widget = QWidget()
@@ -352,8 +310,6 @@ class RightSidebar(QFrame):
         self._dp_layout.addLayout(self._dp_form)
         self._device_expander.setContentWidget(self._dp_widget)
 
-        form_layout.addWidget(self.filter_expander)
-        form_layout.addWidget(self.analytics_expander)
         form_layout.addWidget(self._block_expander)
         form_layout.addWidget(self._device_expander)
         form_layout.addStretch()
@@ -1218,23 +1174,47 @@ class MainStage(QWidget):
         self.btn_stop.setIcon(self.style().standardIcon(QStyle.SP_MediaStop))
         self.btn_stop.setEnabled(False)
         self.btn_pause.setEnabled(False)
-        btn_prev = QToolButton()
-        btn_prev.setIcon(self.style().standardIcon(QStyle.SP_MediaSkipBackward))
-        btn_next = QToolButton()
-        btn_next.setIcon(self.style().standardIcon(QStyle.SP_MediaSkipForward))
-
-        self.timeline_slider = QSlider(Qt.Horizontal)
-        self.timeline_slider.setRange(0, 120)
-        self.timeline_slider.setValue(15)
-
         timeline_bar.addWidget(self.btn_play)
         timeline_bar.addWidget(self.btn_pause)
         timeline_bar.addWidget(self.btn_stop)
-        timeline_bar.addWidget(btn_prev)
-        timeline_bar.addWidget(btn_next)
-        timeline_bar.addWidget(QLabel("0"))
-        timeline_bar.addWidget(self.timeline_slider)
-        timeline_bar.addWidget(QLabel("120"))
+
+        timeline_bar.addSpacing(16)
+
+        self.btn_psd_snapshot = QToolButton()
+        self.btn_psd_snapshot.setText("PSD Snap")
+        self.btn_psd_snapshot.setToolTip("Capture PSD snapshot as dashed overlay")
+        self.btn_psd_snapshot.clicked.connect(self.plot_screen.take_psd_snapshot)
+
+        self.btn_wf_snapshot = QToolButton()
+        self.btn_wf_snapshot.setText("WF Snap")
+        self.btn_wf_snapshot.setToolTip("Capture waveform snapshot as dashed overlay")
+        self.btn_wf_snapshot.clicked.connect(self.plot_screen.take_waveform_snapshot)
+
+        self.btn_clear_snapshots = QToolButton()
+        self.btn_clear_snapshots.setText("Clear Snap")
+        self.btn_clear_snapshots.setToolTip("Remove all snapshot overlays")
+        self.btn_clear_snapshots.clicked.connect(self.plot_screen.clear_snapshots)
+
+        timeline_bar.addWidget(self.btn_psd_snapshot)
+        timeline_bar.addWidget(self.btn_wf_snapshot)
+        timeline_bar.addWidget(self.btn_clear_snapshots)
+
+        timeline_bar.addSpacing(16)
+
+        self.btn_add_marker = QToolButton()
+        self.btn_add_marker.setText("Add Marker")
+        self.btn_add_marker.setToolTip("Add a visual marker near the right edge of the visible plot")
+        self.btn_add_marker.clicked.connect(self._add_marker)
+
+        self.btn_markers = QToolButton()
+        self.btn_markers.setText("Markers\u2026")
+        self.btn_markers.setToolTip("View, rename, or delete markers")
+        self.btn_markers.clicked.connect(self._open_marker_dialog)
+
+        timeline_bar.addWidget(self.btn_add_marker)
+        timeline_bar.addWidget(self.btn_markers)
+
+        self._marker_dialog = None
 
         center_layout.addWidget(self.plot_screen, 1)
 
@@ -1250,6 +1230,44 @@ class MainStage(QWidget):
         layout.addWidget(self.left_sidebar, 1)
         layout.addWidget(center_widget, 4)
         layout.addWidget(self.right_sidebar, 1)
+
+    def _add_marker(self):
+        tab = self.plot_screen._active_tab()
+        if tab is None:
+            return
+        vb = tab.canvas.raw_plot.getViewBox()
+        if vb is None:
+            return
+        x_range = vb.viewRange()[0]
+        ts = x_range[0] + (x_range[1] - x_range[0]) * 0.8
+        self.plot_screen.add_marker(ts)
+
+    def _open_marker_dialog(self):
+        if self._marker_dialog is None:
+            self._marker_dialog = MarkerDialog(self)
+            self._marker_dialog.rename_requested.connect(self._on_marker_rename)
+            self._marker_dialog.delete_requested.connect(self._on_marker_delete)
+        markers = self.plot_screen.get_markers()
+        self._marker_dialog.set_markers(markers)
+        self._marker_dialog.show()
+        self._marker_dialog.raise_()
+
+    def _on_marker_rename(self, marker_id, new_name):
+        markers = self.plot_screen.get_markers()
+        for m in markers:
+            if m.get("id") == marker_id:
+                m["name"] = new_name
+                break
+        self.plot_screen.set_marker_catalog(markers)
+        if self._marker_dialog is not None:
+            self._marker_dialog.set_markers(markers)
+
+    def _on_marker_delete(self, marker_id):
+        markers = self.plot_screen.get_markers()
+        markers = [m for m in markers if m.get("id") != marker_id]
+        self.plot_screen.set_marker_catalog(markers)
+        if self._marker_dialog is not None:
+            self._marker_dialog.set_markers(markers)
 
 
 class MainWindow(QMainWindow):
@@ -1289,55 +1307,11 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _create_text_toolbar(self, parent_layout):
-        """Create a menu bar style toolbar at the top."""
         menubar_frame = QFrame()
         menubar_layout = QHBoxLayout(menubar_frame)
         menubar_layout.setContentsMargins(0, 0, 0, 0)
         menubar_layout.setSpacing(0)
 
-        # File menu
-        file_menu = QMenu("File", self)
-        file_menu.addAction("New Session")
-        file_menu.addAction("Open Session")
-        file_menu.addAction("Save Session")
-        file_menu.addAction("Save As...")
-        file_menu.addSeparator()
-        file_menu.addAction("Exit")
-        file_btn = self._create_menu_button("File", file_menu)
-        menubar_layout.addWidget(file_btn)
-
-        # Edit menu
-        edit_menu = QMenu("Edit", self)
-        edit_menu.addAction("Undo")
-        edit_menu.addAction("Redo")
-        edit_menu.addSeparator()
-        edit_menu.addAction("Clear Markers")
-        edit_menu.addAction("Reset Filters")
-        edit_btn = self._create_menu_button("Edit", edit_menu)
-        menubar_layout.addWidget(edit_btn)
-
-        # View menu
-        view_menu = QMenu("View", self)
-        view_menu.addAction("Show Left Sidebar")
-        view_menu.addAction("Show Right Sidebar")
-        view_menu.addSeparator()
-        view_menu.addAction("Full Screen")
-        view_menu.addAction("Reset Layout")
-        view_menu.addSeparator()
-        self._legacy_ui_action = view_menu.addAction("Legacy UI\u2026")
-        view_btn = self._create_menu_button("View", view_menu)
-        menubar_layout.addWidget(view_btn)
-
-        # Tools menu
-        tools_menu = QMenu("Tools", self)
-        tools_menu.addAction("Device Settings")
-        tools_menu.addAction("Preferences")
-        tools_menu.addSeparator()
-        tools_menu.addAction("Check for Updates")
-        tools_btn = self._create_menu_button("Tools", tools_menu)
-        menubar_layout.addWidget(tools_btn)
-
-        # Experiment menu
         experiment_menu = QMenu("Experiment", self)
         self._exp_new_action = experiment_menu.addAction("New Experiment")
         self._exp_open_action = experiment_menu.addAction("Open Experiment")
@@ -1345,13 +1319,16 @@ class MainWindow(QMainWindow):
         self._exp_save_action = experiment_menu.addAction("Save Experiment")
         experiment_menu.addSeparator()
         self._exp_run_action = experiment_menu.addAction("Run Experiment\u2026")
-        experiment_btn = self._create_menu_button("Experiment", experiment_menu)
-        menubar_layout.addWidget(experiment_btn)
+        experiment_menu.addSeparator()
+        self._about_action = experiment_menu.addAction("About")
+        experiment_menu.addAction("Documentation")
+        exp_btn = self._create_menu_button("Experiment", experiment_menu)
+        menubar_layout.addWidget(exp_btn)
 
-        # Help menu
         help_menu = QMenu("Help", self)
-        help_menu.addAction("About")
-        help_menu.addAction("Documentation")
+        self._legacy_ui_action = help_menu.addAction("Legacy UI\u2026")
+        help_menu.addSeparator()
+        self._check_update_action = help_menu.addAction("Check for Updates")
         help_btn = self._create_menu_button("Help", help_menu)
         menubar_layout.addWidget(help_btn)
 
@@ -1388,9 +1365,10 @@ class MainWindow(QMainWindow):
         self._exp_open_action.triggered.connect(self._on_experiment_open)
         self._exp_save_action.triggered.connect(self._on_experiment_save)
         self._exp_run_action.triggered.connect(self._on_experiment_run)
+        self._about_action.triggered.connect(self._on_about)
         self._legacy_ui_action.triggered.connect(self._on_open_legacy_ui)
+        self._check_update_action.triggered.connect(self._check_for_updates)
         self.main_stage.left_sidebar.run_selected.connect(self._on_replay_run)
-        self.main_stage.right_sidebar.cutoff_hz.valueChanged.connect(self._on_parameter_change)
 
     def _setup_status_bar(self):
         status = QStatusBar()
@@ -1403,8 +1381,33 @@ class MainWindow(QMainWindow):
         self._fps_status_label = QLabel("FPS: 0.0")
         status.addPermanentWidget(self._fps_status_label)
 
-    def _on_parameter_change(self, *args):
-        pass
+    def _on_about(self):
+        QMessageBox.about(self, "NeuroSense Data",
+            f"NeuroSense Data v{__version__}\n\nReal-time feed for Intan RHX devices.")
+
+    def _check_for_updates(self):
+        if getattr(self, '_update_thread', None) is not None and self._update_thread.isRunning():
+            QMessageBox.information(self, "Checking", "Update check already in progress.")
+            return
+        self._update_thread = UpdateCheckThread(__version__, self)
+        self._update_thread.result_ready.connect(self._on_update_result)
+        self._update_thread.start()
+
+    def _on_update_result(self, result):
+        self._update_thread = None
+        import json
+        if isinstance(result, UpdateInfo):
+            if result.available:
+                msg = (f"Version {result.latest_version} is available.\n"
+                       f"You have {result.current_version}.\n\n"
+                       f"Download at:\n{result.release_url}")
+                QMessageBox.information(self, "Update Available", msg)
+            else:
+                QMessageBox.information(self, "Up to Date",
+                    f"You have the latest version ({result.current_version}).")
+        else:
+            QMessageBox.warning(self, "Update Check Failed",
+                "Could not check for updates.\n\nCheck your internet connection.")
 
     def _on_experiment_new(self):
         dialog = ExperimentDialog(self)

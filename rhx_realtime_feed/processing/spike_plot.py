@@ -559,5 +559,3 @@ def main():
 
     print(f"✅ Done. Plots saved under: {out_root}")
 
-if __name__ == "__main__":
-    main()

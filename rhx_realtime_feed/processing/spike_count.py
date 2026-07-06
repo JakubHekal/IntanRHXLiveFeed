@@ -358,5 +358,4 @@ def main():
     print(f"[done] wrote:\n  {out_csv}\n  plots in: {out_dir}")
 
 
-if __name__ == "__main__":
-    main()
+

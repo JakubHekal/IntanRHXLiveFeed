@@ -9,10 +9,6 @@ from rhx_realtime_feed.workers.processing_worker import (
 _SETTINGS = QSettings("RHX", "RealtimeFeed")
 
 
-def plot_settings() -> QSettings:
-    return _SETTINGS
-
-
 def load_plot_setting(key: str, default: int) -> int:
     return _SETTINGS.value(key, default, type=int)
 

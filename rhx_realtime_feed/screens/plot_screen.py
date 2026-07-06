@@ -219,9 +219,6 @@ class PlotScreen(QtWidgets.QWidget):
             if hasattr(tab, 'set_auto_follow'):
                 tab.set_auto_follow(enabled)
 
-    def reset_plot_views(self):
-        pass
-
     # ── Legacy compat (single-device data routing) ────────────────────────
 
     def _on_data_received(self, chunk):
