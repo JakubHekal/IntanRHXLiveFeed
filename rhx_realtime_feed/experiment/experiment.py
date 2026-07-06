@@ -259,3 +259,29 @@ class ExperimentManager:
         if not runs_dir.exists():
             return []
         return sorted(p for p in runs_dir.iterdir() if p.is_dir())
+
+    @staticmethod
+    def clone_experiment(experiment_path: str | Path, new_name: str) -> Path:
+        src = Path(experiment_path)
+        dst = src.parent / new_name
+        shutil.copytree(src, dst)
+        config = ExperimentManager.load(dst)
+        config.metadata.experiment_name = new_name
+        config.metadata.cloned_from = str(src.name)
+        ExperimentManager.save(dst, config)
+        return dst
+
+    @staticmethod
+    def rename_run(run_path: str | Path, new_name: str) -> Path:
+        src = Path(run_path)
+        dst = src.parent / new_name
+        if dst.exists():
+            raise FileExistsError(f"Run '{new_name}' already exists")
+        src.rename(dst)
+        return dst
+
+    @staticmethod
+    def delete_run(run_path: str | Path):
+        path = Path(run_path)
+        if path.exists() and path.is_dir():
+            shutil.rmtree(path)

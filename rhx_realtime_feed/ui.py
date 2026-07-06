@@ -170,6 +170,7 @@ class FluentExpander(QFrame):
 
 class LeftSidebar(QFrame):
     run_selected = pyqtSignal(str)
+    run_action = pyqtSignal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -183,6 +184,8 @@ class LeftSidebar(QFrame):
         self.run_list = QListWidget()
         self.run_list.setAlternatingRowColors(True)
         self.run_list.itemDoubleClicked.connect(self._on_run_activated)
+        self.run_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.run_list.customContextMenuRequested.connect(self._on_run_context_menu)
         layout.addWidget(self.run_list, 1)
 
         self.setMinimumWidth(260)
@@ -191,6 +194,20 @@ class LeftSidebar(QFrame):
         run_path = item.data(Qt.UserRole)
         if run_path:
             self.run_selected.emit(run_path)
+
+    def _on_run_context_menu(self, pos):
+        item = self.run_list.itemAt(pos)
+        if item is None:
+            return
+        run_path = item.data(Qt.UserRole)
+        if not run_path:
+            return
+        menu = QMenu(self)
+        menu.addAction("Rerun", lambda: self.run_action.emit("rerun", run_path))
+        menu.addSeparator()
+        menu.addAction("Rename\u2026", lambda: self.run_action.emit("rename", run_path))
+        menu.addAction("Delete\u2026", lambda: self.run_action.emit("delete", run_path))
+        menu.exec_(self.run_list.viewport().mapToGlobal(pos))
 
     def reload_runs(self, runs_dir):
         self.run_list.clear()
@@ -1317,11 +1334,9 @@ class MainWindow(QMainWindow):
         self._exp_open_action = experiment_menu.addAction("Open Experiment")
         experiment_menu.addSeparator()
         self._exp_save_action = experiment_menu.addAction("Save Experiment")
+        self._exp_duplicate_action = experiment_menu.addAction("Duplicate Experiment")
         experiment_menu.addSeparator()
         self._exp_run_action = experiment_menu.addAction("Run Experiment\u2026")
-        experiment_menu.addSeparator()
-        self._about_action = experiment_menu.addAction("About")
-        experiment_menu.addAction("Documentation")
         exp_btn = self._create_menu_button("Experiment", experiment_menu)
         menubar_layout.addWidget(exp_btn)
 
@@ -1329,6 +1344,9 @@ class MainWindow(QMainWindow):
         self._legacy_ui_action = help_menu.addAction("Legacy UI\u2026")
         help_menu.addSeparator()
         self._check_update_action = help_menu.addAction("Check for Updates")
+        help_menu.addSeparator()
+        self._about_action = help_menu.addAction("About")
+        help_menu.addAction("Documentation")
         help_btn = self._create_menu_button("Help", help_menu)
         menubar_layout.addWidget(help_btn)
 
@@ -1364,11 +1382,13 @@ class MainWindow(QMainWindow):
         self._exp_new_action.triggered.connect(self._on_experiment_new)
         self._exp_open_action.triggered.connect(self._on_experiment_open)
         self._exp_save_action.triggered.connect(self._on_experiment_save)
+        self._exp_duplicate_action.triggered.connect(self._on_experiment_duplicate)
         self._exp_run_action.triggered.connect(self._on_experiment_run)
         self._about_action.triggered.connect(self._on_about)
         self._legacy_ui_action.triggered.connect(self._on_open_legacy_ui)
         self._check_update_action.triggered.connect(self._check_for_updates)
         self.main_stage.left_sidebar.run_selected.connect(self._on_replay_run)
+        self.main_stage.left_sidebar.run_action.connect(self._on_run_action)
 
     def _setup_status_bar(self):
         status = QStatusBar()
@@ -1380,6 +1400,81 @@ class MainWindow(QMainWindow):
         status.addPermanentWidget(self.progress)
         self._fps_status_label = QLabel("FPS: 0.0")
         status.addPermanentWidget(self._fps_status_label)
+
+    def _on_run_action(self, action, run_path):
+        if action == "rerun":
+            self._on_run_rerun(run_path)
+        elif action == "rename":
+            self._on_run_rename(run_path)
+        elif action == "delete":
+            self._on_run_delete(run_path)
+
+    def _on_run_rerun(self, run_path):
+        if not self._current_experiment_path:
+            QMessageBox.warning(self, "No Experiment", "Open or create an experiment first.")
+            return
+        run_data = ExperimentManager.load_run(run_path)
+        timeline = self.main_stage.timeline
+        timeline.clear_all()
+        self.main_stage.plot_screen.clear_all()
+        devices = run_data.get("devices", [])
+        for d in devices:
+            timeline.add_device(name=d.get("name", "Device"), device_type=d.get("device_type", "rhx"))
+            self.main_stage.plot_screen.add_device(d.get("name", "Device"), d.get("device_type", "rhx"))
+        name_to_idx = {d[0]: i for i, d in enumerate(timeline._devices) if d[2] != "__system__"}
+        if not name_to_idx:
+            timeline.add_device(name="Default", device_type="rhx")
+            self.main_stage.plot_screen.add_device("Default", "rhx")
+            name_to_idx = {d[0]: i for i, d in enumerate(timeline._devices) if d[2] != "__system__"}
+        current_time = 0.0
+        for step in run_data.get("sequence", []):
+            duration = step.get("parameters", {}).get("duration_s", 2.0)
+            dev_idx = name_to_idx.get(step.get("device_name", ""))
+            if dev_idx is None:
+                dev_idx = next(iter(name_to_idx.values()))
+            timeline.add_block(dev_idx, step.get("action", ""), start=current_time, duration=duration, params=dict(step.get("parameters", {})))
+            current_time += duration
+        self._on_experiment_run()
+
+    def _on_run_rename(self, run_path):
+        old_name = Path(run_path).name
+        new_name, ok = QInputDialog.getText(self, "Rename Run", "New name:", text=old_name)
+        if not ok or not new_name.strip():
+            return
+        new_name = new_name.strip()
+        try:
+            ExperimentManager.rename_run(run_path, new_name)
+        except FileExistsError:
+            QMessageBox.warning(self, "Rename Failed", f"Run '{new_name}' already exists.")
+            return
+        if self._current_experiment_path:
+            self.main_stage.left_sidebar.reload_runs(str(Path(self._current_experiment_path) / "runs"))
+
+    def _on_run_delete(self, run_path):
+        name = Path(run_path).name
+        confirm = QMessageBox.question(self, "Delete Run", f"Delete run '{name}' permanently?\n\nThis cannot be undone.",
+                                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if confirm != QMessageBox.Yes:
+            return
+        ExperimentManager.delete_run(run_path)
+        if self._current_experiment_path:
+            self.main_stage.left_sidebar.reload_runs(str(Path(self._current_experiment_path) / "runs"))
+
+    def _on_experiment_duplicate(self):
+        if not self._current_experiment_path:
+            QMessageBox.information(self, "No Experiment", "Open or create an experiment first.")
+            return
+        current_name = Path(self._current_experiment_path).name
+        new_name, ok = QInputDialog.getText(self, "Duplicate Experiment", "New experiment name:", text=current_name)
+        if not ok or not new_name.strip():
+            return
+        new_name = new_name.strip()
+        dst = ExperimentManager.clone_experiment(self._current_experiment_path, new_name)
+        self._current_experiment_path = str(dst)
+        config = ExperimentManager.load(dst)
+        self._populate_timeline_from_config(config)
+        self.setWindowTitle(f"NeuroSense Data \u2014 {config.metadata.experiment_name}")
+        self.main_stage.left_sidebar.reload_runs(str(dst / "runs"))
 
     def _on_about(self):
         QMessageBox.about(self, "NeuroSense Data",
