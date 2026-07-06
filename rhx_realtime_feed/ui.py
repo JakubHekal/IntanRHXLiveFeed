@@ -73,7 +73,9 @@ def _build_registry():
 _build_registry()
 
 _SYSTEM_OPERATIONS = [
-    DeviceOperation("wait_input", "Wait for User Input", instantaneous=True, default_duration=0, color="#FFD700"),
+    DeviceOperation("wait_input", "Wait for User Input", instantaneous=True, default_duration=0, color="#FFD700", params=[
+        ParamDef("message", "Message", "str", default="Click OK to continue"),
+    ]),
     DeviceOperation("log_event", "Log Event", instantaneous=True, default_duration=0, color="#FFA500"),
     DeviceOperation("start_recording", "Start Recording", instantaneous=True, default_duration=0, color="#00CC66"),
     DeviceOperation("stop_recording", "Stop Recording", instantaneous=True, default_duration=0, color="#CC3333"),
@@ -1662,11 +1664,29 @@ class MainWindow(QMainWindow):
         meta_path = Path(self._current_run_path) / "metadata.json"
         if status is None:
             status = "success" if success else "failed"
+
+        devices_info = []
+        for d in self.main_stage.timeline._devices:
+            if d[2] == "__system__":
+                continue
+            config = d[3] if len(d) >= 4 else {}
+            devices_info.append({
+                "name": d[0],
+                "device_type": d[2],
+                "config": {k: v for k, v in config.items() if not isinstance(v, (bytes, bytearray))},
+                "blocks": [
+                    {"label": b[0], "action": b[4] if len(b) >= 5 else b[0],
+                     "start_min": round(b[1], 1), "duration_min": round(b[2], 1)}
+                    for b in d[1]
+                ],
+            })
+
         meta = {
             "name": Path(self._current_experiment_path).name if self._current_experiment_path else "",
             "timestamp": datetime.datetime.now().strftime("%Y%m%d_%H%M%S"),
             "status": status,
-            "device_type": "rhx",
+            "devices": devices_info,
+            "device_type": devices_info[0]["device_type"] if devices_info else "",
             "sample_rate": 20000.0,
             "num_channels": 1,
         }
@@ -1703,9 +1723,36 @@ class MainWindow(QMainWindow):
         self.main_stage.btn_stop.setEnabled(False)
 
     def _on_user_input_requested(self, message):
-        text, ok = QInputDialog.getText(self, "User Input Required", message)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("User Input Required")
+        dialog.setModal(True)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
+        icon = QLabel("\u26A0\uFE0F")
+        icon.setStyleSheet("font-size: 24px;")
+        icon.setAlignment(Qt.AlignCenter)
+        layout.addWidget(icon)
+        msg = QLabel(message)
+        msg.setWordWrap(True)
+        msg.setStyleSheet("font-size: 13px;")
+        msg.setAlignment(Qt.AlignCenter)
+        layout.addWidget(msg)
+        btn = QPushButton("OK - Continue")
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {ACCENT_BLUE}; color: white;
+                border: none; padding: 8px 24px; font-size: 13px;
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{ background-color: #106EBE; }}
+        """)
+        btn.clicked.connect(dialog.accept)
+        btn.setDefault(True)
+        layout.addWidget(btn, 0, Qt.AlignCenter)
+        dialog.exec_()
         if self._experiment_runner is not None and self._experiment_runner._thread is not None:
-            self._experiment_runner._thread._input_result = (text, ok)
+            self._experiment_runner._thread._input_result = ("ok", True)
 
     def _populate_timeline_from_config(self, config: ExperimentConfig):
         timeline = self.main_stage.timeline

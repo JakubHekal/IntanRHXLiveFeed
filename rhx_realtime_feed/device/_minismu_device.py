@@ -178,6 +178,11 @@ class MiniSMUDevice(Device):
                 ParamDef("duration_s", "Duration (s)", "float", default=1.0, min_val=0.1, max_val=60.0),
             ]),
             DeviceOperation("Measure", "Measure", instantaneous=True, default_duration=0, color="#E74856"),
+            DeviceOperation("force_current", "Force Current", default_duration=60.0, color="#D13438", params=[
+                ParamDef("channel", "Channel", "int", default=1, min_val=1, max_val=2),
+                ParamDef("current_nA", "Current (nA)", "float", default=-100000.0, min_val=-1000000.0, max_val=1000000.0),
+                ParamDef("duration_s", "Duration (s)", "float", default=1200.0, min_val=1.0, max_val=7200.0),
+            ]),
         ]
 
     @classmethod

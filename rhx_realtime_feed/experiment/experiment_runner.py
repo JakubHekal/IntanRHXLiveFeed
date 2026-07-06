@@ -222,6 +222,64 @@ class _RunnerThread(QtCore.QThread):
                             print(f"[Runner] {device_name} Measure: got {data.shape if data is not None else 'None'}")
                         self.msleep(100)
 
+                    elif action == "force_current":
+                        ch = params.get("channel", 1) - 1
+                        current_nA = float(params.get("current_nA", -100000.0))
+                        dur = float(params.get("duration_s", 1200.0))
+                        label = params.get("block_label", "ForceCurrent")
+
+                        if hasattr(device, 'configure'):
+                            device.configure(mode="FIMV")
+
+                        sr = getattr(device, 'sample_rate', 1000.0) or 1000.0
+                        num_ch = len(getattr(device, 'channels', [])) or 2
+
+                        dev_raw_dir = self._run_path / "raw" / (device_name.replace(" ", "_"))
+                        dev_raw_dir.mkdir(parents=True, exist_ok=True)
+
+                        sink = ChunkWriter(
+                            sample_rate=sr,
+                            num_channels=num_ch,
+                            chunk_max_sec=RAW_CHUNK_SEC,
+                            buffer_bytes=CSV_FILE_BUFFER_BYTES,
+                            flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
+                        )
+                        sink.raw_chunks_dir = dev_raw_dir
+                        sink.filename_prefix = label
+                        sink._open_new_chunk_locked()
+
+                        device.start_acquisition()
+                        device.write_output(ch, current_nA / 1e9)
+
+                        deadline = time.perf_counter() + dur
+                        while time.perf_counter() < deadline and not self._abort and not self.isInterruptionRequested():
+                            if self._paused:
+                                pause_start = time.perf_counter()
+                                while self._paused and not self._abort and not self.isInterruptionRequested():
+                                    self.msleep(100)
+                                deadline += time.perf_counter() - pause_start
+                            try:
+                                data = device.read_data()
+                            except Exception:
+                                data = None
+                            if data is not None:
+                                arr = np.asarray(data)
+                                if arr.ndim == 2 and arr.shape[1] > 0:
+                                    sink.append_data(arr)
+                                    self.data_received.emit(device_name, arr)
+                            remaining = deadline - time.perf_counter()
+                            self.msleep(int(min(100, max(0, remaining * 1000))) if remaining > 0 else 10)
+
+                        sink.close()
+                        try:
+                            device.write_output(ch, 0.0)
+                        except Exception:
+                            pass
+                        try:
+                            device.stop_acquisition()
+                        except Exception:
+                            pass
+
                     elif action == "wait_input":
                         msg = params.get("message", "Click OK to continue")
                         self._input_result = None
