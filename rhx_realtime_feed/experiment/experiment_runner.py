@@ -6,6 +6,7 @@ import numpy as np
 
 from rhx_realtime_feed.workers.device_worker import RAW_CHUNK_SEC, CSV_FILE_BUFFER_BYTES, CSV_FLUSH_INTERVAL_SEC
 from rhx_realtime_feed.workers.chunk_writer import ChunkWriter
+from rhx_realtime_feed.telemetry_logger import append_telemetry_line
 
 
 class ExperimentRunner(QtCore.QObject):
@@ -126,6 +127,9 @@ class _RunnerThread(QtCore.QThread):
 
                 self.step_started.emit(step_idx, device_name, action, duration)
                 print(f"[Runner] Step {step_idx + 1}/{len(self._sequence)}: {device_name} → {action} ({duration}s)")
+                append_telemetry_line(
+                    f"step_start | {step_idx} | {device_name} | {action} | duration={duration}"
+                )
 
                 if device is None and action not in ("wait_input", "log_event", "start_recording", "stop_recording", "pause"):
                     self.error_occurred.emit(device_name or "__system__", f"Device '{device_name}' not found or not connected")
@@ -161,11 +165,17 @@ class _RunnerThread(QtCore.QThread):
                             buffer_bytes=CSV_FILE_BUFFER_BYTES,
                             flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
                         )
+                        label = params.get("block_label", "Stream")
                         sink.raw_chunks_dir = dev_raw_dir
-                        sink.filename_prefix = params.get("block_label", "Stream")
+                        sink.filename_prefix = label
                         sink._open_new_chunk_locked()
 
                         device.start_acquisition()
+                        append_telemetry_line(
+                            f"acq_start | {step_idx} | {device_name} | Stream | "
+                            f"ch={num_ch} sr={sr} label={label}"
+                        )
+                        first_chunk = True
 
                         deadline = time.perf_counter() + duration
                         while time.perf_counter() < deadline and not self._abort and not self.isInterruptionRequested() and getattr(device, 'connected', True):
@@ -182,12 +192,21 @@ class _RunnerThread(QtCore.QThread):
                             if data is not None:
                                 arr = np.asarray(data)
                                 if arr.ndim == 2 and arr.shape[1] > 0:
-                                    sink.append_data(arr)
+                                    marker_info = (
+                                        {0: {"id": step_idx + 1, "name": label}}
+                                        if first_chunk
+                                        else None
+                                    )
+                                    sink.append_data(arr, marker_info=marker_info)
                                     self.data_received.emit(device_name, arr)
+                                    first_chunk = False
                             remaining = deadline - time.perf_counter()
                             self.msleep(int(min(100, max(0, remaining * 1000))) if remaining > 0 else 10)
 
                         sink.close()
+                        append_telemetry_line(
+                            f"acq_end | {step_idx} | {device_name} | Stream | samples_in_chunk={sink._chunk_samples}"
+                        )
                         try:
                             device.stop_acquisition()
                         except Exception:
@@ -249,6 +268,11 @@ class _RunnerThread(QtCore.QThread):
                         sink._open_new_chunk_locked()
 
                         device.start_acquisition()
+                        append_telemetry_line(
+                            f"acq_start | {step_idx} | {device_name} | force_current | "
+                            f"current_nA={current_nA} ch={ch} dur={dur} label={label}"
+                        )
+                        first_chunk = True
                         device.write_output(ch, current_nA / 1e9)
 
                         deadline = time.perf_counter() + dur
@@ -265,12 +289,21 @@ class _RunnerThread(QtCore.QThread):
                             if data is not None:
                                 arr = np.asarray(data)
                                 if arr.ndim == 2 and arr.shape[1] > 0:
-                                    sink.append_data(arr)
+                                    marker_info = (
+                                        {0: {"id": step_idx + 1, "name": label}}
+                                        if first_chunk
+                                        else None
+                                    )
+                                    sink.append_data(arr, marker_info=marker_info)
                                     self.data_received.emit(device_name, arr)
+                                    first_chunk = False
                             remaining = deadline - time.perf_counter()
                             self.msleep(int(min(100, max(0, remaining * 1000))) if remaining > 0 else 10)
 
                         sink.close()
+                        append_telemetry_line(
+                            f"acq_end | {step_idx} | {device_name} | force_current | samples_in_chunk={sink._chunk_samples}"
+                        )
                         try:
                             device.write_output(ch, 0.0)
                         except Exception:
@@ -289,8 +322,7 @@ class _RunnerThread(QtCore.QThread):
                         print(f"[Runner] Wait input result: {self._input_result}")
 
                     elif action == "log_event":
-                        with open(self._run_path / "events.log", "a") as f:
-                            f.write(f"{time.time()},{params}\n")
+                        append_telemetry_line(f"log | {step_idx} | {device_name} | {params}")
                         print(f"[Runner] Log event: {params}")
 
                     elif action == "pause":
@@ -305,9 +337,13 @@ class _RunnerThread(QtCore.QThread):
 
                 except Exception as e:
                     self.error_occurred.emit(device_name, str(e))
+                    append_telemetry_line(
+                        f"step_error | {step_idx} | {device_name} | {action} | {e}"
+                    )
                     print(f"[Runner] Error in step {step_idx}: {e}")
 
                 self.step_completed.emit(step_idx, device_name, action)
+                append_telemetry_line(f"step_end | {step_idx} | {device_name} | {action} | ok")
 
                 # ponytail: busy-wait, replace with QWaitCondition if throughput matters
                 while self._paused and not self._abort and not self.isInterruptionRequested():

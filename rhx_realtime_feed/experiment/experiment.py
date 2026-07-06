@@ -202,10 +202,56 @@ class ExperimentManager:
         runs_dir.mkdir(parents=True, exist_ok=True)
         run_path = runs_dir / run_name
         run_path.mkdir(parents=True, exist_ok=True)
-        src = exp_path / "config.json"
-        if src.exists():
-            shutil.copy2(src, run_path / "config.json")
         return run_path
+
+    @staticmethod
+    def init_run(run_path: str | Path, config_data: dict, devices: list, sequence: list) -> Path:
+        run_path = Path(run_path)
+        run_json = {
+            "experiment": {
+                "name": config_data.get("metadata", {}).get("experiment_name", ""),
+                "version": config_data.get("metadata", {}).get("version", "1.0.0"),
+                "author": config_data.get("metadata", {}).get("author", ""),
+                "description": config_data.get("metadata", {}).get("description", ""),
+                "created_at": config_data.get("metadata", {}).get("created_at", ""),
+            },
+            "run": {
+                "name": run_path.name,
+                "start_time": datetime.now(timezone.utc).isoformat(),
+                "end_time": None,
+                "status": "running",
+                "device_count": len(devices),
+                "step_count": len(sequence),
+            },
+            "devices": devices,
+            "sequence": sequence,
+        }
+        path = run_path / "run.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(run_json, f, indent=2)
+        return path
+
+    @staticmethod
+    def update_run(run_path: str | Path, status: str, steps: list = None, error_count: int = 0):
+        path = Path(run_path) / "run.json"
+        if not path.exists():
+            return
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data["run"]["end_time"] = datetime.now(timezone.utc).isoformat()
+        data["run"]["status"] = status
+        if error_count:
+            data["run"]["error_count"] = error_count
+        if steps:
+            data["run"]["steps"] = steps
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+    @staticmethod
+    def load_run(run_path: str | Path) -> dict:
+        path = Path(run_path) / "run.json"
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
 
     @staticmethod
     def list_runs(experiment_path: str | Path) -> list[Path]:

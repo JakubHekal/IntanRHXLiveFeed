@@ -49,7 +49,8 @@ from qdarkstyle.dark.palette import DarkPalette
 from qdarkstyle.light.palette import LightPalette
 
 from rhx_realtime_feed.experiment import ExperimentManager, ExperimentDialog, RunExperimentDialog
-from rhx_realtime_feed.experiment.experiment import ExperimentConfig, SequenceStep
+from rhx_realtime_feed.experiment.experiment import ExperimentConfig, SequenceStep, _config_to_dict
+from rhx_realtime_feed.telemetry_logger import append_telemetry_line, set_telemetry_file
 from rhx_realtime_feed.experiment.experiment_runner import ExperimentRunner
 from rhx_realtime_feed.screens.legacy_main_window import LegacyMainWindow
 from rhx_realtime_feed.screens.plot_screen import PlotScreen
@@ -202,7 +203,9 @@ class LeftSidebar(QFrame):
         for rp in run_paths:
             if not rp.is_dir() or rp.name.startswith('.'):
                 continue
-            meta_file = rp / "metadata.json"
+            meta_file = rp / "run.json"
+            if not meta_file.exists():
+                meta_file = rp / "metadata.json"
             meta = {}
             if meta_file.exists():
                 try:
@@ -210,9 +213,16 @@ class LeftSidebar(QFrame):
                     meta = json.loads(meta_file.read_text())
                 except Exception:
                     pass
-            name = meta.get("name", rp.name)
-            ts = meta.get("timestamp", "")
-            status = meta.get("status", "unknown")
+            if "run" in meta:
+                run_data = meta["run"]
+                exp_data = meta.get("experiment", {})
+                name = exp_data.get("name", run_data.get("name", rp.name))
+                ts = run_data.get("start_time", "")
+                status = run_data.get("status", "unknown")
+            else:
+                name = meta.get("name", rp.name)
+                ts = meta.get("timestamp", "")
+                status = meta.get("status", "unknown")
             label = f"[{ts}] {name} \u2014 {status}" if ts else f"{name} \u2014 {status}"
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, str(rp))
@@ -1615,8 +1625,29 @@ class MainWindow(QMainWindow):
         self.main_stage.btn_pause.setEnabled(True)
         self.main_stage.btn_stop.setEnabled(True)
 
-        # save initial "running" metadata
-        self._save_run_metadata(True, status="running")
+        # init telemetry + run.json
+        set_telemetry_file(str(Path(self._current_run_path) / "run.log"))
+        append_telemetry_line(f"run_start | {exp_name}")
+        config = ExperimentManager.load(self._current_experiment_path)
+        devices_info = [
+            {"name": d[0], "device_type": d[2],
+             "config": d[3] if len(d) >= 4 else {},
+             "blocks": [
+                 {"label": b[0], "action": b[4] if len(b) >= 5 else b[0],
+                  "start_min": round(b[1], 1), "duration_min": round(b[2], 1)}
+                 for b in d[1]
+             ]}
+            for d in timeline_devs if d[2] != "__system__"
+        ]
+        sequence_info = [
+            {"step_id": s.step_id, "action": s.action,
+             "parameters": dict(s.parameters), "device_name": s.device_name}
+            for s in sequence
+        ]
+        ExperimentManager.init_run(
+            self._current_run_path, _config_to_dict(config),
+            devices_info, sequence_info,
+        )
         if self._current_experiment_path:
             self.main_stage.left_sidebar.reload_runs(
                 str(Path(self._current_experiment_path) / "runs")
@@ -1643,7 +1674,9 @@ class MainWindow(QMainWindow):
         self._exp_run_action.setEnabled(True)
         self.progress.setValue(0)
         self.main_stage.timeline.clear_active_step()
-        self._save_run_metadata(success)
+        status = "success" if success else "failed"
+        ExperimentManager.update_run(self._current_run_path, status)
+        append_telemetry_line(f"run_end | {status} | {message}")
         if self._current_experiment_path:
             self.main_stage.left_sidebar.reload_runs(
                 str(Path(self._current_experiment_path) / "runs")
@@ -1657,55 +1690,26 @@ class MainWindow(QMainWindow):
         self.main_stage.btn_stop.setEnabled(False)
         self._experiment_runner = None
 
-    def _save_run_metadata(self, success=None, status=None):
-        if not self._current_run_path:
-            return
-        import json, datetime
-        meta_path = Path(self._current_run_path) / "metadata.json"
-        if status is None:
-            status = "success" if success else "failed"
-
-        devices_info = []
-        for d in self.main_stage.timeline._devices:
-            if d[2] == "__system__":
-                continue
-            config = d[3] if len(d) >= 4 else {}
-            devices_info.append({
-                "name": d[0],
-                "device_type": d[2],
-                "config": {k: v for k, v in config.items() if not isinstance(v, (bytes, bytearray))},
-                "blocks": [
-                    {"label": b[0], "action": b[4] if len(b) >= 5 else b[0],
-                     "start_min": round(b[1], 1), "duration_min": round(b[2], 1)}
-                    for b in d[1]
-                ],
-            })
-
-        meta = {
-            "name": Path(self._current_experiment_path).name if self._current_experiment_path else "",
-            "timestamp": datetime.datetime.now().strftime("%Y%m%d_%H%M%S"),
-            "status": status,
-            "devices": devices_info,
-            "device_type": devices_info[0]["device_type"] if devices_info else "",
-            "sample_rate": 20000.0,
-            "num_channels": 1,
-        }
-        try:
-            meta_path.write_text(json.dumps(meta, indent=2))
-        except Exception:
-            pass
-
     def _on_replay_run(self, run_path):
         from rhx_realtime_feed.workers.replay_worker import ReplayWorker
-        meta_path = Path(run_path) / "metadata.json"
+        meta_path = Path(run_path) / "run.json"
         if not meta_path.exists():
-            QMessageBox.warning(self, "Replay", f"No metadata in {run_path}")
-            return
+            meta_path = Path(run_path) / "metadata.json"
+            if not meta_path.exists():
+                QMessageBox.warning(self, "Replay", f"No run data in {run_path}")
+                return
         import json
         meta = json.loads(meta_path.read_text())
-        device_type = meta.get("device_type", "rhx")
-        sr = meta.get("sample_rate", 20000.0)
-        nc = meta.get("num_channels", 1)
+        if "devices" in meta:
+            dev_info = meta.get("devices", [{}])[0]
+            device_type = dev_info.get("device_type", "rhx")
+            cfg = dev_info.get("config", {})
+            sr = cfg.get("sample_rate", 20000.0)
+            nc = cfg.get("num_channels", 1)
+        else:
+            device_type = meta.get("device_type", "rhx")
+            sr = meta.get("sample_rate", 20000.0)
+            nc = meta.get("num_channels", 1)
         replay_name = f"Replay: {Path(run_path).name}"
         self.main_stage.plot_screen.add_device(replay_name, device_type, sample_rate=sr, num_channels=nc)
         worker = ReplayWorker(run_path, replay_name, self)
