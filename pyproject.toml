@@ -10,7 +10,8 @@ dependencies = [
     "pandas>=1.1.0",
     "scipy>=1.5.0",
     "matplotlib>=3.3.0",
-    "minismu-py>=0.1.0"
+    "minismu-py>=0.1.0",
+    "qdarkstyle>=3.2.0"
 ]
 
 [build-system]
