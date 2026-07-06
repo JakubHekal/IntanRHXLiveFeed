@@ -79,10 +79,11 @@ class NeuralDeviceTab(DeviceTab):
         self.is_receiving = False
         self._receiving_wall_active_sec = 0.0
         self._receiving_wall_run_start = None
-        self._spike_times_cache = []
-        self._last_spike_scan_sample = 0
+        self._pending_channel = 0
+        self._channel_results: dict[int, _Result] = {}
+        self._spike_times_cache: dict[int, list] = {}
+        self._last_spike_scan_sample: dict[int, int] = {}
         self._last_proc_abs_start = 0
-        self._proc_result = None
         self._psd_buffer_sec = load_plot_setting("psd_buffer_sec", DEFAULT_PSDS)
         self._waveform_buffer_sec = load_plot_setting("waveform_buffer_sec", DEFAULT_WAVEFORM)
         self._spike_bin_sec = load_plot_setting("spike_bin_sec", DEFAULT_SPIKE_BIN)
@@ -351,7 +352,9 @@ class NeuralDeviceTab(DeviceTab):
         self._channel_combo.blockSignals(False)
         if self._current_channel_idx >= self.num_channels:
             self._current_channel_idx = 0
-        self._last_spike_scan_sample = 0
+        self._channel_results.clear()
+        self._spike_times_cache.clear()
+        self._last_spike_scan_sample.clear()
 
     def on_data(self, chunk: np.ndarray):
         ingest_t0 = time.perf_counter()
@@ -384,14 +387,15 @@ class NeuralDeviceTab(DeviceTab):
         do_psd = (self.psd_update_counter % max(1, PSD_PLOT_UPDATE_EVERY_N) == 0)
         do_spike = (self.spike_plot_frame_counter % max(1, SPIKE_PLOT_UPDATE_EVERY_N) == 0)
 
-        if self._proc_result is None:
+        if self._channel_results.get(self._current_channel_idx) is None:
             do_psd = do_spike = True
 
         ch = self._current_channel_idx
-        if ch >= use_ch:
+        if ch >= self.num_channels:
             ch = 0
 
-        gap = self._total - self._last_spike_scan_sample
+        last_scan = self._last_spike_scan_sample.get(ch, 0)
+        gap = self._total - last_scan
         should_run_spike = do_spike and (gap >= SPIKE_INCREMENTAL_MIN_SAMPLES)
         should_run_psd = do_psd
 
@@ -405,13 +409,14 @@ class NeuralDeviceTab(DeviceTab):
 
                 t_tail, sig_tail = self._ring_read_tail(tail_n, ch_idx=ch)
                 abs_start = self._total - t_tail.size
-                rel_last = max(0, int(self._last_spike_scan_sample - abs_start))
+                rel_last = max(0, int(last_scan - abs_start))
                 rel_last = min(rel_last, t_tail.size)
                 self._last_proc_abs_start = abs_start
+                self._pending_channel = ch
 
                 self._proc_worker.schedule(
                     sig_tail.copy(), t_tail.copy(), self.sampling_rate,
-                    list(self._spike_times_cache),
+                    list(self._spike_times_cache.get(ch, [])),
                     rel_last, t_tail.size,
                     do_psd=should_run_psd, do_spike=True,
                 )
@@ -419,6 +424,7 @@ class NeuralDeviceTab(DeviceTab):
                 psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec)))
                 t_tail, sig_tail = self._ring_read_tail(psd_n, ch_idx=ch)
                 self._last_proc_abs_start = self._total - t_tail.size
+                self._pending_channel = ch
                 self._proc_worker.schedule(
                     sig_tail.copy(), t_tail.copy(), self.sampling_rate,
                     [], 0, sig_tail.size,
@@ -475,15 +481,17 @@ class NeuralDeviceTab(DeviceTab):
         del y_hist[:excess]
 
     def _on_processing_result(self, result):
-        self._proc_result = result
+        ch = self._pending_channel
+        self._channel_results[ch] = result
         if result.spike_times_cache is not None:
-            self._spike_times_cache = result.spike_times_cache
+            self._spike_times_cache[ch] = result.spike_times_cache
         if result.last_scan_sample is not None:
-            self._last_spike_scan_sample = self._last_proc_abs_start + int(result.last_scan_sample)
-        if getattr(result, 'has_psd_update', False) and result.psd_f is not None:
-            self._psd_pending = True
-        if getattr(result, 'has_spike_update', False) and result.spike_minute_idx is not None:
-            self._spike_pending = True
+            self._last_spike_scan_sample[ch] = self._last_proc_abs_start + int(result.last_scan_sample)
+        if ch == self._current_channel_idx:
+            if getattr(result, 'has_psd_update', False) and result.psd_f is not None:
+                self._psd_pending = True
+            if getattr(result, 'has_spike_update', False) and result.spike_minute_idx is not None:
+                self._spike_pending = True
 
     def _on_expensive_task_result(self, result):
         task_type = str(result.get("task_type", ""))
@@ -501,10 +509,11 @@ class NeuralDeviceTab(DeviceTab):
             minute_idx = np.asarray(data.get("minute_idx", []), dtype=np.float64)
             counts = np.asarray(data.get("counts", []), dtype=np.int64)
             if minute_idx.size and counts.size and minute_idx.size == counts.size:
-                if self._proc_result is None:
-                    self._proc_result = _Result()
-                self._proc_result.spike_minute_idx = minute_idx
-                self._proc_result.spike_counts = counts
+                ch = self._current_channel_idx
+                if ch not in self._channel_results:
+                    self._channel_results[ch] = _Result()
+                self._channel_results[ch].spike_minute_idx = minute_idx
+                self._channel_results[ch].spike_counts = counts
                 self._spike_pending = True
 
     def _schedule_spike_rebin_task(self):
@@ -516,7 +525,7 @@ class NeuralDeviceTab(DeviceTab):
             "task_type": "spike_rebin",
             "task_id": task_id,
             "session_id": int(self._session_id),
-            "spike_times": list(self._spike_times_cache),
+            "spike_times": list(self._spike_times_cache.get(self._current_channel_idx, [])),
             "bin_sec": float(self._spike_bin_sec),
             "last_time_s": float(self.sample_counter) / max(float(self.sampling_rate), 1e-9),
         }
@@ -644,9 +653,10 @@ class NeuralDeviceTab(DeviceTab):
             else:
                 history_end = 0.0
                 history_start = 0.0
-                if self._raw_hist_t_low:
-                    history_start = float(self._raw_hist_t_low[0])
-                    history_end = float(self._raw_hist_t_low[-1])
+                ch = self._current_channel_idx
+                if ch < len(self._raw_hist_t_low) and self._raw_hist_t_low[ch]:
+                    history_start = float(self._raw_hist_t_low[ch][0])
+                    history_end = float(self._raw_hist_t_low[ch][-1])
                     self.canvas.raw_plot.setLimits(xMin=max(0.0, history_start), xMax=max(0.0, history_end + 0.1))
                 vr = self.canvas.raw_plot.vb.viewRange()[0]
                 x_start = float(vr[0]) if len(vr) >= 2 else 0.0
@@ -697,7 +707,7 @@ class NeuralDeviceTab(DeviceTab):
             self._sync_marker_lines(max(0.0, min(x_start, x_end)), max(0.0, max(x_start, x_end)))
             self._last_raw_render_t = now
 
-        r = self._proc_result
+        r = self._channel_results.get(self._current_channel_idx)
         if r is not None and self._psd_pending and (now - self._last_psd_render_t) >= 1.0 / PSD_RENDER_HZ:
             did_work = True
             if r.psd_f is not None and r.psd_db is not None:
@@ -781,10 +791,10 @@ class NeuralDeviceTab(DeviceTab):
         self.sample_counter = 0
         self.marker_records = []
         self._marker_times_sorted = []
-        self._spike_times_cache = []
-        self._last_spike_scan_sample = 0
+        self._channel_results.clear()
+        self._spike_times_cache.clear()
+        self._last_spike_scan_sample.clear()
         self._last_proc_abs_start = 0
-        self._proc_result = None
         self._latest_psd_f = None
         self._latest_psd_db = None
         self._latest_wf_t_ms = None
