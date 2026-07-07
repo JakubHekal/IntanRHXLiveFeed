@@ -109,17 +109,25 @@ class LeftSidebar(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         header = QLabel("Run History")
+        header.setStyleSheet("padding: 8px;")
         layout.addWidget(header)
+
+        self._empty_label = QLabel("No runs yet.")
+        self._empty_label.setAlignment(Qt.AlignCenter)
+        self._empty_label.setWordWrap(True)
+        self._empty_label.setStyleSheet("color: #6C6C6C; padding: 40px 16px; border: 1px solid #3E3E3E; border-radius: 4px; margin: 8px;")
+        layout.addWidget(self._empty_label)
 
         self.run_list = QListWidget()
         self.run_list.setAlternatingRowColors(True)
         self.run_list.itemDoubleClicked.connect(self._on_run_activated)
         self.run_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.run_list.customContextMenuRequested.connect(self._on_run_context_menu)
+        self.run_list.hide()
         layout.addWidget(self.run_list, 1)
 
         self.setMinimumWidth(260)
@@ -146,6 +154,8 @@ class LeftSidebar(QFrame):
     def reload_runs(self, runs_dir):
         self.run_list.clear()
         if not runs_dir or not __import__('pathlib').Path(runs_dir).exists():
+            self._empty_label.setVisible(True)
+            self.run_list.setVisible(False)
             return
         from pathlib import Path
         run_paths = sorted(Path(runs_dir).iterdir(), reverse=True)
@@ -181,6 +191,9 @@ class LeftSidebar(QFrame):
                 item.setFont(f)
                 item.setForeground(QColor("#00FF00"))
             self.run_list.addItem(item)
+        has_runs = self.run_list.count() > 0
+        self._empty_label.setVisible(not has_runs)
+        self.run_list.setVisible(has_runs)
 
 
 class RightSidebar(QFrame):
@@ -210,6 +223,12 @@ class RightSidebar(QFrame):
         form_layout = QVBoxLayout(container)
         form_layout.setContentsMargins(0, 0, 0, 0)
         form_layout.setSpacing(4)
+
+        self._placeholder = QLabel("Select a block or device\nto edit its properties.")
+        self._placeholder.setAlignment(Qt.AlignCenter)
+        self._placeholder.setWordWrap(True)
+        self._placeholder.setStyleSheet("color: #6C6C6C; padding: 40px 16px; border: 1px solid #3E3E3E; border-radius: 4px;")
+        form_layout.addWidget(self._placeholder)
 
         self._block_expander = FluentExpander("Block Properties", expanded=True)
         self._bp_widget = QWidget()
@@ -365,12 +384,25 @@ class RightSidebar(QFrame):
                 break
         self._bp_sep.setVisible(visible)
 
+    def _update_visibility(self):
+        has_block = self._block_dev_idx >= 0 and self._block_idx >= 0
+        has_device = self._device_idx >= 0
+        self._placeholder.setVisible(not has_block and not has_device)
+        self._block_expander.setVisible(has_block)
+        self._device_expander.setVisible(has_device)
+
     def set_block_info(self, dev_idx, block_idx, display_name, op_name, start, duration, params=None, device_type=""):
         self._updating = True
         self._block_dev_idx = dev_idx
         self._block_idx = block_idx
-        self._block_op_name = op_name
         self._device_idx = -1
+
+        if dev_idx < 0 or block_idx < 0:
+            self._update_visibility()
+            self._updating = False
+            return
+
+        self._block_op_name = op_name
         self._block_name.setText(display_name)
         self._block_start.setValue(start)
         self._block_dur.setValue(duration)
@@ -394,8 +426,7 @@ class RightSidebar(QFrame):
         self._populate_dynamic_form(self._bp_dynamic_layout, param_defs, params or {}, self._block_param_widgets)
         self._connect_param_signals(self._block_param_widgets, self._emit_block_params)
 
-        self._device_expander.hide()
-        self._block_expander.show()
+        self._update_visibility()
         self._updating = False
 
     def set_device_info(self, dev_idx, device_type, config):
@@ -403,6 +434,12 @@ class RightSidebar(QFrame):
         self._device_idx = dev_idx
         self._block_dev_idx = -1
         self._block_idx = -1
+
+        if dev_idx < 0:
+            self._update_visibility()
+            self._updating = False
+            return
+
         label = f"Device: {device_type}" if device_type else "Device Properties"
         self._device_expander._title_label.setText(label)
 
@@ -411,8 +448,7 @@ class RightSidebar(QFrame):
         self._populate_dynamic_form(self._dp_form, param_defs, config or {}, self._device_param_widgets)
         self._connect_param_signals(self._device_param_widgets, self._emit_device_params)
 
-        self._block_expander.hide()
-        self._device_expander.show()
+        self._update_visibility()
         self._updating = False
 
     def _on_block_field_changed(self, *args):

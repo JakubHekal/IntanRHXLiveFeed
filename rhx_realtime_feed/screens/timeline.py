@@ -23,28 +23,7 @@ class ExperimentTimeline(QWidget):
         super().__init__(parent)
         self.setMouseTracking(True)
         self._device_counter = 0
-        self._devices = [
-            ["Intan RHX (Port A)", [
-                ["Configure", 0.0, 0, "#2B88D8", "Configure", {}],
-                ["Stream", 1.0, 14.0, "#4BA3E3", "Stream", {}],
-                ["Stimulus", 8.0, 3.0, "#D13438", "Stimulus", {"channel": 1, "amplitude": 500.0, "waveform": "biphasic", "frequency": 100.0}],
-            ], "rhx", {"host": "127.0.0.1", "command_port": 5000, "data_port": 5001, "num_channels": 128, "buffer_duration_sec": 5.0}],
-            ["Intan RHX (Port B)", [
-                ["Configure", 0.0, 0, "#2B88D8", "Configure", {}],
-                ["Stream", 1.0, 15.0, "#4BA3E3", "Stream", {}],
-            ], "rhx", {"host": "127.0.0.1", "command_port": 5000, "data_port": 5001, "num_channels": 64, "buffer_duration_sec": 5.0}],
-            ["miniSMU MS01", [
-                ["Configure", 0.0, 0, "#E74856", "Configure", {}],
-                ["Stimulus", 2.0, 6.0, "#F1707A", "Stimulus", {"voltage": 5.0, "current_limit": 0.1, "duration_s": 1.0}],
-                ["Measure", 8.0, 0, "#E74856", "Measure", {}],
-            ], "smu", {"connection_type": "usb", "port": "COM3", "host": "192.168.1.1", "tcp_port": 3333, "mode": "FVMI"}],
-            ["Simulated Actor", [
-                ["Configure", 0.0, 0, "#B146C2", "Configure", {}],
-                ["Write", 3.0, 3.0, "#C239B3", "Write", {"channel": 1, "value": 5.0}],
-                ["Trigger", 6.0, 0.5, "#8764B8", "Trigger", {"channel": 1}],
-            ], "simulated_actor", {"num_outputs": 2}],
-        ]
-        self._devices.append(["__System__", [], "__system__", {}])
+        self._devices = []
         self._sel_dev = None
         self._sel_block = None
         self._active_dev = None
@@ -61,7 +40,7 @@ class ExperimentTimeline(QWidget):
     def _update_height(self):
         per_device = self.FLAG_HEIGHT + self.ROW_HEIGHT
         h = self.HEADER_HEIGHT + 6 + len(self._devices) * per_device + 16
-        self.setMinimumHeight(h)
+        self.setMinimumHeight(max(h, 200))
 
     def _row_at(self, my):
         if my < self.HEADER_HEIGHT + 6:
@@ -258,6 +237,8 @@ class ExperimentTimeline(QWidget):
                         if ok2:
                             self.add_device(name.strip() or cls.name, type_str)
                 elif action in sys_actions:
+                    if not self._devices or self._devices[-1][2] != "__system__":
+                        self._devices.append(["__System__", [], "__system__", {}])
                     self.add_block(len(self._devices) - 1, sys_actions[action])
 
     def _update_total_time(self):
@@ -480,6 +461,15 @@ class ExperimentTimeline(QWidget):
             x = plot_left + int((i / num_ticks) * plot_w)
             painter.drawLine(x, self.HEADER_HEIGHT, x, self.HEADER_HEIGHT + 4)
             painter.drawText(x - 10, self.HEADER_HEIGHT + 16, str(i * 2))
+
+        if not any(d[2] != "__system__" or d[1] for d in self._devices):
+            fnt = self.font()
+            fnt.setPointSize(11)
+            painter.setFont(fnt)
+            painter.setPen(QColor("#6C6C6C"))
+            data_rect = QRect(0, self.HEADER_HEIGHT + 6, w, rect.height() - self.HEADER_HEIGHT - 6)
+            painter.drawText(data_rect, Qt.AlignCenter, "No devices configured.\nRight-click to add a device.")
+            return
 
         per_device = self.FLAG_HEIGHT + self.ROW_HEIGHT
         rows_top = self.HEADER_HEIGHT + 6

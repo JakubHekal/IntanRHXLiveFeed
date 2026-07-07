@@ -33,6 +33,12 @@ class PlotScreen(QtWidgets.QWidget):
         self.tab_widget.tabCloseRequested.connect(self._on_tab_close_requested)
         layout.addWidget(self.tab_widget, 1)
 
+        self._empty_label = QtWidgets.QLabel("No data sources.\nAdd a device to begin.")
+        self._empty_label.setAlignment(QtCore.Qt.AlignCenter)
+        self._empty_label.setWordWrap(True)
+        self._empty_label.setStyleSheet("color: #6C6C6C; padding: 40px 16px; font-size: 13px;")
+        layout.addWidget(self._empty_label, 1)
+
         pg.setConfigOption('background', 'white')
         pg.setConfigOption('foreground', 'black')
         pg.setConfigOption('antialias', True)
@@ -45,6 +51,9 @@ class PlotScreen(QtWidgets.QWidget):
         self._fps_frame_count = 0
         self._fps_last_t = time.perf_counter()
         self._render_dur_ms = 0.0
+
+        self._empty_label.show()
+        self.tab_widget.hide()
 
     def _on_tab_close_requested(self, index):
         widget = self.tab_widget.widget(index)
@@ -68,6 +77,8 @@ class PlotScreen(QtWidgets.QWidget):
             tab = NeuralDeviceTab(sample_rate=sample_rate, num_channels=num_channels, channel_labels=channel_labels, parent=self)
         self._tabs[name] = tab
         self.tab_widget.addTab(tab, name)
+        self._empty_label.hide()
+        self.tab_widget.show()
         self._update_tab_bar_visibility()
 
     def remove_device(self, name):
@@ -80,6 +91,9 @@ class PlotScreen(QtWidgets.QWidget):
         tab.shutdown()
         tab.deleteLater()
         self._update_tab_bar_visibility()
+        if not self._tabs:
+            self._empty_label.show()
+            self.tab_widget.hide()
 
     def on_device_configured(self, device_name: str, num_channels: int, channel_labels: list[str]):
         tab = self._tabs.get(device_name)
@@ -89,6 +103,9 @@ class PlotScreen(QtWidgets.QWidget):
     def clear_all(self):
         for name in list(self._tabs):
             self.remove_device(name)
+        if not self._tabs:
+            self._empty_label.show()
+            self.tab_widget.hide()
 
     def _active_tab(self):
         widget = self.tab_widget.currentWidget()
