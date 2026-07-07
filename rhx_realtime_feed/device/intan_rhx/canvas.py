@@ -2,18 +2,13 @@ import pyqtgraph as pg
 from PyQt5 import QtWidgets, QtCore, QtGui
 
 from rhx_realtime_feed.workers.processing_worker import (
-    PSD_BUFFER_SEC,
-    SPIKE_BIN_SEC,
-    WAVEFORM_BUFFER_SEC,
-    PSD_YLIM_MIN,
-    PSD_YLIM_MAX,
+    PSD_BUFFER_SEC, SPIKE_BIN_SEC, WAVEFORM_BUFFER_SEC,
+    PSD_YLIM_MIN, PSD_YLIM_MAX,
 )
 from rhx_realtime_feed.screens.plot_helpers import WAVEFORM_YLIM_ABS_UV
 
 
 class PgCanvas(QtWidgets.QWidget):
-    """Four pyqtgraph plots: Raw (top, full width) + PSD / Spike counts / Waveform (bottom row)."""
-
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
@@ -65,14 +60,11 @@ class PgCanvas(QtWidgets.QWidget):
 
         self.wf_upper = self.wf_plot.plot(pen=None)
         self.wf_lower = self.wf_plot.plot(pen=None)
-        self.wf_fill  = pg.FillBetweenItem(
-            self.wf_upper, self.wf_lower,
-            brush=pg.mkBrush(80, 200, 120, 50),
-        )
+        self.wf_fill  = pg.FillBetweenItem(self.wf_upper, self.wf_lower, brush=pg.mkBrush(80, 200, 120, 50))
         self.wf_plot.addItem(self.wf_fill)
 
-        self._marker_lines    = []
-        self._marker_pen      = pg.mkPen(color='crimson', style=QtCore.Qt.DashLine, width=1)
+        self._marker_lines = []
+        self._marker_pen = pg.mkPen(color='crimson', style=QtCore.Qt.DashLine, width=1)
         self._last_marker_set = []
         self._marker_labels = []
         self._spike_marker_lines = []

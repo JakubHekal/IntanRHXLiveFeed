@@ -1,7 +1,8 @@
 import numpy as np
 from typing import Optional, List, Union
 
-from .device import Device, ChannelInfo
+from ..base import Device, ChannelInfo
+from .tab import SmuDeviceTab
 from rhx_realtime_feed.telemetry_logger import append_telemetry_line
 
 from minismu_py import SMU as MiniSMU, ConnectionType, SMUException
@@ -10,7 +11,6 @@ from minismu_py import SMU as MiniSMU, ConnectionType, SMUException
 def _smu_tel(event: str, *details):
     line = f"minismu | {event}" + (" | " + " | ".join(str(d) for d in details) if details else "")
     append_telemetry_line(line)
-    print(line)
 
 
 class MiniSMUDevice(Device):
@@ -161,7 +161,7 @@ class MiniSMUDevice(Device):
 
     @classmethod
     def get_operations(cls):
-        from .device import DeviceOperation, ParamDef
+        from ..base import DeviceOperation, ParamDef
         return [
             DeviceOperation("configure", "Configure", instantaneous=True, default_duration=0, color="#E74856", params=[
                 ParamDef("current_protection", "Current Protection (A)", "float", default=0.1, min_val=0.001, max_val=1.0),
@@ -184,10 +184,14 @@ class MiniSMUDevice(Device):
 
     @classmethod
     def get_config_params(cls):
-        from .device import ParamDef
+        from ..base import ParamDef
         return [
             ParamDef("connection_type", "Connection Type", "choice", default="usb", choices=["usb", "network"]),
             ParamDef("port", "Port", "str", default="COM3"),
             ParamDef("host", "Host", "str", default="192.168.1.1"),
             ParamDef("tcp_port", "TCP Port", "int", default=3333, min_val=1024, max_val=65535),
         ]
+
+    @classmethod
+    def get_tab_class(cls):
+        return SmuDeviceTab

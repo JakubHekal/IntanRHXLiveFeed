@@ -2,7 +2,9 @@ import time
 import numpy as np
 import threading
 from typing import Optional, List, Union
-from .device import Device, ChannelInfo
+
+from ..base import Device, ChannelInfo
+from .tab import SimpleDeviceTab
 
 
 class SimulatedRecordingDevice(Device):
@@ -95,7 +97,7 @@ class SimulatedRecordingDevice(Device):
 
     @classmethod
     def get_operations(cls):
-        from .device import DeviceOperation
+        from ..base import DeviceOperation
         return [
             DeviceOperation("Configure", "Configure", instantaneous=True, default_duration=0, color="#2B88D8"),
             DeviceOperation("Stream", "Stream", default_duration=12.0, color="#4BA3E3"),
@@ -103,7 +105,7 @@ class SimulatedRecordingDevice(Device):
 
     @classmethod
     def get_config_params(cls):
-        from .device import ParamDef
+        from ..base import ParamDef
         return [
             ParamDef("sample_rate", "Sample Rate (Hz)", "int", default=20000, min_val=1000, max_val=50000),
             ParamDef("num_channels", "Num Channels", "int", default=1, min_val=1, max_val=256),
@@ -111,6 +113,10 @@ class SimulatedRecordingDevice(Device):
             ParamDef("frequency", "Frequency (Hz)", "float", default=10.0, min_val=0.1, max_val=1000.0),
             ParamDef("noise_level", "Noise Level (µV)", "float", default=10.0, min_val=0.0, max_val=500.0),
         ]
+
+    @classmethod
+    def get_tab_class(cls):
+        return SimpleDeviceTab
 
 
 class SimulatedActorDevice(Device):
@@ -166,7 +172,7 @@ class SimulatedActorDevice(Device):
 
     @classmethod
     def get_operations(cls):
-        from .device import DeviceOperation, ParamDef
+        from ..base import DeviceOperation, ParamDef
         return [
             DeviceOperation("Configure", "Configure", instantaneous=True, default_duration=0, color="#B146C2"),
             DeviceOperation("Write", "Write", default_duration=2.0, color="#C239B3", params=[
@@ -180,10 +186,14 @@ class SimulatedActorDevice(Device):
 
     @classmethod
     def get_config_params(cls):
-        from .device import ParamDef
+        from ..base import ParamDef
         return [
             ParamDef("num_outputs", "Num Outputs", "int", default=2, min_val=1, max_val=64),
         ]
+
+    @classmethod
+    def get_tab_class(cls):
+        return SimpleDeviceTab
 
 
 class SimulatedCombinedDevice(Device):
@@ -247,7 +257,7 @@ class SimulatedCombinedDevice(Device):
 
     @classmethod
     def get_operations(cls):
-        from .device import DeviceOperation, ParamDef
+        from ..base import DeviceOperation, ParamDef
         return [
             DeviceOperation("Configure", "Configure", instantaneous=True, default_duration=0, color="#2B88D8"),
             DeviceOperation("Stream", "Stream", default_duration=10.0, color="#4BA3E3"),
@@ -262,9 +272,13 @@ class SimulatedCombinedDevice(Device):
 
     @classmethod
     def get_config_params(cls):
-        from .device import ParamDef
+        from ..base import ParamDef
         return [
             ParamDef("sample_rate", "Sample Rate (Hz)", "int", default=10000, min_val=1000, max_val=50000),
             ParamDef("num_inputs", "Num Inputs", "int", default=2, min_val=1, max_val=256),
             ParamDef("num_outputs", "Num Outputs", "int", default=2, min_val=1, max_val=64),
         ]
+
+    @classmethod
+    def get_tab_class(cls):
+        return SimpleDeviceTab

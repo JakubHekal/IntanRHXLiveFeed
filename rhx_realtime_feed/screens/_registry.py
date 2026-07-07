@@ -1,13 +1,6 @@
-from rhx_realtime_feed.device import (
-    IntanRHXDevice, SimulatedRecordingDevice, SimulatedActorDevice,
-    SimulatedCombinedDevice, MiniSMUDevice, DeviceOperation, ParamDef,
-)
+from rhx_realtime_feed.device import _PLUGIN_REGISTRY, DeviceOperation, ParamDef
 
-_DEVICE_CLASSES = {}
-def _build_registry():
-    for cls in [IntanRHXDevice, SimulatedRecordingDevice, SimulatedActorDevice, SimulatedCombinedDevice, MiniSMUDevice]:
-        _DEVICE_CLASSES[cls.device_type] = cls
-_build_registry()
+_DEVICE_CLASSES = dict(_PLUGIN_REGISTRY)
 
 _SYSTEM_OPERATIONS = [
     DeviceOperation("wait_input", "Wait for User Input", instantaneous=True, default_duration=0, color="#FFD700", params=[

@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
-from .channel_selector import ChannelSelector
+from rhx_realtime_feed.device.widget_builder import build_param_widget, read_param_widget
 from .timeline import ExperimentTimeline
 from .plot_screen import PlotScreen
 
@@ -293,81 +293,17 @@ class RightSidebar(QFrame):
         self._device_expander.hide()
         self._update_visibility()
 
-    def _build_param_widget(self, param_def, current_value):
-        value = current_value if current_value is not None else param_def.default
-        if param_def.dtype == "float":
-            w = QDoubleSpinBox()
-            w.setRange(param_def.min_val or -1e6, param_def.max_val or 1e6)
-            w.setDecimals(3)
-            w.setValue(float(value or 0.0))
-            return w
-        elif param_def.dtype == "int":
-            w = QSpinBox()
-            w.setRange(int(param_def.min_val or 0), int(param_def.max_val or 999999))
-            w.setValue(int(value or 0))
-            return w
-        elif param_def.dtype == "bool":
-            w = QCheckBox()
-            w.setChecked(bool(value))
-            return w
-        elif param_def.dtype == "choice":
-            w = QComboBox()
-            w.addItems(param_def.choices or [])
-            if value in (param_def.choices or []):
-                w.setCurrentText(value)
-            return w
-        elif param_def.dtype == "channel_list":
-            w = ChannelSelector()
-            w.setValue(str(value or ""))
-            return w
-        else:
-            w = QLineEdit(str(value or ""))
-            return w
-
-    def _read_param_widget(self, param_def, widget):
-        if param_def.dtype == "float":
-            return widget.value()
-        elif param_def.dtype == "int":
-            return widget.value()
-        elif param_def.dtype == "bool":
-            return widget.isChecked()
-        elif param_def.dtype == "choice":
-            return widget.currentText()
-        elif param_def.dtype == "channel_list":
-            return widget.value()
-        else:
-            return widget.text()
-
-    def _clear_layout(self, layout):
-        while layout.count():
-            item = layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
     def _populate_dynamic_form(self, form_layout, param_defs, current_values, store):
-        self._clear_layout(form_layout)
-        store.clear()
-        for pd in param_defs:
-            val = current_values.get(pd.name, pd.default)
-            w = self._build_param_widget(pd, val)
-            form_layout.addRow(pd.label, w)
-            store.append((pd.name, w, pd))
+        from rhx_realtime_feed.device.widget_builder import populate_form_from_params
+        populate_form_from_params(form_layout, param_defs, current_values, store)
 
     def _connect_param_signals(self, store, slot):
-        for name, w, pd in store:
-            if isinstance(w, (QDoubleSpinBox, QSpinBox)):
-                w.valueChanged.connect(slot)
-            elif isinstance(w, QCheckBox):
-                w.stateChanged.connect(slot)
-            elif isinstance(w, QComboBox):
-                w.currentTextChanged.connect(slot)
-            elif isinstance(w, QLineEdit):
-                w.textChanged.connect(slot)
-            elif isinstance(w, ChannelSelector):
-                w.valueChanged.connect(slot)
+        from rhx_realtime_feed.device.widget_builder import connect_param_signals
+        connect_param_signals(store, slot)
 
     def _gather_params(self, store):
-        return {name: self._read_param_widget(pd, w) for name, w, pd in store}
+        from rhx_realtime_feed.device.widget_builder import gather_params
+        return gather_params(store)
 
     def _emit_block_params(self):
         if self._block_dev_idx < 0 or self._block_idx < 0:

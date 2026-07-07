@@ -20,8 +20,8 @@ from rhx_realtime_feed.workers.processing_worker import (
 )
 from rhx_realtime_feed.workers.expensive_task_worker import ExpensiveTaskWorker
 from rhx_realtime_feed.screens.plot_helpers import (
-    _make_display_buffer, _minmax_downsample,
-    DISPLAY_WINDOW_SEC, DISPLAY_BUFFER_SEC, DEFAULT_SAMPLING_RATE,
+    _minmax_downsample,
+    DISPLAY_WINDOW_SEC, DEFAULT_SAMPLING_RATE,
     MAX_DISPLAY_POINTS, PLOT_UPDATE_FREQ_HZ, RAW_RENDER_HZ, PSD_RENDER_HZ, SPIKE_RENDER_HZ,
     WAVEFORM_YLIM_ABS_UV, SPIKE_SCROLL_WINDOW_MIN,
     RAW_HISTORY_TARGET_HZ, RAW_HISTORY_HIGH_TARGET_HZ,
@@ -29,46 +29,15 @@ from rhx_realtime_feed.screens.plot_helpers import (
     RAW_MANUAL_VIEW_MARGIN_SEC, MAX_RAW_HISTORY_PLOT_POINTS,
     PSD_PLOT_UPDATE_EVERY_N, SPIKE_PLOT_UPDATE_EVERY_N,
 )
-from rhx_realtime_feed.screens.pg_canvas import PgCanvas
-from rhx_realtime_feed.screens.smu_canvas import SmuCanvas
 from rhx_realtime_feed.telemetry_logger import append_telemetry_line
+from rhx_realtime_feed.device.tabs.base import DeviceTab
+from rhx_realtime_feed.device.ring_buffer import RingBuffer
+from .canvas import PgCanvas
 
-
-class DeviceTab(QtWidgets.QWidget):
-    """Base class for a device's plot tab."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._clear_requested = False
-        self._render_requested = False
-
-    def on_data(self, chunk: np.ndarray):
-        raise NotImplementedError
-
-    def render(self):
-        raise NotImplementedError
-
-    def clear(self):
-        raise NotImplementedError
-
-    def shutdown(self) -> bool:
-        raise NotImplementedError
-
-    def set_connection_details(self, host="", command_port=0, data_port=0, sample_rate=0, project_name=""):
-        pass
-
-    def set_receiving_state(self, receiving: bool):
-        pass
-
-    def request_render(self):
-        self._render_requested = True
-
-
-# ── NeuralDeviceTab ─────────────────────────────────────────────────────────
 
 class NeuralDeviceTab(DeviceTab):
-    def __init__(self, sample_rate=float(DEFAULT_SAMPLING_RATE), num_channels=1, channel_labels=None, parent=None):
-        super().__init__(parent)
+    def __init__(self, sample_rate=float(DEFAULT_SAMPLING_RATE), num_channels=1, channel_labels=None, parent=None, **kwargs):
+        super().__init__(parent, **kwargs)
         self.sampling_rate = sample_rate
         self.num_channels = num_channels
         self._current_channel_idx = 0
@@ -104,10 +73,7 @@ class NeuralDeviceTab(DeviceTab):
         self._suspend_follow_detection = False
         self._psd_snapshot_curves = []
         self._wf_snapshot_curves = []
-        self._ring = _make_display_buffer(self.sampling_rate, self.num_channels)
-        self._cap = self._ring.shape[1]
-        self._wpos = 0
-        self._total = 0
+        self._ring = RingBuffer(self.sampling_rate, self.num_channels, DISPLAY_WINDOW_SEC)
         self._last_raw_render_t = 0.0
         self._last_psd_render_t = 0.0
         self._last_spike_render_t = 0.0
@@ -119,15 +85,6 @@ class NeuralDeviceTab(DeviceTab):
         self._task_id_counter = 0
         self._active_expensive_task_id = {}
         self._render_dur_ms = 0.0
-        self._telemetry_last_emit = time.perf_counter()
-        self._telemetry_emit_interval_sec = 5.0
-        self._telemetry_chunks = 0
-        self._telemetry_samples = 0
-        self._telemetry_render_calls = 0
-        self._telemetry_raw_renders = 0
-        self._telemetry_render_ms_total = 0.0
-        self._telemetry_ingest_ms_total = 0.0
-        self._telemetry_latest_chunk_received_t = time.perf_counter()
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -155,14 +112,13 @@ class NeuralDeviceTab(DeviceTab):
 
     def _on_channel_changed(self, idx):
         self._current_channel_idx = idx
-        # rebuild raw history for new channel from ring
         ch = idx
         self._raw_hist_t_low[ch].clear()
         self._raw_hist_y_low[ch].clear()
         self._raw_hist_t_high[ch].clear()
         self._raw_hist_y_high[ch].clear()
-        if self._total > 0:
-            t, y = self._ring_read_channel(ch)
+        if self._ring.total > 0:
+            t, y = self._ring.read_channel(ch)
             if t.size > 0:
                 self._raw_hist_t_low[ch] = t.tolist()
                 self._raw_hist_y_low[ch] = y.tolist()
@@ -170,32 +126,6 @@ class NeuralDeviceTab(DeviceTab):
                     step = max(1, t.size // MAX_RAW_HISTORY_PLOT_POINTS)
                     self._raw_hist_t_high[ch] = t[::step].tolist()
                     self._raw_hist_y_high[ch] = y[::step].tolist()
-
-    def _emit_telemetry_if_due(self):
-        now = time.perf_counter()
-        elapsed = now - self._telemetry_last_emit
-        if elapsed < self._telemetry_emit_interval_sec:
-            return
-        chunks = max(1, int(self._telemetry_chunks))
-        samples = int(self._telemetry_samples)
-        rate_hz = float(samples) / max(elapsed, 1e-6)
-        avg_ingest_ms = self._telemetry_ingest_ms_total / chunks
-        avg_render_ms = self._telemetry_render_ms_total / max(1, int(self._telemetry_render_calls))
-        avg_frame_ms = self._render_dur_ms
-        line = (
-            "[telemetry][plot] "
-            f"window_s={elapsed:.2f} chunks={chunks} samples={samples} rate_hz={rate_hz:.1f} "
-            f"ingest_avg_ms={avg_ingest_ms:.3f} render_avg_ms={avg_render_ms:.3f} frame_avg_ms={avg_frame_ms:.3f} "
-            f"raw_renders={int(self._telemetry_raw_renders)}"
-        )
-        append_telemetry_line(line)
-        self._telemetry_last_emit = now
-        self._telemetry_chunks = 0
-        self._telemetry_samples = 0
-        self._telemetry_render_calls = 0
-        self._telemetry_raw_renders = 0
-        self._telemetry_render_ms_total = 0.0
-        self._telemetry_ingest_ms_total = 0.0
 
     def _next_task_id(self):
         self._task_id_counter += 1
@@ -264,98 +194,6 @@ class NeuralDeviceTab(DeviceTab):
         self._raw_hist_sample_mod_low = 0
         self._raw_hist_sample_mod_high = 0
 
-    def _ring_write(self, t, y):
-        """t: (n,) array, y: (num_channels, n) array."""
-        n = y.shape[1] if y.ndim == 2 else y.size
-        if n == 0:
-            return
-        if y.ndim == 1:
-            y = y.reshape(1, -1)
-        cap = self._cap
-        if n >= cap:
-            self._ring[0, :] = t[-cap:]
-            self._ring[1:, :] = y[:, -cap:]
-            self._wpos = 0
-            self._total += n
-        else:
-            space = cap - self._wpos
-            if n <= space:
-                self._ring[0, self._wpos:self._wpos + n] = t
-                self._ring[1:, self._wpos:self._wpos + n] = y
-            else:
-                self._ring[0, self._wpos:] = t[:space]
-                self._ring[1:, self._wpos:] = y[:, :space]
-                rem = n - space
-                self._ring[0, :rem] = t[space:]
-                self._ring[1:, :rem] = y[:, space:]
-            self._wpos = (self._wpos + n) % cap
-            self._total += n
-
-    def _ring_read_channel(self, ch_idx=0):
-        """Return (t, y) for channel ch_idx from ring buffer."""
-        if self._total == 0:
-            return np.array([]), np.array([])
-        cnt = min(self._total, self._cap)
-        if cnt >= self._cap:
-            idx = self._wpos
-            t = np.empty(cnt, dtype=np.float64)
-            y = np.empty(cnt, dtype=np.float64)
-            tail = cnt - idx
-            t[:tail] = self._ring[0, idx:]
-            y[:tail] = self._ring[1 + ch_idx, idx:]
-            t[tail:] = self._ring[0, :idx]
-            y[tail:] = self._ring[1 + ch_idx, :idx]
-            return t, y
-        return self._ring[0, :cnt].copy(), self._ring[1 + ch_idx, :cnt].copy()
-
-    def _ring_read_tail(self, n, ch_idx=None):
-        """Return last n (t, y) for channel ch_idx (or current channel)."""
-        if ch_idx is None:
-            ch_idx = self._current_channel_idx
-        cnt = min(self._total, self._cap)
-        n = min(n, cnt)
-        if n == 0:
-            return np.array([]), np.array([])
-        t, y = self._ring_read_channel(ch_idx)
-        return t[-n:], y[-n:]
-
-    def _raw_time_bounds(self):
-        if self._total == 0:
-            return 0.0, 0.0
-        t, _ = self._ring_read_channel(0)
-        if t.size == 0:
-            return 0.0, 0.0
-        earliest = float(t[0])
-        latest = float(t[-1])
-        if self._total > self._cap:
-            latest = float(self._total) / float(self.sampling_rate)
-        return earliest, latest
-
-    def _resize(self, num_channels: int, channel_labels: list[str] | None = None):
-        """Resize ring buffer and per-channel data when channel count changes."""
-        if num_channels == self.num_channels and channel_labels is None:
-            return
-        self.num_channels = num_channels
-        if channel_labels is not None:
-            self._channel_labels = channel_labels
-        self._ring = _make_display_buffer(self.sampling_rate, self.num_channels)
-        self._cap = self._ring.shape[1]
-        self._wpos = 0
-        self._total = 0
-        self._raw_hist_t_low = [[] for _ in range(self.num_channels)]
-        self._raw_hist_y_low = [[] for _ in range(self.num_channels)]
-        self._raw_hist_t_high = [[] for _ in range(self.num_channels)]
-        self._raw_hist_y_high = [[] for _ in range(self.num_channels)]
-        self._channel_combo.blockSignals(True)
-        self._channel_combo.clear()
-        self._channel_combo.addItems(self._channel_labels)
-        self._channel_combo.blockSignals(False)
-        if self._current_channel_idx >= self.num_channels:
-            self._current_channel_idx = 0
-        self._channel_results.clear()
-        self._spike_times_cache.clear()
-        self._last_spike_scan_sample.clear()
-
     def on_data(self, chunk: np.ndarray):
         ingest_t0 = time.perf_counter()
         if chunk is None:
@@ -368,19 +206,17 @@ class NeuralDeviceTab(DeviceTab):
         if n_samples < 1:
             return
 
-        # lazy resize ring buffer if incoming channel count doesn't match
         if n_channels != self.num_channels:
             _ports = ['A', 'B', 'C', 'D']
             chan_labels = [f"{_ports[i // 32]}-{i % 32:03d}" for i in range(n_channels) if i // 32 < 4]
             self._resize(n_channels, chan_labels)
 
         t_chunk = (self.sample_counter + np.arange(n_samples, dtype=np.float64)) / self.sampling_rate
-        self._ring_write(t_chunk, arr)
+        self._ring.write(t_chunk, arr)
         self._append_raw_history(t_chunk, arr)
         self.sample_counter += n_samples
-        self._telemetry_chunks += 1
-        self._telemetry_samples += int(n_samples)
-        self._telemetry_latest_chunk_received_t = time.perf_counter()
+        self._tel_chunks += 1
+        self._tel_samples += int(n_samples)
 
         self.psd_update_counter += 1
         self.spike_plot_frame_counter += 1
@@ -395,20 +231,20 @@ class NeuralDeviceTab(DeviceTab):
             ch = 0
 
         last_scan = self._last_spike_scan_sample.get(ch, 0)
-        gap = self._total - last_scan
+        gap = self._ring.total - last_scan
         should_run_spike = do_spike and (gap >= SPIKE_INCREMENTAL_MIN_SAMPLES)
         should_run_psd = do_psd
 
         if should_run_psd or should_run_spike:
             if should_run_spike:
-                stored = min(self._total, self._cap)
+                stored = min(self._ring.total, self._ring.cap)
                 psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec))) if should_run_psd else 0
                 wf_n = max(8, int(round(self.sampling_rate * max(1, self._waveform_buffer_sec + 1))))
                 spike_n = int(max(SPIKE_INCREMENTAL_MIN_SAMPLES, gap) + SPIKE_OVERLAP_SAMPLES)
                 tail_n = min(stored, max(psd_n, wf_n, spike_n))
 
-                t_tail, sig_tail = self._ring_read_tail(tail_n, ch_idx=ch)
-                abs_start = self._total - t_tail.size
+                t_tail, sig_tail = self._ring.read_tail(tail_n, ch_idx=ch)
+                abs_start = self._ring.total - t_tail.size
                 rel_last = max(0, int(last_scan - abs_start))
                 rel_last = min(rel_last, t_tail.size)
                 self._last_proc_abs_start = abs_start
@@ -422,22 +258,18 @@ class NeuralDeviceTab(DeviceTab):
                 )
             else:
                 psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec)))
-                t_tail, sig_tail = self._ring_read_tail(psd_n, ch_idx=ch)
-                self._last_proc_abs_start = self._total - t_tail.size
+                t_tail, sig_tail = self._ring.read_tail(psd_n, ch_idx=ch)
+                self._last_proc_abs_start = self._ring.total - t_tail.size
                 self._pending_channel = ch
                 self._proc_worker.schedule(
                     sig_tail.copy(), t_tail.copy(), self.sampling_rate,
                     [], 0, sig_tail.size,
                     do_psd=True, do_spike=False,
                 )
-        self._telemetry_ingest_ms_total += (time.perf_counter() - ingest_t0) * 1000.0
-        self._emit_telemetry_if_due()
+        self._tel_ingest_ms_total += (time.perf_counter() - ingest_t0) * 1000.0
+        self._emit_telemetry_if_due("neural")
 
     def _append_decimated_history(self, t_lists, y_lists, t_chunk, y_chunk, stride, mod_counter):
-        """Append decimated data to per-channel history lists.
-        t_lists, y_lists: list of lists (one per channel) modified in-place.
-        y_chunk: (num_channels, n) array.
-        """
         if y_chunk.shape[1] == 0:
             return mod_counter
         buf_stride = stride
@@ -459,7 +291,6 @@ class NeuralDeviceTab(DeviceTab):
         return next_mod
 
     def _append_raw_history(self, t_chunk, y_chunk):
-        """y_chunk: (num_channels, n) or (n,)."""
         if y_chunk.ndim == 1:
             y_chunk = y_chunk.reshape(1, -1)
         self._raw_hist_sample_mod_low = self._append_decimated_history(
@@ -472,13 +303,6 @@ class NeuralDeviceTab(DeviceTab):
             t_chunk, y_chunk,
             self._raw_hist_stride_high, self._raw_hist_sample_mod_high,
         )
-
-    def _trim_history_store(self, t_hist, y_hist, max_points):
-        if len(t_hist) <= max_points:
-            return
-        excess = len(t_hist) - max_points
-        del t_hist[:excess]
-        del y_hist[:excess]
 
     def _on_processing_result(self, result):
         ch = self._pending_channel
@@ -619,7 +443,7 @@ class NeuralDeviceTab(DeviceTab):
         self.canvas._last_spike_marker_set = []
 
     def render(self):
-        if self._total == 0:
+        if self._ring.total == 0:
             return
 
         t0 = time.perf_counter()
@@ -628,15 +452,15 @@ class NeuralDeviceTab(DeviceTab):
 
         if (now - self._last_raw_render_t) >= 1.0 / RAW_RENDER_HZ:
             did_work = True
-            self._telemetry_raw_renders += 1
+            self._tel_raw_renders += 1
             if self._follow_axes['raw']:
                 n_vis = int(self.sampling_rate * DISPLAY_WINDOW_SEC)
-                x_vis, y_vis = self._ring_read_tail(n_vis)
+                x_vis, y_vis = self._ring.read_tail(n_vis)
                 xd, yd = _minmax_downsample(x_vis, y_vis, MAX_DISPLAY_POINTS)
                 self.canvas.raw_curve.setData(xd, yd)
                 x_end = float(x_vis[-1]) if x_vis.size else 0.0
                 x_start = max(0.0, x_end - DISPLAY_WINDOW_SEC)
-                x_min_lim, _ = self._raw_time_bounds()
+                x_min_lim, _ = self._ring.raw_time_bounds()
                 self.canvas.raw_plot.setLimits(xMin=max(0.0, x_min_lim), xMax=max(0.0, x_end + 0.1))
                 self._suspend_follow_detection = True
                 try:
@@ -667,13 +491,13 @@ class NeuralDeviceTab(DeviceTab):
                 span = max(0.0, x_end - x_start)
                 t_src = None
                 y_src = None
-                stored = min(self._total, self._cap)
+                stored = min(self._ring.total, self._ring.cap)
                 if stored > 1 and span <= RAW_FULL_RES_MAX_SPAN_SEC:
-                    earliest_t, latest_t = self._raw_time_bounds()
+                    earliest_t, latest_t = self._ring.raw_time_bounds()
                     left_q = max(earliest_t, x_start - RAW_MANUAL_VIEW_MARGIN_SEC)
                     right_q = min(latest_t, x_end + RAW_MANUAL_VIEW_MARGIN_SEC)
                     if right_q > left_q:
-                        t_lin, y_lin = self._ring_read_channel(self._current_channel_idx)
+                        t_lin, y_lin = self._ring.read_channel(self._current_channel_idx)
                         if t_lin.size:
                             i0 = int(np.searchsorted(t_lin, left_q, side='left'))
                             i1 = int(np.searchsorted(t_lin, right_q, side='right'))
@@ -771,9 +595,9 @@ class NeuralDeviceTab(DeviceTab):
 
         self._render_dur_ms = (time.perf_counter() - t0) * 1000.0
         if did_work:
-            self._telemetry_render_calls += 1
-            self._telemetry_render_ms_total += self._render_dur_ms
-        self._emit_telemetry_if_due()
+            self._tel_render_calls += 1
+            self._tel_render_ms_total += self._render_dur_ms
+        self._emit_telemetry_if_due("neural")
 
     def clear(self):
         self.canvas.raw_curve.setData([], [])
@@ -785,9 +609,7 @@ class NeuralDeviceTab(DeviceTab):
         self._clear_marker_lines()
         self._clear_spike_marker_lines()
         self.clear_snapshots()
-        self._ring[:] = 0
-        self._wpos = 0
-        self._total = 0
+        self._ring.clear()
         self.sample_counter = 0
         self.marker_records = []
         self._marker_times_sorted = []
@@ -822,8 +644,6 @@ class NeuralDeviceTab(DeviceTab):
             self.canvas.wf_plot.setYRange(-WAVEFORM_YLIM_ABS_UV, WAVEFORM_YLIM_ABS_UV, padding=0)
         finally:
             self._suspend_follow_detection = False
-        self._fps_frame_count = 0
-        self._fps_last_t = time.perf_counter()
 
     def shutdown(self) -> bool:
         ok_proc = True
@@ -892,15 +712,33 @@ class NeuralDeviceTab(DeviceTab):
             self.canvas.wf_plot.removeItem(c)
         self._wf_snapshot_curves.clear()
 
+    def _resize(self, num_channels: int, channel_labels: list[str] | None = None):
+        if num_channels == self.num_channels and channel_labels is None:
+            return
+        self.num_channels = num_channels
+        if channel_labels is not None:
+            self._channel_labels = channel_labels
+        self._ring.resize(num_channels)
+        self._raw_hist_t_low = [[] for _ in range(self.num_channels)]
+        self._raw_hist_y_low = [[] for _ in range(self.num_channels)]
+        self._raw_hist_t_high = [[] for _ in range(self.num_channels)]
+        self._raw_hist_y_high = [[] for _ in range(self.num_channels)]
+        self._channel_combo.blockSignals(True)
+        self._channel_combo.clear()
+        self._channel_combo.addItems(self._channel_labels)
+        self._channel_combo.blockSignals(False)
+        if self._current_channel_idx >= self.num_channels:
+            self._current_channel_idx = 0
+        self._channel_results.clear()
+        self._spike_times_cache.clear()
+        self._last_spike_scan_sample.clear()
+
     def set_connection_details(self, host="", command_port=0, data_port=0, sample_rate=0, project_name=""):
         self.clear()
         self._session_id += 1
         if sample_rate > 0:
             self.sampling_rate = float(sample_rate)
-        self._ring = _make_display_buffer(self.sampling_rate, self.num_channels)
-        self._cap = self._ring.shape[1]
-        self._wpos = 0
-        self._total = 0
+        self._ring = RingBuffer(self.sampling_rate, self.num_channels, DISPLAY_WINDOW_SEC)
         self._update_raw_history_stride()
         self._raw_hist_sample_mod_low = 0
         self._raw_hist_sample_mod_high = 0
@@ -942,159 +780,3 @@ class NeuralDeviceTab(DeviceTab):
 
 class _Result:
     pass
-
-
-# ── SmuDeviceTab ────────────────────────────────────────────────────────────
-
-class SmuDeviceTab(DeviceTab):
-    def __init__(self, sample_rate=1000.0, parent=None):
-        super().__init__(parent)
-        self.sampling_rate = sample_rate
-        self.sample_counter = 0
-        self.is_receiving = False
-        self._render_dur_ms = 0.0
-        self._last_render_t = 0.0
-        self._ring_cap = max(1000, int(round(sample_rate * 300)))
-        self._v_ring = np.zeros(self._ring_cap, dtype=np.float64)
-        self._i_ring = np.zeros(self._ring_cap, dtype=np.float64)
-        self._t_ring = np.zeros(self._ring_cap, dtype=np.float64)
-        self._wpos = 0
-        self._total = 0
-        self._fps_frame_count = 0
-        self._fps_last_t = time.perf_counter()
-
-        self._suspend_follow_detection = False
-        self.canvas = SmuCanvas(self)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.canvas, 1)
-
-    def on_data(self, chunk: np.ndarray):
-        arr = np.asarray(chunk)
-        if arr.ndim == 1:
-            n = 1
-            voltage = float(arr[0]) if arr.size > 0 else 0.0
-            current = float(arr[1]) if arr.size > 1 else 0.0
-            t = self.sample_counter / self.sampling_rate
-            self._ring_write(t, voltage, current)
-            self.sample_counter += 1
-        elif arr.ndim == 2:
-            n = arr.shape[1]
-            if arr.shape[0] >= 2:
-                voltage = arr[0, :]
-                current = arr[1, :]
-            elif arr.shape[0] == 1:
-                voltage = arr[0, :]
-                current = np.zeros(n)
-            else:
-                return
-            t = (self.sample_counter + np.arange(n, dtype=np.float64)) / self.sampling_rate
-            for i in range(n):
-                self._ring_write(t[i], voltage[i], current[i])
-            self.sample_counter += n
-            if self.sample_counter % 500 < n:
-                append_telemetry_line(
-                    f"smutab | on_data | shape={arr.shape} "
-                    f"v=[{float(voltage[0]):.6f}..{float(voltage[-1]):.6f}] "
-                    f"i=[{float(current[0]):.9f}..{float(current[-1]):.9f}] "
-                    f"total={self._total}"
-                )
-
-    def _ring_write(self, t, v, i):
-        pos = self._wpos
-        self._t_ring[pos] = t
-        self._v_ring[pos] = v
-        self._i_ring[pos] = i
-        self._wpos = (pos + 1) % self._ring_cap
-        self._total += 1
-
-    def _ring_read(self, n):
-        n = min(n, min(self._total, self._ring_cap))
-        if n == 0:
-            return np.array([]), np.array([]), np.array([])
-        cnt = min(self._total, self._ring_cap)
-        if cnt >= self._ring_cap:
-            idx = self._wpos
-            t = np.empty(cnt, dtype=np.float64)
-            v = np.empty(cnt, dtype=np.float64)
-            i = np.empty(cnt, dtype=np.float64)
-            tail = cnt - idx
-            t[:tail] = self._t_ring[idx:]
-            v[:tail] = self._v_ring[idx:]
-            i[:tail] = self._i_ring[idx:]
-            t[tail:] = self._t_ring[:idx]
-            v[tail:] = self._v_ring[:idx]
-            i[tail:] = self._i_ring[:idx]
-        else:
-            t = self._t_ring[:cnt].copy()
-            v = self._v_ring[:cnt].copy()
-            i = self._i_ring[:cnt].copy()
-        return t[-n:], v[-n:], i[-n:]
-
-    def render(self):
-        now = time.perf_counter()
-        if (now - self._last_render_t) < 1.0 / 30.0:
-            return
-        t0 = now
-        n_vis = min(10000, min(self._total, self._ring_cap))
-        if n_vis < 2:
-            return
-        t, v, i = self._ring_read(n_vis)
-        if t.size < 2:
-            return
-        td, vd = _minmax_downsample(t, v, MAX_DISPLAY_POINTS)
-        _, id = _minmax_downsample(t, i, MAX_DISPLAY_POINTS)
-        self.canvas.voltage_curve.setData(td, vd)
-        self.canvas.current_curve.setData(td, id)
-
-        v_range = float(np.max(vd)) - float(np.min(vd)) if vd.size else 1.0
-        i_range = float(np.max(id)) - float(np.min(id)) if id.size else 1.0
-        v_pad = max(0.1, v_range * 0.1)
-        i_pad = max(0.001, i_range * 0.1)
-        self._suspend_follow_detection = True
-        try:
-            self.canvas.voltage_plot.setYRange(float(np.min(vd)) - v_pad, float(np.max(vd)) + v_pad, padding=0)
-            self.canvas.current_plot.setYRange(float(np.min(id)) - i_pad, float(np.max(id)) + i_pad, padding=0)
-        finally:
-            self._suspend_follow_detection = False
-
-        self._render_dur_ms = (time.perf_counter() - t0) * 1000.0
-        self._last_render_t = now
-        self._update_fps_label()
-
-    def _update_fps_label(self):
-        self._fps_frame_count += 1
-        now = time.perf_counter()
-        elapsed = now - self._fps_last_t
-        if elapsed >= 1.0:
-            fps = self._fps_frame_count / elapsed
-            self._fps_frame_count = 0
-            self._fps_last_t = now
-
-    def clear(self):
-        self._v_ring[:] = 0
-        self._i_ring[:] = 0
-        self._t_ring[:] = 0
-        self._wpos = 0
-        self._total = 0
-        self.sample_counter = 0
-        self.canvas.voltage_curve.setData([], [])
-        self.canvas.current_curve.setData([], [])
-        self._fps_frame_count = 0
-        self._fps_last_t = time.perf_counter()
-
-    def shutdown(self) -> bool:
-        return True
-
-    def set_connection_details(self, host="", command_port=0, data_port=0, sample_rate=0, project_name=""):
-        self.clear()
-        if sample_rate > 0:
-            self.sampling_rate = float(sample_rate)
-            self._ring_cap = max(1000, int(round(self.sampling_rate * 300)))
-            self._v_ring = np.zeros(self._ring_cap, dtype=np.float64)
-            self._i_ring = np.zeros(self._ring_cap, dtype=np.float64)
-            self._t_ring = np.zeros(self._ring_cap, dtype=np.float64)
-        self.set_receiving_state(True)
-
-    def set_receiving_state(self, receiving: bool):
-        self.is_receiving = bool(receiving)

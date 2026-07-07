@@ -1,11 +1,8 @@
 import pyqtgraph as pg
 from PyQt5 import QtWidgets, QtCore, QtGui
-import numpy as np
 
 
 class SmuCanvas(QtWidgets.QWidget):
-    """Two stacked pyqtgraph plots: Voltage (top) and Current (bottom)."""
-
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)

@@ -4,7 +4,7 @@ import pyqtgraph as pg
 from PyQt5 import QtWidgets, QtCore
 
 from rhx_realtime_feed.screens.plot_helpers import PLOT_UPDATE_FREQ_HZ
-from rhx_realtime_feed.screens.device_tab import NeuralDeviceTab, SmuDeviceTab
+from rhx_realtime_feed.screens._registry import _DEVICE_CLASSES
 from rhx_realtime_feed.screens.marker_dialog import MarkerDialog
 
 
@@ -123,7 +123,6 @@ class PlotScreen(QtWidgets.QWidget):
         if name in self._tabs:
             return
         if num_channels is None:
-            from rhx_realtime_feed.screens._registry import _DEVICE_CLASSES
             cls = _DEVICE_CLASSES.get(device_type)
             if cls:
                 for p in cls.get_config_params():
@@ -132,10 +131,11 @@ class PlotScreen(QtWidgets.QWidget):
                         break
             if num_channels is None:
                 num_channels = 1
-        if device_type == "smu":
-            tab = SmuDeviceTab(sample_rate=sample_rate, parent=self)
-        else:
-            tab = NeuralDeviceTab(sample_rate=sample_rate, num_channels=num_channels, channel_labels=channel_labels, parent=self)
+        cls = _DEVICE_CLASSES.get(device_type)
+        tab_cls = cls.get_tab_class() if cls else None
+        if tab_cls is None:
+            return
+        tab = tab_cls(sample_rate=sample_rate, num_channels=num_channels, channel_labels=channel_labels, parent=self)
         self._tabs[name] = tab
         self.tab_widget.addTab(tab, name)
         self._empty_label.hide()

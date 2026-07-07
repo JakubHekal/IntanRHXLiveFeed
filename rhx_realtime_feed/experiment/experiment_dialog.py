@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PyQt5 import QtWidgets, QtCore
 
-from ..screens.channel_selector import ChannelSelector
+from ..device.widget_builder import build_param_widget, read_param_widget
 from .experiment import ExperimentManager
 
 
@@ -143,7 +143,7 @@ class _DeviceConnectionFrame(QtWidgets.QFrame):
             form.setSpacing(4)
             for pd in device_group["param_defs"]:
                 val = device_group["current_config"].get(pd.name, pd.default)
-                w = self._build_widget(pd, val)
+                w = build_param_widget(pd, val)
                 self._param_widgets.append((pd.name, w, pd))
                 form.addRow(pd.label + ":", w)
             layout.addLayout(form)
@@ -158,53 +158,9 @@ class _DeviceConnectionFrame(QtWidgets.QFrame):
         status_row.addWidget(self._status_label)
         layout.addLayout(status_row)
 
-    def _build_widget(self, pd, value):
-        val = value if value is not None else pd.default
-        if pd.dtype == "float":
-            w = QtWidgets.QDoubleSpinBox()
-            w.setRange(pd.min_val or -1e6, pd.max_val or 1e6)
-            w.setDecimals(3)
-            w.setValue(float(val or 0.0))
-            return w
-        elif pd.dtype == "int":
-            w = QtWidgets.QSpinBox()
-            w.setRange(int(pd.min_val or 0), int(pd.max_val or 999999))
-            w.setValue(int(val or 0))
-            return w
-        elif pd.dtype == "bool":
-            w = QtWidgets.QCheckBox()
-            w.setChecked(bool(val))
-            return w
-        elif pd.dtype == "choice":
-            w = QtWidgets.QComboBox()
-            w.addItems(pd.choices or [])
-            if val in (pd.choices or []):
-                w.setCurrentText(val)
-            return w
-        elif pd.dtype == "channel_list":
-            w = ChannelSelector()
-            w.setValue(str(val or ""))
-            return w
-        else:
-            w = QtWidgets.QLineEdit(str(val or ""))
-            return w
-
-    def _read_widget(self, pd, widget):
-        if pd.dtype == "float":
-            return widget.value()
-        elif pd.dtype == "int":
-            return widget.value()
-        elif pd.dtype == "bool":
-            return widget.isChecked()
-        elif pd.dtype == "choice":
-            return widget.currentText()
-        elif pd.dtype == "channel_list":
-            return widget.value()
-        else:
-            return widget.text()
-
     def _read_params(self):
-        return {name: self._read_widget(pd, w) for name, w, pd in self._param_widgets}
+        from ..device.widget_builder import gather_params
+        return gather_params(self._param_widgets)
 
     def _on_connect(self):
         self._connect_button.setEnabled(False)
