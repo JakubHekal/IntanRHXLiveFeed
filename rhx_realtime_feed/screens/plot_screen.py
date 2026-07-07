@@ -119,9 +119,19 @@ class PlotScreen(QtWidgets.QWidget):
         tab = self._active_tab()
         self._toolbar.setVisible(tab is not None and hasattr(tab, 'take_psd_snapshot'))
 
-    def add_device(self, name, device_type, sample_rate=20000.0, num_channels=1, channel_labels=None):
+    def add_device(self, name, device_type, sample_rate=20000.0, num_channels=None, channel_labels=None):
         if name in self._tabs:
             return
+        if num_channels is None:
+            from rhx_realtime_feed.screens._registry import _DEVICE_CLASSES
+            cls = _DEVICE_CLASSES.get(device_type)
+            if cls:
+                for p in cls.get_config_params():
+                    if p.name == "num_channels":
+                        num_channels = p.default
+                        break
+            if num_channels is None:
+                num_channels = 1
         if device_type == "smu":
             tab = SmuDeviceTab(sample_rate=sample_rate, parent=self)
         else:

@@ -103,7 +103,6 @@ class IntanRHXDevice(Device, RHXConfig):
             self._sample_rate = self.get_sample_rate()
             self._sample_counter = 0
             self.effective_fs = float(self._sample_rate)
-            self.init_circular_buffer()
 
         except Exception as e:
             self._last_connect_error = str(e)
@@ -304,8 +303,9 @@ class IntanRHXDevice(Device, RHXConfig):
         """Configure device parameters."""
         for key, value in kwargs.items():
             if "channels" in key:
-                indices = self._parse_channel_range(str(value))
-                self._set_enabled_channels(indices)
+                if str(value).strip():
+                    indices = self._parse_channel_range(str(value))
+                    self._set_enabled_channels(indices)
             elif "blocks_per_write" in key:
                 self.set_blocks_per_write(value)
                 self.blocks_per_write = max(1, int(value))
@@ -503,7 +503,7 @@ class IntanRHXDevice(Device, RHXConfig):
                 ParamDef("enable_wide_channel", "Enable Wide Channel", "bool", default=False),
             ]),
             DeviceOperation("Stream", "Stream", default_duration=10.0, color="#4BA3E3", params=[
-                ParamDef("channels", "Channels (e.g. 0-31)", "str", default="0-31"),
+                ParamDef("channels", "Channels (e.g. 0-31)", "str", default=""),
             ]),
             DeviceOperation("Stimulus", "Stimulus", default_duration=3.0, color="#D13438", params=[
                 ParamDef("channel", "Channel", "int", default=1, min_val=1, max_val=256),

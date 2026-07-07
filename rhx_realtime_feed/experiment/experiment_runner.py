@@ -205,7 +205,7 @@ class _RunnerThread(QtCore.QThread):
 
                         sink.close()
                         append_telemetry_line(
-                            f"acq_end | {step_idx} | {device_name} | Stream | samples_in_chunk={sink._chunk_samples}"
+                            f"acq_end | {step_idx} | {device_name} | Stream | samples_in_chunk={sink._chunk_samples_written}"
                         )
                         try:
                             device.stop_acquisition()
@@ -302,7 +302,7 @@ class _RunnerThread(QtCore.QThread):
 
                         sink.close()
                         append_telemetry_line(
-                            f"acq_end | {step_idx} | {device_name} | force_current | samples_in_chunk={sink._chunk_samples}"
+                            f"acq_end | {step_idx} | {device_name} | force_current | samples_in_chunk={sink._chunk_samples_written}"
                         )
                         try:
                             device.write_output(ch, 0.0)
