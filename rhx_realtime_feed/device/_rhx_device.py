@@ -159,7 +159,6 @@ class IntanRHXDevice(Device, RHXConfig):
                 self.enable_wide_channel(ch, port=self._PORTS[port_idx])
         self._enabled_channel_indices = indices
         self.num_channels = len(indices)
-        self.bytes_per_frame = 4 + 2 * self.num_channels
         self._update_read_size()
         self.init_circular_buffer()
 
@@ -503,7 +502,7 @@ class IntanRHXDevice(Device, RHXConfig):
                 ParamDef("enable_wide_channel", "Enable Wide Channel", "bool", default=False),
             ]),
             DeviceOperation("Stream", "Stream", default_duration=10.0, color="#4BA3E3", params=[
-                ParamDef("channels", "Channels (e.g. 0-31)", "str", default=""),
+                ParamDef("channels", "Channels (e.g. 0-31)", "channel_list", default=""),
             ]),
             DeviceOperation("Stimulus", "Stimulus", default_duration=3.0, color="#D13438", params=[
                 ParamDef("channel", "Channel", "int", default=1, min_val=1, max_val=256),

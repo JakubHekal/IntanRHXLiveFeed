@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PyQt5 import QtWidgets, QtCore
 
+from ..screens.channel_selector import ChannelSelector
 from .experiment import ExperimentManager
 
 
@@ -180,6 +181,10 @@ class _DeviceConnectionFrame(QtWidgets.QFrame):
             if val in (pd.choices or []):
                 w.setCurrentText(val)
             return w
+        elif pd.dtype == "channel_list":
+            w = ChannelSelector()
+            w.setValue(str(val or ""))
+            return w
         else:
             w = QtWidgets.QLineEdit(str(val or ""))
             return w
@@ -193,6 +198,8 @@ class _DeviceConnectionFrame(QtWidgets.QFrame):
             return widget.isChecked()
         elif pd.dtype == "choice":
             return widget.currentText()
+        elif pd.dtype == "channel_list":
+            return widget.value()
         else:
             return widget.text()
 

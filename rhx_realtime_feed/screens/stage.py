@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
+from .channel_selector import ChannelSelector
 from .timeline import ExperimentTimeline
 from .plot_screen import PlotScreen
 
@@ -315,6 +316,10 @@ class RightSidebar(QFrame):
             if value in (param_def.choices or []):
                 w.setCurrentText(value)
             return w
+        elif param_def.dtype == "channel_list":
+            w = ChannelSelector()
+            w.setValue(str(value or ""))
+            return w
         else:
             w = QLineEdit(str(value or ""))
             return w
@@ -328,6 +333,8 @@ class RightSidebar(QFrame):
             return widget.isChecked()
         elif param_def.dtype == "choice":
             return widget.currentText()
+        elif param_def.dtype == "channel_list":
+            return widget.value()
         else:
             return widget.text()
 
@@ -356,6 +363,8 @@ class RightSidebar(QFrame):
                 w.currentTextChanged.connect(slot)
             elif isinstance(w, QLineEdit):
                 w.textChanged.connect(slot)
+            elif isinstance(w, ChannelSelector):
+                w.valueChanged.connect(slot)
 
     def _gather_params(self, store):
         return {name: self._read_param_widget(pd, w) for name, w, pd in store}
