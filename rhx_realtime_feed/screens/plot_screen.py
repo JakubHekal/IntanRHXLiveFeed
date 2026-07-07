@@ -27,9 +27,11 @@ class PlotScreen(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
 
-        toolbar = QtWidgets.QHBoxLayout()
-        toolbar.setContentsMargins(4, 4, 4, 0)
-        toolbar.setSpacing(4)
+        self._toolbar = QtWidgets.QWidget()
+        self._toolbar.setVisible(False)
+        toolbar_layout = QtWidgets.QHBoxLayout(self._toolbar)
+        toolbar_layout.setContentsMargins(4, 4, 4, 0)
+        toolbar_layout.setSpacing(4)
 
         self.btn_psd_snapshot = QtWidgets.QToolButton()
         self.btn_psd_snapshot.setText("PSD Snap")
@@ -46,11 +48,11 @@ class PlotScreen(QtWidgets.QWidget):
         self.btn_clear_snapshots.setToolTip("Remove all snapshot overlays")
         self.btn_clear_snapshots.clicked.connect(self.clear_snapshots)
 
-        toolbar.addWidget(self.btn_psd_snapshot)
-        toolbar.addWidget(self.btn_wf_snapshot)
-        toolbar.addWidget(self.btn_clear_snapshots)
+        toolbar_layout.addWidget(self.btn_psd_snapshot)
+        toolbar_layout.addWidget(self.btn_wf_snapshot)
+        toolbar_layout.addWidget(self.btn_clear_snapshots)
 
-        toolbar.addSpacing(16)
+        toolbar_layout.addSpacing(16)
 
         self.btn_add_marker = QtWidgets.QToolButton()
         self.btn_add_marker.setText("Add Marker")
@@ -62,10 +64,10 @@ class PlotScreen(QtWidgets.QWidget):
         self.btn_markers.setToolTip("View, rename, or delete markers")
         self.btn_markers.clicked.connect(self._open_marker_dialog)
 
-        toolbar.addWidget(self.btn_add_marker)
-        toolbar.addWidget(self.btn_markers)
+        toolbar_layout.addWidget(self.btn_add_marker)
+        toolbar_layout.addWidget(self.btn_markers)
 
-        layout.addLayout(toolbar)
+        layout.addWidget(self._toolbar)
 
         self._marker_dialog = None
 
@@ -74,6 +76,7 @@ class PlotScreen(QtWidgets.QWidget):
         # ponytail: tabs are closeable only when multi-device, single-device hides bar entirely
         self.tab_widget.setTabsClosable(True)
         self.tab_widget.tabCloseRequested.connect(self._on_tab_close_requested)
+        self.tab_widget.currentChanged.connect(self._update_toolbar_visibility)
         layout.addWidget(self.tab_widget, 1)
 
         self._empty_label = QtWidgets.QLabel("No data sources.\nAdd a device to begin.")
@@ -97,6 +100,7 @@ class PlotScreen(QtWidgets.QWidget):
 
         self._empty_label.show()
         self.tab_widget.hide()
+        self._update_toolbar_visibility()
 
     def _on_tab_close_requested(self, index):
         widget = self.tab_widget.widget(index)
@@ -110,6 +114,10 @@ class PlotScreen(QtWidgets.QWidget):
     def _update_tab_bar_visibility(self):
         visible = len(self._tabs) > 1
         self.tab_widget.tabBar().setVisible(visible)
+
+    def _update_toolbar_visibility(self):
+        tab = self._active_tab()
+        self._toolbar.setVisible(tab is not None and hasattr(tab, 'take_psd_snapshot'))
 
     def add_device(self, name, device_type, sample_rate=20000.0, num_channels=1, channel_labels=None):
         if name in self._tabs:

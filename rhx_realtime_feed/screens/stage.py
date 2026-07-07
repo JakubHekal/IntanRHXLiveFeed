@@ -210,24 +210,29 @@ class RightSidebar(QFrame):
         self._device_param_widgets = []
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(4)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        container = QWidget()
-        scroll.setWidget(container)
-        form_layout = QVBoxLayout(container)
-        form_layout.setContentsMargins(0, 0, 0, 0)
-        form_layout.setSpacing(4)
+        header = QLabel("Properties")
+        header.setStyleSheet("padding: 8px;")
+        layout.addWidget(header)
 
         self._placeholder = QLabel("Select a block or device\nto edit its properties.")
         self._placeholder.setAlignment(Qt.AlignCenter)
         self._placeholder.setWordWrap(True)
-        self._placeholder.setStyleSheet("color: #6C6C6C; padding: 40px 16px; border: 1px solid #3E3E3E; border-radius: 4px;")
-        form_layout.addWidget(self._placeholder)
+        self._placeholder.setStyleSheet("color: #6C6C6C; padding: 40px 16px; border: 1px solid #3E3E3E; border-radius: 4px; margin: 8px;")
+        layout.addWidget(self._placeholder, 1)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.hide()
+        container = QWidget()
+        self._scroll.setWidget(container)
+        form_layout = QVBoxLayout(container)
+        form_layout.setContentsMargins(0, 0, 0, 0)
+        form_layout.setSpacing(4)
 
         self._block_expander = FluentExpander("Block Properties", expanded=True)
         self._bp_widget = QWidget()
@@ -282,7 +287,7 @@ class RightSidebar(QFrame):
         form_layout.addWidget(self._device_expander)
         form_layout.addStretch()
 
-        layout.addWidget(scroll)
+        layout.addWidget(self._scroll, 1)
         self.setMinimumWidth(260)
         self._device_expander.hide()
         self._update_visibility()
@@ -387,7 +392,9 @@ class RightSidebar(QFrame):
     def _update_visibility(self):
         has_block = self._block_dev_idx >= 0 and self._block_idx >= 0
         has_device = self._device_idx >= 0
-        self._placeholder.setVisible(not has_block and not has_device)
+        visible = has_block or has_device
+        self._placeholder.setVisible(not visible)
+        self._scroll.setVisible(visible)
         self._block_expander.setVisible(has_block)
         self._device_expander.setVisible(has_device)
 
@@ -480,12 +487,14 @@ class MainStage(QWidget):
         timeline_bar.setContentsMargins(4, 4, 4, 4)
         timeline_bar.setSpacing(4)
 
-        self.btn_play = QToolButton()
-        self.btn_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
-        self.btn_pause = QToolButton()
-        self.btn_pause.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
-        self.btn_stop = QToolButton()
-        self.btn_stop.setIcon(self.style().standardIcon(QStyle.SP_MediaStop))
+        btn_style = "QPushButton { border: 1px solid #555; border-radius: 3px; padding: 4px 10px; } QPushButton:hover { background: #3A3A3A; }"
+
+        self.btn_play = QPushButton("Play")
+        self.btn_play.setStyleSheet(btn_style)
+        self.btn_pause = QPushButton("Pause")
+        self.btn_pause.setStyleSheet(btn_style)
+        self.btn_stop = QPushButton("Stop")
+        self.btn_stop.setStyleSheet(btn_style)
         self.btn_stop.setEnabled(False)
         self.btn_pause.setEnabled(False)
         timeline_bar.addWidget(self.btn_play)

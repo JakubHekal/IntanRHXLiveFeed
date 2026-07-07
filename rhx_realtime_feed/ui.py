@@ -134,6 +134,7 @@ class MainWindow(QMainWindow):
         self._check_update_action.triggered.connect(self._check_for_updates)
         self.main_stage.left_sidebar.run_selected.connect(self._on_replay_run)
         self.main_stage.left_sidebar.run_action.connect(self._on_run_action)
+        self.main_stage.btn_play.clicked.connect(self._on_play_clicked)
 
     def _setup_status_bar(self):
         status = QStatusBar()
@@ -322,6 +323,14 @@ class MainWindow(QMainWindow):
         self._legacy_window.raise_()
         self._legacy_window.activateWindow()
 
+    def _on_play_clicked(self):
+        if self._experiment_runner is not None:
+            self._experiment_runner.resume()
+            self.main_stage.btn_play.setEnabled(False)
+            self.main_stage.btn_pause.setEnabled(True)
+        else:
+            self._on_experiment_run()
+
     def _on_experiment_run(self):
         if not self._current_experiment_path:
             QMessageBox.information(self, "No Experiment",
@@ -444,10 +453,6 @@ class MainWindow(QMainWindow):
 
         # disconnect stale button connections
         try:
-            self.main_stage.btn_play.clicked.disconnect()
-        except (TypeError, RuntimeError):
-            pass
-        try:
             self.main_stage.btn_pause.clicked.disconnect()
         except (TypeError, RuntimeError):
             pass
@@ -456,9 +461,6 @@ class MainWindow(QMainWindow):
         except (TypeError, RuntimeError):
             pass
 
-        self.main_stage.btn_play.clicked.connect(self._experiment_runner.resume)
-        self.main_stage.btn_play.clicked.connect(lambda: self.main_stage.btn_play.setEnabled(False))
-        self.main_stage.btn_play.clicked.connect(lambda: self.main_stage.btn_pause.setEnabled(True))
         self.main_stage.btn_pause.clicked.connect(self._experiment_runner.pause)
         self.main_stage.btn_pause.clicked.connect(lambda: self.main_stage.btn_pause.setEnabled(False))
         self.main_stage.btn_pause.clicked.connect(lambda: self.main_stage.btn_play.setEnabled(True))
