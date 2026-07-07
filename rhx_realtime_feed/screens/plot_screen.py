@@ -5,7 +5,6 @@ from PyQt5 import QtWidgets, QtCore
 
 from rhx_realtime_feed.screens.plot_helpers import PLOT_UPDATE_FREQ_HZ
 from rhx_realtime_feed.screens._registry import _DEVICE_CLASSES
-from rhx_realtime_feed.screens.marker_dialog import MarkerDialog
 
 
 class PlotScreen(QtWidgets.QWidget):
@@ -27,56 +26,12 @@ class PlotScreen(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
 
-        self._toolbar = QtWidgets.QWidget()
-        self._toolbar.setVisible(False)
-        toolbar_layout = QtWidgets.QHBoxLayout(self._toolbar)
-        toolbar_layout.setContentsMargins(4, 4, 4, 0)
-        toolbar_layout.setSpacing(4)
-
-        self.btn_psd_snapshot = QtWidgets.QToolButton()
-        self.btn_psd_snapshot.setText("PSD Snap")
-        self.btn_psd_snapshot.setToolTip("Capture PSD snapshot as dashed overlay")
-        self.btn_psd_snapshot.clicked.connect(self.take_psd_snapshot)
-
-        self.btn_wf_snapshot = QtWidgets.QToolButton()
-        self.btn_wf_snapshot.setText("WF Snap")
-        self.btn_wf_snapshot.setToolTip("Capture waveform snapshot as dashed overlay")
-        self.btn_wf_snapshot.clicked.connect(self.take_waveform_snapshot)
-
-        self.btn_clear_snapshots = QtWidgets.QToolButton()
-        self.btn_clear_snapshots.setText("Clear Snap")
-        self.btn_clear_snapshots.setToolTip("Remove all snapshot overlays")
-        self.btn_clear_snapshots.clicked.connect(self.clear_snapshots)
-
-        toolbar_layout.addWidget(self.btn_psd_snapshot)
-        toolbar_layout.addWidget(self.btn_wf_snapshot)
-        toolbar_layout.addWidget(self.btn_clear_snapshots)
-
-        toolbar_layout.addSpacing(16)
-
-        self.btn_add_marker = QtWidgets.QToolButton()
-        self.btn_add_marker.setText("Add Marker")
-        self.btn_add_marker.setToolTip("Add a visual marker near the right edge of the visible plot")
-        self.btn_add_marker.clicked.connect(self._add_marker)
-
-        self.btn_markers = QtWidgets.QToolButton()
-        self.btn_markers.setText("Markers\u2026")
-        self.btn_markers.setToolTip("View, rename, or delete markers")
-        self.btn_markers.clicked.connect(self._open_marker_dialog)
-
-        toolbar_layout.addWidget(self.btn_add_marker)
-        toolbar_layout.addWidget(self.btn_markers)
-
-        layout.addWidget(self._toolbar)
-
-        self._marker_dialog = None
-
         self.tab_widget = QtWidgets.QTabWidget()
         self.tab_widget.setDocumentMode(True)
         # ponytail: tabs are closeable only when multi-device, single-device hides bar entirely
         self.tab_widget.setTabsClosable(True)
         self.tab_widget.tabCloseRequested.connect(self._on_tab_close_requested)
-        self.tab_widget.currentChanged.connect(self._update_toolbar_visibility)
+        # toolbar visibility handled per-tab
         layout.addWidget(self.tab_widget, 1)
 
         self._empty_label = QtWidgets.QLabel("No data sources.\nAdd a device to begin.")
@@ -100,7 +55,6 @@ class PlotScreen(QtWidgets.QWidget):
 
         self._empty_label.show()
         self.tab_widget.hide()
-        self._update_toolbar_visibility()
 
     def _on_tab_close_requested(self, index):
         widget = self.tab_widget.widget(index)
@@ -114,10 +68,6 @@ class PlotScreen(QtWidgets.QWidget):
     def _update_tab_bar_visibility(self):
         visible = len(self._tabs) > 1
         self.tab_widget.tabBar().setVisible(visible)
-
-    def _update_toolbar_visibility(self):
-        tab = self._active_tab()
-        self._toolbar.setVisible(tab is not None and hasattr(tab, 'take_psd_snapshot'))
 
     def add_device(self, name, device_type, sample_rate=20000.0, num_channels=None, channel_labels=None):
         if name in self._tabs:
@@ -309,40 +259,4 @@ class PlotScreen(QtWidgets.QWidget):
             self.tab_widget.update()
         super().changeEvent(event)
 
-    def _add_marker(self):
-        tab = self._active_tab()
-        if tab is None:
-            return
-        vb = tab.canvas.raw_plot.getViewBox()
-        if vb is None:
-            return
-        x_range = vb.viewRange()[0]
-        ts = x_range[0] + (x_range[1] - x_range[0]) * 0.8
-        self.add_marker(ts)
 
-    def _open_marker_dialog(self):
-        if self._marker_dialog is None:
-            self._marker_dialog = MarkerDialog(self)
-            self._marker_dialog.rename_requested.connect(self._on_marker_rename)
-            self._marker_dialog.delete_requested.connect(self._on_marker_delete)
-        markers = self.get_markers()
-        self._marker_dialog.set_markers(markers)
-        self._marker_dialog.show()
-        self._marker_dialog.raise_()
-
-    def _on_marker_rename(self, marker_id, new_name):
-        markers = self.get_markers()
-        for m in markers:
-            if m.get("id") == marker_id:
-                m["name"] = new_name
-                break
-        self.set_marker_catalog(markers)
-        if self._marker_dialog is not None:
-            self._marker_dialog.set_markers(markers)
-
-    def _on_marker_delete(self, marker_id):
-        markers = self.get_markers()
-        markers = [m for m in markers if m.get("id") != marker_id]
-        self.set_marker_catalog(markers)
-        if self._marker_dialog is not None:
-            self._marker_dialog.set_markers(markers)

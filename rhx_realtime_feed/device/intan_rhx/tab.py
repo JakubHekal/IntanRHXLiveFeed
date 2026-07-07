@@ -32,6 +32,7 @@ from rhx_realtime_feed.screens.plot_helpers import (
 from rhx_realtime_feed.telemetry_logger import append_telemetry_line
 from rhx_realtime_feed.device.tabs.base import DeviceTab
 from rhx_realtime_feed.device.ring_buffer import RingBuffer
+from rhx_realtime_feed.screens.marker_dialog import MarkerDialog
 from .canvas import PgCanvas
 
 
@@ -90,10 +91,50 @@ class NeuralDeviceTab(DeviceTab):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
 
+        tool_row = QtWidgets.QHBoxLayout()
+        tool_row.setContentsMargins(4, 4, 4, 0)
+        tool_row.setSpacing(4)
+
         self._channel_combo = QtWidgets.QComboBox()
         self._channel_combo.addItems(self._channel_labels)
         self._channel_combo.currentIndexChanged.connect(self._on_channel_changed)
-        layout.addWidget(self._channel_combo)
+        tool_row.addWidget(self._channel_combo)
+
+        tool_row.addSpacing(16)
+
+        self.btn_psd_snapshot = QtWidgets.QToolButton()
+        self.btn_psd_snapshot.setText("PSD Snap")
+        self.btn_psd_snapshot.setToolTip("Capture PSD snapshot as dashed overlay")
+        self.btn_psd_snapshot.clicked.connect(self.take_psd_snapshot)
+        tool_row.addWidget(self.btn_psd_snapshot)
+
+        self.btn_wf_snapshot = QtWidgets.QToolButton()
+        self.btn_wf_snapshot.setText("WF Snap")
+        self.btn_wf_snapshot.setToolTip("Capture waveform snapshot as dashed overlay")
+        self.btn_wf_snapshot.clicked.connect(self.take_waveform_snapshot)
+        tool_row.addWidget(self.btn_wf_snapshot)
+
+        self.btn_clear_snapshots = QtWidgets.QToolButton()
+        self.btn_clear_snapshots.setText("Clear Snap")
+        self.btn_clear_snapshots.setToolTip("Remove all snapshot overlays")
+        self.btn_clear_snapshots.clicked.connect(self.clear_snapshots)
+        tool_row.addWidget(self.btn_clear_snapshots)
+
+        tool_row.addSpacing(16)
+
+        self.btn_add_marker = QtWidgets.QToolButton()
+        self.btn_add_marker.setText("Add Marker")
+        self.btn_add_marker.setToolTip("Add a visual marker near the right edge of the visible plot")
+        self.btn_add_marker.clicked.connect(self._add_marker)
+        tool_row.addWidget(self.btn_add_marker)
+
+        self.btn_markers = QtWidgets.QToolButton()
+        self.btn_markers.setText("Markers\u2026")
+        self.btn_markers.setToolTip("View, rename, or delete markers")
+        self.btn_markers.clicked.connect(self._open_marker_dialog)
+        tool_row.addWidget(self.btn_markers)
+
+        layout.addLayout(tool_row)
 
         self.canvas = PgCanvas(self)
         layout.addWidget(self.canvas, 1)
@@ -104,6 +145,8 @@ class NeuralDeviceTab(DeviceTab):
         self._exp_worker = ExpensiveTaskWorker(self)
         self._exp_worker.result_ready.connect(self._on_expensive_task_result)
         self._exp_worker.start()
+
+        self._marker_dialog = None
 
         self._connect_plot_range_signals()
         self._install_plot_follow_context_actions()
@@ -776,6 +819,43 @@ class NeuralDeviceTab(DeviceTab):
         self.canvas.wf_plot.setTitle(f"Averaged spike waveform (last {self._waveform_buffer_sec}s)")
         if self._spike_bin_sec != prev_spike_bin_sec:
             self._schedule_spike_rebin_task()
+
+
+    def _add_marker(self):
+        vb = self.canvas.raw_plot.getViewBox()
+        if vb is None:
+            return
+        x_range = vb.viewRange()[0]
+        ts = x_range[0] + (x_range[1] - x_range[0]) * 0.8
+        if isinstance(ts, (float, int)):
+            self.add_marker(ts)
+
+    def _open_marker_dialog(self):
+        if self._marker_dialog is None:
+            self._marker_dialog = MarkerDialog(self)
+            self._marker_dialog.rename_requested.connect(self._on_marker_rename)
+            self._marker_dialog.delete_requested.connect(self._on_marker_delete)
+        markers = self.get_markers()
+        self._marker_dialog.set_markers(markers)
+        self._marker_dialog.show()
+        self._marker_dialog.raise_()
+
+    def _on_marker_rename(self, marker_id, new_name):
+        markers = self.get_markers()
+        for m in markers:
+            if m.get("id") == marker_id:
+                m["name"] = new_name
+                break
+        self.set_marker_catalog(markers)
+        if self._marker_dialog is not None:
+            self._marker_dialog.set_markers(markers)
+
+    def _on_marker_delete(self, marker_id):
+        markers = self.get_markers()
+        markers = [m for m in markers if m.get("id") != marker_id]
+        self.set_marker_catalog(markers)
+        if self._marker_dialog is not None:
+            self._marker_dialog.set_markers(markers)
 
 
 class _Result:
