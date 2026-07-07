@@ -992,6 +992,13 @@ class SmuDeviceTab(DeviceTab):
             for i in range(n):
                 self._ring_write(t[i], voltage[i], current[i])
             self.sample_counter += n
+            if self.sample_counter % 500 < n:
+                append_telemetry_line(
+                    f"smutab | on_data | shape={arr.shape} "
+                    f"v=[{float(voltage[0]):.6f}..{float(voltage[-1]):.6f}] "
+                    f"i=[{float(current[0]):.9f}..{float(current[-1]):.9f}] "
+                    f"total={self._total}"
+                )
 
     def _ring_write(self, t, v, i):
         pos = self._wpos
@@ -1035,18 +1042,19 @@ class SmuDeviceTab(DeviceTab):
         t, v, i = self._ring_read(n_vis)
         if t.size < 2:
             return
-        self.canvas.voltage_curve.setData(t, v)
-        self.canvas.current_curve.setData(t, i)
-        self.canvas.voltage_plot.autoRange()
+        td, vd = _minmax_downsample(t, v, MAX_DISPLAY_POINTS)
+        _, id = _minmax_downsample(t, i, MAX_DISPLAY_POINTS)
+        self.canvas.voltage_curve.setData(td, vd)
+        self.canvas.current_curve.setData(td, id)
 
-        v_range = float(np.max(v)) - float(np.min(v)) if v.size else 1.0
-        i_range = float(np.max(i)) - float(np.min(i)) if i.size else 1.0
+        v_range = float(np.max(vd)) - float(np.min(vd)) if vd.size else 1.0
+        i_range = float(np.max(id)) - float(np.min(id)) if id.size else 1.0
         v_pad = max(0.1, v_range * 0.1)
         i_pad = max(0.001, i_range * 0.1)
         self._suspend_follow_detection = True
         try:
-            self.canvas.voltage_plot.setYRange(float(np.min(v)) - v_pad, float(np.max(v)) + v_pad, padding=0)
-            self.canvas.current_plot.setYRange(float(np.min(i)) - i_pad, float(np.max(i)) + i_pad, padding=0)
+            self.canvas.voltage_plot.setYRange(float(np.min(vd)) - v_pad, float(np.max(vd)) + v_pad, padding=0)
+            self.canvas.current_plot.setYRange(float(np.min(id)) - i_pad, float(np.max(id)) + i_pad, padding=0)
         finally:
             self._suspend_follow_detection = False
 

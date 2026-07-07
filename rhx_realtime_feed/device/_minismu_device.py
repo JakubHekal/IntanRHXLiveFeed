@@ -1,15 +1,16 @@
-import time
-import threading
 import numpy as np
 from typing import Optional, List, Union
 
 from .device import Device, ChannelInfo
+from rhx_realtime_feed.telemetry_logger import append_telemetry_line
 
 from minismu_py import SMU as MiniSMU, ConnectionType, SMUException
 
 
-def _log_smu_error(context: str, e: Exception):
-    print(f"[MiniSMU] {context}: {e}")
+def _smu_tel(event: str, *details):
+    line = f"minismu | {event}" + (" | " + " | ".join(str(d) for d in details) if details else "")
+    append_telemetry_line(line)
+    print(line)
 
 
 class MiniSMUDevice(Device):
@@ -29,10 +30,7 @@ class MiniSMUDevice(Device):
         self._mode = mode.upper()
         self._connected = False
         self._acquisition_running = False
-        self._thread = None
-
-        self._buffer = []
-        self._buffer_lock = threading.Lock()
+        self._sample_rate = 10
 
         self._channels = [
             ChannelInfo(0, "CH1", "bidirectional", "V/A", -12.0, 12.0),
@@ -51,7 +49,7 @@ class MiniSMUDevice(Device):
 
     @property
     def sample_rate(self) -> Optional[float]:
-        return 1000.0
+        return self._sample_rate
 
     @property
     def channels(self) -> List[ChannelInfo]:
@@ -61,82 +59,55 @@ class MiniSMUDevice(Device):
         try:
             idn = self._smu.get_identity()
             self._connected = bool(idn)
+            _smu_tel("connect", "ok", idn)
             return self._connected
         except SMUException as e:
-            _log_smu_error("connect", e)
+            _smu_tel("connect", "fail", e)
             self._connected = False
             return False
 
     def close(self) -> None:
+        if not self._connected:
+            return
+        _smu_tel("close")
         self.stop_acquisition()
         try:
             self._smu.close()
         except SMUException as e:
-            _log_smu_error("close", e)
+            _smu_tel("close_error", e)
         self._connected = False
 
     def start_acquisition(self) -> None:
-        if self._acquisition_running:
-            return
+        _smu_tel("start_acquisition", "mode=" + self._mode)
         try:
             self._smu.set_mode(1, self._mode)
-            self._smu.set_mode(2, self._mode)
-            self._smu.set_sample_rate(1, 1000)
-            self._smu.set_sample_rate(2, 1000)
-            self._smu.start_streaming(1)
-            self._smu.start_streaming(2)
+            self._smu.enable_channel(1)
         except SMUException as e:
-            _log_smu_error("start_acquisition", e)
-            return
+            _smu_tel("start_acquisition_error", e)
         self._acquisition_running = True
-        self._thread = threading.Thread(target=self._stream_worker, daemon=True)
-        self._thread.start()
 
     def stop_acquisition(self) -> None:
+        if not self._acquisition_running:
+            return
+        _smu_tel("stop_acquisition")
         self._acquisition_running = False
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-            if self._thread.is_alive():
-                print("[MiniSMU] stream worker did not stop within 2s timeout")
-            self._thread = None
         try:
-            self._smu.stop_streaming(1)
-            self._smu.stop_streaming(2)
+            self._smu.disable_channel(1)
         except SMUException as e:
-            _log_smu_error("stop_acquisition", e)
-
-    def _stream_worker(self):
-        while self._acquisition_running:
-            try:
-                ch, ts, v, i = self._smu.read_streaming_data()
-                with self._buffer_lock:
-                    self._buffer.append((ch - 1, ts, v, i))
-            except SMUException:
-                time.sleep(0.001)
+            _smu_tel("stop_acquisition_error", e)
 
     def read_data(self) -> Optional[np.ndarray]:
-        with self._buffer_lock:
-            if not self._buffer:
-                return None
-            buf = list(self._buffer)
-            self._buffer.clear()
-
-        v1 = np.array([b[2] for b in buf if b[0] == 0], dtype=np.float32)
-        i1 = np.array([b[3] for b in buf if b[0] == 0], dtype=np.float32)
-        v2 = np.array([b[2] for b in buf if b[0] == 1], dtype=np.float32)
-        i2 = np.array([b[3] for b in buf if b[0] == 1], dtype=np.float32)
-
-        # ponytail: return [v1, i1] (2 rows) for single-channel display; add all 4 rows if multi-channel UI appears
-        if v1.size and i1.size:
-            return np.stack([v1, i1])
-        if v1.size:
-            return v1.reshape(1, -1)
-        if i1.size:
-            return i1.reshape(1, -1)
-        return None
+        try:
+            v, i = self._smu.measure_voltage_and_current(1)
+        except SMUException as e:
+            _smu_tel("read_data_error", e)
+            return None
+        _smu_tel("read_data", f"v={v:.6f}", f"i={i:.9f}")
+        return np.array([[v], [i]], dtype=np.float32)
 
     def write_output(self, channel_index: int, value: Union[float, bool]) -> None:
         ch = channel_index + 1
+        _smu_tel("write_output", f"ch={ch}", f"mode={self._mode}", f"value={value}")
         try:
             if self._mode == "FVMI":
                 self._smu.set_voltage(ch, float(value))
@@ -144,60 +115,66 @@ class MiniSMUDevice(Device):
                 self._smu.set_current(ch, float(value))
             self._smu.enable_channel(ch)
         except SMUException as e:
-            _log_smu_error("write_output", e)
+            _smu_tel("write_output_error", e)
 
     def trigger_action(self, channel_index: int) -> None:
         ch = channel_index + 1
+        _smu_tel("trigger_action", f"ch={ch}")
         try:
             self._smu.enable_channel(ch)
         except SMUException as e:
-            _log_smu_error("trigger_action", e)
+            _smu_tel("trigger_action_error", e)
 
     def configure(self, **kwargs) -> None:
+        _smu_tel("configure", *[f"{k}={v}" for k, v in kwargs.items()])
         if "mode" in kwargs:
             self._mode = kwargs["mode"].upper()
             try:
                 self._smu.set_mode(1, self._mode)
-                self._smu.set_mode(2, self._mode)
             except SMUException as e:
-                _log_smu_error("configure(mode)", e)
+                _smu_tel("configure_mode_error", e)
         if "current_protection" in kwargs:
             v = float(kwargs["current_protection"])
             try:
                 self._smu.set_current_protection(1, v)
-                self._smu.set_current_protection(2, v)
             except SMUException as e:
-                _log_smu_error("configure(current_protection)", e)
+                _smu_tel("configure_current_protection_error", e)
         if "voltage_protection" in kwargs:
             v = float(kwargs["voltage_protection"])
             try:
                 self._smu.set_voltage_protection(1, v)
-                self._smu.set_voltage_protection(2, v)
             except SMUException as e:
-                _log_smu_error("configure(voltage_protection)", e)
+                _smu_tel("configure_voltage_protection_error", e)
         if "oversampling" in kwargs:
             osr = int(kwargs["oversampling"])
             try:
                 self._smu.set_oversampling_ratio(1, osr)
-                self._smu.set_oversampling_ratio(2, osr)
             except SMUException as e:
-                _log_smu_error("configure(oversampling)", e)
+                _smu_tel("configure_oversampling_error", e)
+        if "sample_rate" in kwargs:
+            v = int(kwargs["sample_rate"])
+            self._sample_rate = v
+            try:
+                self._smu.set_sample_rate(1, v)
+            except SMUException as e:
+                _smu_tel("configure_sample_rate_error", e)
 
     @classmethod
     def get_operations(cls):
         from .device import DeviceOperation, ParamDef
         return [
-            DeviceOperation("Configure", "Configure", instantaneous=True, default_duration=0, color="#E74856", params=[
+            DeviceOperation("configure", "Configure", instantaneous=True, default_duration=0, color="#E74856", params=[
                 ParamDef("current_protection", "Current Protection (A)", "float", default=0.1, min_val=0.001, max_val=1.0),
                 ParamDef("voltage_protection", "Voltage Protection (V)", "float", default=12.0, min_val=0.1, max_val=24.0),
                 ParamDef("oversampling", "Oversampling", "int", default=16, min_val=1, max_val=256),
+                ParamDef("sample_rate", "Sample Rate (Hz)", "int", default=10, min_val=1, max_val=1000)
             ]),
             DeviceOperation("force_voltage", "Force Voltage", default_duration=5.0, color="#F1707A", params=[
                 ParamDef("channel", "Channel", "int", default=1, min_val=1, max_val=2),
                 ParamDef("voltage", "Voltage (V)", "float", default=5.0, min_val=-12.0, max_val=12.0),
                 ParamDef("current_limit", "Current Limit (A)", "float", default=0.1, min_val=0.001, max_val=1.0),
             ]),
-            DeviceOperation("Measure", "Measure", instantaneous=True, default_duration=0, color="#E74856"),
+            DeviceOperation("measure", "Measure", instantaneous=True, default_duration=0, color="#E74856"),
             DeviceOperation("force_current", "Force Current", default_duration=60.0, color="#D13438", params=[
                 ParamDef("channel", "Channel", "int", default=1, min_val=1, max_val=2),
                 ParamDef("current", "Current (nA)", "float", default=-100000.0, min_val=-1000000.0, max_val=1000000.0),

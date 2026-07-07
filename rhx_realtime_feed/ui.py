@@ -439,6 +439,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Already Running", "An experiment is already in progress.")
                 return
 
+        # ensure every timeline device has a plot tab before the run starts
+        for d in self.main_stage.timeline._devices:
+            if d[2] == "__system__":
+                continue
+            name, dev_type = d[0], d[2]
+            if name not in self.main_stage.plot_screen._tabs:
+                sr = 1000.0 if dev_type == "smu" else 20000.0
+                self.main_stage.plot_screen.add_device(name, dev_type, sample_rate=sr)
+
         timeline_devs = self._devices_with_instances()
         sequence = self._build_sequence_for_runner()
 
