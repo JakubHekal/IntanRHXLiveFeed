@@ -61,9 +61,19 @@ class MainWindow(QMainWindow):
         self._setup_status_bar()
         self.main_stage.plot_screen.fps_updated.connect(self._fps_status_label.setText)
 
+    def _close_devices(self):
+        for inst in getattr(self, '_run_device_instances', []):
+            if inst is not None and hasattr(inst, 'close'):
+                try:
+                    inst.close()
+                except Exception as e:
+                    print(f"[UI] Error closing device: {e}")
+        self._run_device_instances = []
+
     def closeEvent(self, event):
         if getattr(self, '_experiment_runner', None) is not None and self._experiment_runner.is_running():
             self._experiment_runner.stop()
+        self._close_devices()
         self.main_stage.plot_screen.shutdown_workers()
         if self._legacy_window is not None:
             self._legacy_window.close()
@@ -533,6 +543,7 @@ class MainWindow(QMainWindow):
         self.main_stage.btn_play.setEnabled(True)
         self.main_stage.btn_pause.setEnabled(False)
         self.main_stage.btn_stop.setEnabled(False)
+        self._close_devices()
         self._experiment_runner = None
 
     def _on_replay_run(self, run_path):

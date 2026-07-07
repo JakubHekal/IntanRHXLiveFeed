@@ -503,13 +503,7 @@ class IntanRHXDevice(Device, RHXConfig):
             ]),
             DeviceOperation("Stream", "Stream", default_duration=10.0, color="#4BA3E3", params=[
                 ParamDef("channels", "Channels (e.g. 0-31)", "channel_list", default=""),
-            ]),
-            DeviceOperation("Stimulus", "Stimulus", default_duration=3.0, color="#D13438", params=[
-                ParamDef("channel", "Channel", "int", default=1, min_val=1, max_val=256),
-                ParamDef("amplitude", "Amplitude (µV)", "float", default=500.0, min_val=0.0, max_val=5000.0),
-                ParamDef("waveform", "Waveform", "choice", default="biphasic", choices=["biphasic", "monophasic"]),
-                ParamDef("frequency", "Frequency (Hz)", "float", default=100.0, min_val=1.0, max_val=1000.0),
-            ]),
+            ])
         ]
 
     @classmethod

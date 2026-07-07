@@ -227,13 +227,19 @@ class _RunnerThread(QtCore.QThread):
                         device.trigger_action(ch)
                         self.msleep(100)
 
-                    elif action == "Stimulus":
+                    elif action in ("Stimulus", "force_voltage"):
+                        if hasattr(device, 'configure'):
+                            device.configure(mode="FVMI")
                         if hasattr(device, 'write_output'):
                             ch = params.get("channel", 1) - 1
                             val = params.get("voltage", params.get("amplitude", 5.0))
                             device.write_output(max(0, ch), val)
                         dur = params.get("duration_s", 1.0)
                         self.msleep(int(dur * 1000))
+                        try:
+                            device.write_output(max(0, ch), 0.0)
+                        except Exception:
+                            pass
 
                     elif action == "Measure":
                         if hasattr(device, 'read_data'):
@@ -241,9 +247,9 @@ class _RunnerThread(QtCore.QThread):
                             print(f"[Runner] {device_name} Measure: got {data.shape if data is not None else 'None'}")
                         self.msleep(100)
 
-                    elif action == "force_current":
+                    elif action in ("force_current",):
                         ch = params.get("channel", 1) - 1
-                        current_nA = float(params.get("current_nA", -100000.0))
+                        current_nA = float(params.get("current", params.get("current_nA", -100000.0)))
                         dur = float(params.get("duration_s", 1200.0))
                         label = params.get("block_label", "ForceCurrent")
 
@@ -357,3 +363,13 @@ class _RunnerThread(QtCore.QThread):
         except Exception as e:
             self.experiment_finished.emit(False, str(e))
             print(f"[Runner] Fatal error: {e}")
+
+        finally:
+            for d in self._devices:
+                if isinstance(d, (list, tuple)) and len(d) >= 5:
+                    inst = d[4]
+                    if inst is not None and hasattr(inst, 'close'):
+                        try:
+                            inst.close()
+                        except Exception as e:
+                            print(f"[Runner] Error closing device {d[0]}: {e}")
