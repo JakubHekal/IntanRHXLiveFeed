@@ -5,6 +5,7 @@ from PyQt5 import QtWidgets, QtCore
 
 from rhx_realtime_feed.screens.plot_helpers import PLOT_UPDATE_FREQ_HZ
 from rhx_realtime_feed.screens.device_tab import NeuralDeviceTab, SmuDeviceTab
+from rhx_realtime_feed.screens.marker_dialog import MarkerDialog
 
 
 class PlotScreen(QtWidgets.QWidget):
@@ -24,7 +25,49 @@ class PlotScreen(QtWidgets.QWidget):
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setSpacing(2)
+
+        toolbar = QtWidgets.QHBoxLayout()
+        toolbar.setContentsMargins(4, 4, 4, 0)
+        toolbar.setSpacing(4)
+
+        self.btn_psd_snapshot = QtWidgets.QToolButton()
+        self.btn_psd_snapshot.setText("PSD Snap")
+        self.btn_psd_snapshot.setToolTip("Capture PSD snapshot as dashed overlay")
+        self.btn_psd_snapshot.clicked.connect(self.take_psd_snapshot)
+
+        self.btn_wf_snapshot = QtWidgets.QToolButton()
+        self.btn_wf_snapshot.setText("WF Snap")
+        self.btn_wf_snapshot.setToolTip("Capture waveform snapshot as dashed overlay")
+        self.btn_wf_snapshot.clicked.connect(self.take_waveform_snapshot)
+
+        self.btn_clear_snapshots = QtWidgets.QToolButton()
+        self.btn_clear_snapshots.setText("Clear Snap")
+        self.btn_clear_snapshots.setToolTip("Remove all snapshot overlays")
+        self.btn_clear_snapshots.clicked.connect(self.clear_snapshots)
+
+        toolbar.addWidget(self.btn_psd_snapshot)
+        toolbar.addWidget(self.btn_wf_snapshot)
+        toolbar.addWidget(self.btn_clear_snapshots)
+
+        toolbar.addSpacing(16)
+
+        self.btn_add_marker = QtWidgets.QToolButton()
+        self.btn_add_marker.setText("Add Marker")
+        self.btn_add_marker.setToolTip("Add a visual marker near the right edge of the visible plot")
+        self.btn_add_marker.clicked.connect(self._add_marker)
+
+        self.btn_markers = QtWidgets.QToolButton()
+        self.btn_markers.setText("Markers\u2026")
+        self.btn_markers.setToolTip("View, rename, or delete markers")
+        self.btn_markers.clicked.connect(self._open_marker_dialog)
+
+        toolbar.addWidget(self.btn_add_marker)
+        toolbar.addWidget(self.btn_markers)
+
+        layout.addLayout(toolbar)
+
+        self._marker_dialog = None
 
         self.tab_widget = QtWidgets.QTabWidget()
         self.tab_widget.setDocumentMode(True)
@@ -247,3 +290,41 @@ class PlotScreen(QtWidgets.QWidget):
         if event.type() in (13, QtCore.QEvent.WindowStateChange):
             self.tab_widget.update()
         super().changeEvent(event)
+
+    def _add_marker(self):
+        tab = self._active_tab()
+        if tab is None:
+            return
+        vb = tab.canvas.raw_plot.getViewBox()
+        if vb is None:
+            return
+        x_range = vb.viewRange()[0]
+        ts = x_range[0] + (x_range[1] - x_range[0]) * 0.8
+        self.add_marker(ts)
+
+    def _open_marker_dialog(self):
+        if self._marker_dialog is None:
+            self._marker_dialog = MarkerDialog(self)
+            self._marker_dialog.rename_requested.connect(self._on_marker_rename)
+            self._marker_dialog.delete_requested.connect(self._on_marker_delete)
+        markers = self.get_markers()
+        self._marker_dialog.set_markers(markers)
+        self._marker_dialog.show()
+        self._marker_dialog.raise_()
+
+    def _on_marker_rename(self, marker_id, new_name):
+        markers = self.get_markers()
+        for m in markers:
+            if m.get("id") == marker_id:
+                m["name"] = new_name
+                break
+        self.set_marker_catalog(markers)
+        if self._marker_dialog is not None:
+            self._marker_dialog.set_markers(markers)
+
+    def _on_marker_delete(self, marker_id):
+        markers = self.get_markers()
+        markers = [m for m in markers if m.get("id") != marker_id]
+        self.set_marker_catalog(markers)
+        if self._marker_dialog is not None:
+            self._marker_dialog.set_markers(markers)

@@ -10,7 +10,6 @@ from PyQt5.QtWidgets import (
 from ._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
 from .timeline import ExperimentTimeline
 from .plot_screen import PlotScreen
-from .marker_dialog import MarkerDialog
 
 
 BG_HEADER = "#2D2D2D"
@@ -120,7 +119,7 @@ class LeftSidebar(QFrame):
         self._empty_label.setAlignment(Qt.AlignCenter)
         self._empty_label.setWordWrap(True)
         self._empty_label.setStyleSheet("color: #6C6C6C; padding: 40px 16px; border: 1px solid #3E3E3E; border-radius: 4px; margin: 8px;")
-        layout.addWidget(self._empty_label)
+        layout.addWidget(self._empty_label, 1)
 
         self.run_list = QListWidget()
         self.run_list.setAlternatingRowColors(True)
@@ -286,6 +285,7 @@ class RightSidebar(QFrame):
         layout.addWidget(scroll)
         self.setMinimumWidth(260)
         self._device_expander.hide()
+        self._update_visibility()
 
     def _build_param_widget(self, param_def, current_value):
         value = current_value if current_value is not None else param_def.default
@@ -492,44 +492,6 @@ class MainStage(QWidget):
         timeline_bar.addWidget(self.btn_pause)
         timeline_bar.addWidget(self.btn_stop)
 
-        timeline_bar.addSpacing(16)
-
-        self.btn_psd_snapshot = QToolButton()
-        self.btn_psd_snapshot.setText("PSD Snap")
-        self.btn_psd_snapshot.setToolTip("Capture PSD snapshot as dashed overlay")
-        self.btn_psd_snapshot.clicked.connect(self.plot_screen.take_psd_snapshot)
-
-        self.btn_wf_snapshot = QToolButton()
-        self.btn_wf_snapshot.setText("WF Snap")
-        self.btn_wf_snapshot.setToolTip("Capture waveform snapshot as dashed overlay")
-        self.btn_wf_snapshot.clicked.connect(self.plot_screen.take_waveform_snapshot)
-
-        self.btn_clear_snapshots = QToolButton()
-        self.btn_clear_snapshots.setText("Clear Snap")
-        self.btn_clear_snapshots.setToolTip("Remove all snapshot overlays")
-        self.btn_clear_snapshots.clicked.connect(self.plot_screen.clear_snapshots)
-
-        timeline_bar.addWidget(self.btn_psd_snapshot)
-        timeline_bar.addWidget(self.btn_wf_snapshot)
-        timeline_bar.addWidget(self.btn_clear_snapshots)
-
-        timeline_bar.addSpacing(16)
-
-        self.btn_add_marker = QToolButton()
-        self.btn_add_marker.setText("Add Marker")
-        self.btn_add_marker.setToolTip("Add a visual marker near the right edge of the visible plot")
-        self.btn_add_marker.clicked.connect(self._add_marker)
-
-        self.btn_markers = QToolButton()
-        self.btn_markers.setText("Markers\u2026")
-        self.btn_markers.setToolTip("View, rename, or delete markers")
-        self.btn_markers.clicked.connect(self._open_marker_dialog)
-
-        timeline_bar.addWidget(self.btn_add_marker)
-        timeline_bar.addWidget(self.btn_markers)
-
-        self._marker_dialog = None
-
         center_layout.addWidget(self.plot_screen, 1)
 
         self.timeline = ExperimentTimeline()
@@ -546,40 +508,4 @@ class MainStage(QWidget):
         layout.addWidget(center_widget, 4)
         layout.addWidget(self.right_sidebar, 1)
 
-    def _add_marker(self):
-        tab = self.plot_screen._active_tab()
-        if tab is None:
-            return
-        vb = tab.canvas.raw_plot.getViewBox()
-        if vb is None:
-            return
-        x_range = vb.viewRange()[0]
-        ts = x_range[0] + (x_range[1] - x_range[0]) * 0.8
-        self.plot_screen.add_marker(ts)
 
-    def _open_marker_dialog(self):
-        if self._marker_dialog is None:
-            self._marker_dialog = MarkerDialog(self)
-            self._marker_dialog.rename_requested.connect(self._on_marker_rename)
-            self._marker_dialog.delete_requested.connect(self._on_marker_delete)
-        markers = self.plot_screen.get_markers()
-        self._marker_dialog.set_markers(markers)
-        self._marker_dialog.show()
-        self._marker_dialog.raise_()
-
-    def _on_marker_rename(self, marker_id, new_name):
-        markers = self.plot_screen.get_markers()
-        for m in markers:
-            if m.get("id") == marker_id:
-                m["name"] = new_name
-                break
-        self.plot_screen.set_marker_catalog(markers)
-        if self._marker_dialog is not None:
-            self._marker_dialog.set_markers(markers)
-
-    def _on_marker_delete(self, marker_id):
-        markers = self.plot_screen.get_markers()
-        markers = [m for m in markers if m.get("id") != marker_id]
-        self.plot_screen.set_marker_catalog(markers)
-        if self._marker_dialog is not None:
-            self._marker_dialog.set_markers(markers)
