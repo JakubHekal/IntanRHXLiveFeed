@@ -65,6 +65,7 @@ def populate_form_from_params(form_layout: QFormLayout, param_defs: list, curren
 
 def connect_param_signals(store: list, slot):
     from PyQt5.QtWidgets import QDoubleSpinBox, QSpinBox, QCheckBox, QComboBox, QLineEdit
+    from rhx_realtime_feed.screens.channel_selector import ChannelSelector
     for name, w, pd in store:
         if isinstance(w, (QDoubleSpinBox, QSpinBox)):
             w.valueChanged.connect(slot)
@@ -74,6 +75,8 @@ def connect_param_signals(store: list, slot):
             w.currentTextChanged.connect(slot)
         elif isinstance(w, QLineEdit):
             w.textChanged.connect(slot)
+        elif isinstance(w, ChannelSelector):
+            w.valueChanged.connect(slot)
 
 
 def gather_params(store: list) -> dict:

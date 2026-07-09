@@ -7,18 +7,10 @@ from PyQt5 import QtWidgets, QtCore
 import numpy as np
 
 from rhx_realtime_feed.plot_settings import load_plot_setting, save_plot_setting, DEFAULT_PSDS, DEFAULT_WAVEFORM, DEFAULT_SPIKE_BIN
-from rhx_realtime_feed.workers.processing_worker import (
-    ProcessingWorker,
-    configure_processing_windows,
-    SPIKE_INCREMENTAL_MIN_SAMPLES,
-    SPIKE_OVERLAP_SAMPLES,
-    PSD_BUFFER_SEC,
-    WAVEFORM_BUFFER_SEC,
-    SPIKE_BIN_SEC,
-    PSD_YLIM_MIN,
-    PSD_YLIM_MAX,
-)
-from rhx_realtime_feed.workers.expensive_task_worker import ExpensiveTaskWorker
+from rhx_realtime_feed.device.background_worker import BackgroundWorker
+from . import processing as _proc_cfg
+from ._processing_tasks import _run_spike_detect, _run_spike_rebin
+from .processing import PSD_YLIM_MIN, PSD_YLIM_MAX, SPIKE_INCREMENTAL_MIN_SAMPLES, SPIKE_OVERLAP_SAMPLES, configure_processing_windows
 from rhx_realtime_feed.screens.plot_helpers import (
     _minmax_downsample,
     DISPLAY_WINDOW_SEC, DEFAULT_SAMPLING_RATE,
@@ -139,10 +131,10 @@ class NeuralDeviceTab(DeviceTab):
         self.canvas = PgCanvas(self)
         layout.addWidget(self.canvas, 1)
 
-        self._proc_worker = ProcessingWorker(self)
+        self._proc_worker = BackgroundWorker(self)
         self._proc_worker.result_ready.connect(self._on_processing_result)
         self._proc_worker.start()
-        self._exp_worker = ExpensiveTaskWorker(self)
+        self._exp_worker = BackgroundWorker(self)
         self._exp_worker.result_ready.connect(self._on_expensive_task_result)
         self._exp_worker.start()
 
@@ -294,10 +286,11 @@ class NeuralDeviceTab(DeviceTab):
                 self._pending_channel = ch
 
                 self._proc_worker.schedule(
+                    _run_spike_detect,
                     sig_tail.copy(), t_tail.copy(), self.sampling_rate,
                     list(self._spike_times_cache.get(ch, [])),
                     rel_last, t_tail.size,
-                    do_psd=should_run_psd, do_spike=True,
+                    bool(should_run_psd), True,
                 )
             else:
                 psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec)))
@@ -305,9 +298,10 @@ class NeuralDeviceTab(DeviceTab):
                 self._last_proc_abs_start = self._ring.total - t_tail.size
                 self._pending_channel = ch
                 self._proc_worker.schedule(
+                    _run_spike_detect,
                     sig_tail.copy(), t_tail.copy(), self.sampling_rate,
                     [], 0, sig_tail.size,
-                    do_psd=True, do_spike=False,
+                    True, False,
                 )
         self._tel_ingest_ms_total += (time.perf_counter() - ingest_t0) * 1000.0
         self._emit_telemetry_if_due("neural")
@@ -388,15 +382,14 @@ class NeuralDeviceTab(DeviceTab):
             return
         task_id = self._next_task_id()
         self._active_expensive_task_id['spike_rebin'] = task_id
-        job = {
-            "task_type": "spike_rebin",
-            "task_id": task_id,
-            "session_id": int(self._session_id),
-            "spike_times": list(self._spike_times_cache.get(self._current_channel_idx, [])),
-            "bin_sec": float(self._spike_bin_sec),
-            "last_time_s": float(self.sample_counter) / max(float(self.sampling_rate), 1e-9),
-        }
-        self._exp_worker.schedule(job)
+        self._exp_worker.schedule(
+            _run_spike_rebin,
+            list(self._spike_times_cache.get(self._current_channel_idx, [])),
+            float(self._spike_bin_sec),
+            float(self.sample_counter) / max(float(self.sampling_rate), 1e-9),
+            task_id,
+            int(self._session_id),
+        )
 
     def _sync_marker_lines(self, x_min, x_max):
         lines_to_remove = []

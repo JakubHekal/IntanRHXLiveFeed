@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from PyQt5 import QtWidgets, QtCore
-from rhx_realtime_feed.workers.processing_worker import PSD_BUFFER_SEC, WAVEFORM_BUFFER_SEC, SPIKE_BIN_SEC
+from rhx_realtime_feed.device.intan_rhx.processing import PSD_BUFFER_SEC, WAVEFORM_BUFFER_SEC, SPIKE_BIN_SEC
 from rhx_realtime_feed.plot_settings import load_plot_setting, DEFAULT_PSDS, DEFAULT_WAVEFORM, DEFAULT_SPIKE_BIN
 
 class ConnectDialog(QtWidgets.QDialog):

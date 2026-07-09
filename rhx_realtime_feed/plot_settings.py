@@ -1,6 +1,6 @@
 from PyQt5.QtCore import QSettings
 
-from rhx_realtime_feed.workers.processing_worker import (
+from rhx_realtime_feed.device.intan_rhx.processing import (
     PSD_BUFFER_SEC as DEFAULT_PSDS,
     WAVEFORM_BUFFER_SEC as DEFAULT_WAVEFORM,
     SPIKE_BIN_SEC as DEFAULT_SPIKE_BIN,

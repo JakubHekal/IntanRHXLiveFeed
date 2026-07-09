@@ -1,7 +1,7 @@
 import pyqtgraph as pg
 from PyQt5 import QtWidgets, QtCore, QtGui
 
-from rhx_realtime_feed.workers.processing_worker import (
+from rhx_realtime_feed.device.intan_rhx.processing import (
     PSD_BUFFER_SEC, SPIKE_BIN_SEC, WAVEFORM_BUFFER_SEC,
     PSD_YLIM_MIN, PSD_YLIM_MAX,
 )
