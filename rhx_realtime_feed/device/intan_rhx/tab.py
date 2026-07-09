@@ -206,22 +206,48 @@ class NeuralDeviceTab(DeviceTab):
         self._follow_axes[key] = enabled
 
     def _install_plot_bin_window_size_context_actions(self):
-        spike_plot = self._plot_item_for_key('spike')
-        if spike_plot is not None:
-            vb = spike_plot.vb
+        self._window_bin_menus = []
+        for key, label, setting_attr, values, title_fmt in (
+            ('psd', 'Window size', '_psd_buffer_sec', [5, 10, 20, 30, 60],
+             "Power spectrum (last {}s)"),
+            ('spike', 'Bin width', '_spike_bin_sec', [5, 10, 15, 20, 30, 60],
+             "Spike counts ({}s bins)"),
+            ('wf', 'Window size', '_waveform_buffer_sec', [5, 10, 20, 30, 60],
+             "Averaged spike waveform (last {}s)"),
+        ):
+            plot_item = self._plot_item_for_key(key)
+            if plot_item is None:
+                continue
+            vb = plot_item.vb
             vb.menu.addSeparator()
-            bin_menu = QtWidgets.QMenu("Bin width")
-            for sec in (5, 10, 15, 20, 30, 60):
-                a = bin_menu.addAction(f"{sec}s bins")
-                a.triggered.connect(lambda *a, s=sec: self._set_spike_bin_sec(s))
-            vb.menu.addMenu(bin_menu)
+            sub = QtWidgets.QMenu(label)
+            for val in values:
+                a = sub.addAction(f"{val}s")
+                a.triggered.connect(
+                    lambda *a, v=val, s=setting_attr, t=title_fmt: self._set_window_sec(s, v, t)
+                )
+            vb.menu.addMenu(sub)
+            self._window_bin_menus.append(sub)
 
-    def _set_spike_bin_sec(self, sec):
-        self._spike_bin_sec = sec
-        save_plot_setting("spike_bin_sec", sec)
-        configure_processing_windows(spike_bin_sec=sec)
-        self.canvas.spike_plot.setTitle(f"Spike counts ({sec}s bins)")
-        self._schedule_spike_rebin_task()
+    def _set_window_sec(self, setting_attr, sec, title_format):
+        setattr(self, setting_attr, sec)
+        key = {'_psd_buffer_sec': 'psd_buffer_sec',
+               '_waveform_buffer_sec': 'waveform_buffer_sec',
+               '_spike_bin_sec': 'spike_bin_sec'}[setting_attr]
+        save_plot_setting(key, sec)
+        configure_processing_windows(
+            psd_buffer_sec=self._psd_buffer_sec,
+            waveform_buffer_sec=self._waveform_buffer_sec,
+            spike_bin_sec=self._spike_bin_sec,
+        )
+        plot_key = {'_psd_buffer_sec': 'psd',
+                    '_waveform_buffer_sec': 'wf',
+                    '_spike_bin_sec': 'spike'}[setting_attr]
+        plot_item = self._plot_item_for_key(plot_key)
+        if plot_item:
+            plot_item.setTitle(title_format.format(sec))
+        if setting_attr == '_spike_bin_sec':
+            self._schedule_spike_rebin_task()
 
     def _update_raw_history_stride(self):
         self._raw_hist_stride_low = max(1, int(round(self.sampling_rate / RAW_HISTORY_TARGET_HZ)))

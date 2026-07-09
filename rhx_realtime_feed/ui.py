@@ -310,15 +310,16 @@ class MainWindow(QMainWindow):
         sequence = []
         step_id = 1
         for dev in devs:
-            if dev[2] == "__system__":
-                continue
             for block in dev[1]:
                 op_name = block[4] if len(block) >= 5 else block[0]
                 params = block[5] if len(block) >= 6 else {}
+                p = dict(params)
+                p["duration_s"] = block[2] * 60.0
+                p["_start"] = block[1]
                 sequence.append(SequenceStep(
                     step_id=step_id,
                     action=op_name,
-                    parameters=dict(params),
+                    parameters=p,
                     device_name=dev[0],
                 ))
                 step_id += 1
@@ -639,29 +640,38 @@ class MainWindow(QMainWindow):
                 timeline.add_device(name=dev_type, device_type=dev_type)
                 self.main_stage.plot_screen.add_device(dev_type, dev_type)
 
-        # map device name → index
-        name_to_idx = {
-            d[0]: i for i, d in enumerate(timeline._devices)
-            if d[2] != "__system__"
-        }
+        # ensure system device row exists for system blocks
+        if not any(d[2] == "__system__" for d in timeline._devices):
+            timeline._devices.append(["__System__", [], "__system__", {}])
+            timeline._update_total_time()
+            timeline._update_height()
 
-        # ensure at least one device exists
-        if not name_to_idx:
+        # map device name → index
+        name_to_idx = {d[0]: i for i, d in enumerate(timeline._devices)}
+
+        # ensure at least one non-system device exists
+        non_system_idxs = {k: v for k, v in name_to_idx.items()
+                           if timeline._devices[v][2] != "__system__"}
+        if not non_system_idxs:
             timeline.add_device(name="Default", device_type="rhx")
             self.main_stage.plot_screen.add_device("Default", "rhx")
-            name_to_idx = {
-                d[0]: i for i, d in enumerate(timeline._devices)
-                if d[2] != "__system__"
-            }
+            name_to_idx = {d[0]: i for i, d in enumerate(timeline._devices)}
+            non_system_idxs = {k: v for k, v in name_to_idx.items()
+                               if timeline._devices[v][2] != "__system__"}
 
+        sorted_steps = sorted(config.sequence, key=lambda s: s.parameters.get("_start", 0))
         current_time = 0.0
-        for step in config.sequence:
-            duration = step.parameters.get("duration_s", 2.0)
+        for step in sorted_steps:
+            start = step.parameters.get("_start", current_time)
+            duration = step.parameters.get("duration_s", 2.0) / 60.0
             dev_idx = name_to_idx.get(step.device_name) if step.device_name else None
             if dev_idx is None:
-                dev_idx = next(iter(name_to_idx.values()))
-            timeline.add_block(dev_idx, step.action, start=current_time, duration=duration, params=dict(step.parameters))
-            current_time += duration
+                dev_idx = next(iter(non_system_idxs.values()))
+            clean_params = {k: v for k, v in step.parameters.items()
+                            if k not in ('duration_s', '_start')}
+            timeline.add_block(dev_idx, step.action, start=start, duration=duration, params=clean_params)
+            if "_start" not in step.parameters:
+                current_time += timeline._devices[dev_idx][1][-1][2]
 
 
 def main():

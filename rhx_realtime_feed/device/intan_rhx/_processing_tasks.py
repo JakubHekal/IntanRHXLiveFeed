@@ -3,10 +3,8 @@ import numpy as np
 from .processing import psd as _psd
 from .processing import spike_count as _spike_count
 from .processing import spike_plot as _spike_plot
-from .processing import (
-    PSD_BUFFER_SEC, SPIKE_BIN_SEC, SPIKE_INCREMENTAL_MIN_SAMPLES,
-    SPIKE_OVERLAP_SAMPLES, WAVEFORM_BUFFER_SEC,
-)
+from . import processing as _proc_cfg
+from .processing import SPIKE_INCREMENTAL_MIN_SAMPLES, SPIKE_OVERLAP_SAMPLES
 
 
 class _ProcessingResult:
@@ -54,7 +52,7 @@ def _detect_spike_indices(x: np.ndarray, fs: float) -> np.ndarray:
 
 # ponytail: histogram cache — single-threaded in BackgroundWorker, never concurrently accessed
 _hist_counts = np.zeros(0, dtype=np.int64)
-_hist_bin_sec = float(SPIKE_BIN_SEC)
+_hist_bin_sec = float(_proc_cfg.SPIKE_BIN_SEC)
 _hist_spike_count = 0
 _hist_last_t = 0.0
 _hist_minute_idx_cache = None
@@ -63,7 +61,7 @@ _hist_minute_idx_cache = None
 def _reset_hist_cache():
     global _hist_counts, _hist_bin_sec, _hist_spike_count, _hist_last_t, _hist_minute_idx_cache
     _hist_counts = np.zeros(0, dtype=np.int64)
-    _hist_bin_sec = float(SPIKE_BIN_SEC)
+    _hist_bin_sec = float(_proc_cfg.SPIKE_BIN_SEC)
     _hist_spike_count = 0
     _hist_last_t = 0.0
     _hist_minute_idx_cache = None
@@ -71,7 +69,7 @@ def _reset_hist_cache():
 
 def _update_incremental_histogram(spike_times, last_time_s):
     global _hist_counts, _hist_bin_sec, _hist_spike_count, _hist_last_t, _hist_minute_idx_cache
-    bin_sec = float(SPIKE_BIN_SEC)
+    bin_sec = float(_proc_cfg.SPIKE_BIN_SEC)
     total_bins = max(1, int(np.floor(float(last_time_s) / bin_sec)) + 1)
     cur_count = len(spike_times)
     need_reset = (
@@ -115,7 +113,7 @@ def _run_spike_detect(signal_snap, t_snap, fs, spike_cache, last_scan, stored, d
     result.has_spike_update = do_spike
 
     if do_psd:
-        psd_samples = max(8, int(round(fs * PSD_BUFFER_SEC)))
+        psd_samples = max(8, int(round(fs * _proc_cfg.PSD_BUFFER_SEC)))
         psd_sig = signal_snap[-psd_samples:]
         target_nperseg = max(64, int(round(_psd.TARGET_NPERSEG_SEC * fs)))
         nperseg = min(target_nperseg, psd_sig.size)
@@ -163,7 +161,7 @@ def _run_spike_detect(signal_snap, t_snap, fs, spike_cache, last_scan, stored, d
 
         if spike_arr.size >= 1 and t_snap.size:
             current_time = t_snap[-1]
-            wf_spike_arr = spike_arr[spike_arr >= current_time - WAVEFORM_BUFFER_SEC]
+            wf_spike_arr = spike_arr[spike_arr >= current_time - _proc_cfg.WAVEFORM_BUFFER_SEC]
             if wf_spike_arr.size >= 1:
                 pk_indices = np.searchsorted(t_snap, wf_spike_arr, side='left').astype(int)
                 if pk_indices.size:
