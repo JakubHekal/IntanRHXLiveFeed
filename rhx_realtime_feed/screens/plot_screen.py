@@ -28,9 +28,6 @@ class PlotScreen(QtWidgets.QWidget):
 
         self.tab_widget = QtWidgets.QTabWidget()
         self.tab_widget.setDocumentMode(True)
-        # ponytail: tabs are closeable only when multi-device, single-device hides bar entirely
-        self.tab_widget.setTabsClosable(True)
-        self.tab_widget.tabCloseRequested.connect(self._on_tab_close_requested)
         # toolbar visibility handled per-tab
         layout.addWidget(self.tab_widget, 1)
 
@@ -55,15 +52,6 @@ class PlotScreen(QtWidgets.QWidget):
 
         self._empty_label.show()
         self.tab_widget.hide()
-
-    def _on_tab_close_requested(self, index):
-        widget = self.tab_widget.widget(index)
-        name = self.tab_widget.tabText(index)
-        if widget is not None:
-            widget.shutdown()
-        self.tab_widget.removeTab(index)
-        self._tabs.pop(name, None)
-        self._update_tab_bar_visibility()
 
     def _update_tab_bar_visibility(self):
         visible = len(self._tabs) > 1

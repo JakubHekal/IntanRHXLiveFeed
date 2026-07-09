@@ -1,3 +1,7 @@
+import os
+import subprocess
+import sys
+
 from PyQt5.QtCore import QPropertyAnimation, QRect, QSize, Qt, QEasingCurve, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QFontMetrics
 from PyQt5.QtWidgets import (
@@ -137,6 +141,14 @@ class LeftSidebar(QFrame):
         if run_path:
             self.run_selected.emit(run_path)
 
+    def _open_in_explorer(self, path):
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+
     def _on_run_context_menu(self, pos):
         item = self.run_list.itemAt(pos)
         if item is None:
@@ -146,6 +158,8 @@ class LeftSidebar(QFrame):
             return
         menu = QMenu(self)
         menu.addAction("Rerun", lambda: self.run_action.emit("rerun", run_path))
+        menu.addSeparator()
+        menu.addAction("Open in Explorer", lambda: self._open_in_explorer(run_path))
         menu.addSeparator()
         menu.addAction("Rename\u2026", lambda: self.run_action.emit("rename", run_path))
         menu.addAction("Delete\u2026", lambda: self.run_action.emit("delete", run_path))
@@ -158,9 +172,10 @@ class LeftSidebar(QFrame):
             self.run_list.setVisible(False)
             return
         from pathlib import Path
-        run_paths = sorted(Path(runs_dir).iterdir(), reverse=True)
         import json
-        for rp in run_paths:
+        from datetime import datetime
+        entries = []
+        for rp in sorted(Path(runs_dir).iterdir(), reverse=True):
             if not rp.is_dir() or rp.name.startswith('.'):
                 continue
             meta_file = rp / "run.json"
@@ -174,22 +189,35 @@ class LeftSidebar(QFrame):
                     pass
             if "run" in meta:
                 run_data = meta["run"]
-                exp_data = meta.get("experiment", {})
-                name = exp_data.get("name", run_data.get("name", rp.name))
+                name = run_data.get("name", rp.name)
                 ts = run_data.get("start_time", "")
                 status = run_data.get("status", "unknown")
             else:
                 name = meta.get("name", rp.name)
                 ts = meta.get("timestamp", "")
                 status = meta.get("status", "unknown")
-            label = f"[{ts}] {name} \u2014 {status}" if ts else f"{name} \u2014 {status}"
+            try:
+                dt = datetime.fromisoformat(ts) if ts else None
+                ts_display = dt.strftime("%Y-%m-%d %H:%M") if dt else ts
+            except Exception:
+                ts_display = ts
+            entry = (ts or "", name, ts_display, status, str(rp))
+            entries.append(entry)
+        entries.sort(key=lambda e: e[0], reverse=True)
+        for ts_raw, name, ts_display, status, rp_str in entries:
+            label = f"{name}\n{status}" if not ts_display else f"{name}\n{ts_display} \u2014 {status}"
             item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, str(rp))
+            item.setData(Qt.UserRole, rp_str)
             if status == "running":
-                f = item.font()
-                f.setBold(True)
-                item.setFont(f)
-                item.setForeground(QColor("#00FF00"))
+                color = QColor("#00FF00")
+            elif status == "success":
+                color = QColor("#FFD700")
+            elif status == "failed":
+                color = QColor("#FF4444")
+            else:
+                color = QColor("#999999")
+            item.setForeground(color)
+            item.setSizeHint(QSize(0, 44))
             self.run_list.addItem(item)
         has_runs = self.run_list.count() > 0
         self._empty_label.setVisible(not has_runs)

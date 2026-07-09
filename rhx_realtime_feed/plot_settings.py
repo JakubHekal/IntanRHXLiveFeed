@@ -7,6 +7,7 @@ from rhx_realtime_feed.device.intan_rhx.processing import (
 )
 
 _SETTINGS = QSettings("RHX", "RealtimeFeed")
+_RECENT_EXPERIMENT_KEY = "recent_experiment_path"
 
 
 def load_plot_setting(key: str, default: int) -> int:
@@ -15,3 +16,11 @@ def load_plot_setting(key: str, default: int) -> int:
 
 def save_plot_setting(key: str, value: int):
     _SETTINGS.setValue(key, value)
+
+
+def save_recent_experiment(path: str):
+    _SETTINGS.setValue(_RECENT_EXPERIMENT_KEY, path)
+
+
+def load_recent_experiment() -> str:
+    return _SETTINGS.value(_RECENT_EXPERIMENT_KEY, "", type=str)

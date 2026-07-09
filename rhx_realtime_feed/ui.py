@@ -26,6 +26,7 @@ from rhx_realtime_feed.screens.legacy_main_window import LegacyMainWindow
 from rhx_realtime_feed.screens._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
 from rhx_realtime_feed.screens.timeline import ExperimentTimeline
 from rhx_realtime_feed.screens.stage import FluentExpander, LeftSidebar, RightSidebar, MainStage
+from rhx_realtime_feed.plot_settings import save_recent_experiment, load_recent_experiment
 
 BG_DARK = "#1E1E1E"
 BG_SURFACE = "#252526"
@@ -58,8 +59,28 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.main_stage, 1)
 
         self._wire_behavior()
+        self._prompt_recent_experiment()
         self._setup_status_bar()
         self.main_stage.plot_screen.fps_updated.connect(self._fps_status_label.setText)
+
+    def _prompt_recent_experiment(self):
+        path = load_recent_experiment()
+        if not path or not Path(path).exists():
+            return
+        name = Path(path).name
+        reply = QMessageBox.question(
+            self, "Open Recent Experiment",
+            f"Open the last experiment?\n\n{name}",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if reply == QMessageBox.Yes:
+            config_path = Path(path) / "config.json"
+            if config_path.exists():
+                self._current_experiment_path = path
+                config = ExperimentManager.load(path)
+                self._populate_timeline_from_config(config)
+                self.setWindowTitle(f"NeuroSense Data \u2014 {config.metadata.experiment_name}")
+                self.main_stage.left_sidebar.reload_runs(str(Path(path) / "runs"))
 
     def _close_devices(self):
         for inst in getattr(self, '_run_device_instances', []):
@@ -226,6 +247,7 @@ class MainWindow(QMainWindow):
             return
         new_name = new_name.strip()
         dst = ExperimentManager.clone_experiment(self._current_experiment_path, new_name)
+        save_recent_experiment(str(dst))
         self._current_experiment_path = str(dst)
         config = ExperimentManager.load(dst)
         self._populate_timeline_from_config(config)
@@ -265,6 +287,7 @@ class MainWindow(QMainWindow):
         if dialog.exec_():
             path = dialog.result_path()
             if path:
+                save_recent_experiment(path)
                 self._current_experiment_path = path
                 config = ExperimentManager.load(path)
                 self._populate_timeline_from_config(config)
@@ -284,6 +307,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid Experiment",
                                 "Selected directory does not contain a config.json file.")
             return
+        save_recent_experiment(path)
         self._current_experiment_path = path
         config = ExperimentManager.load(path)
         self._populate_timeline_from_config(config)

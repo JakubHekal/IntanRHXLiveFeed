@@ -278,6 +278,12 @@ class ExperimentManager:
         if dst.exists():
             raise FileExistsError(f"Run '{new_name}' already exists")
         src.rename(dst)
+        meta_file = dst / "run.json"
+        if meta_file.exists():
+            data = json.loads(meta_file.read_text())
+            if "run" in data and "name" in data["run"]:
+                data["run"]["name"] = new_name
+                meta_file.write_text(json.dumps(data, indent=2))
         return dst
 
     @staticmethod
