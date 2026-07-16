@@ -1,5 +1,5 @@
 import pyqtgraph as pg
-from PyQt5 import QtWidgets, QtCore, QtGui
+from PyQt5 import QtWidgets, QtCore
 
 from rhx_realtime_feed.device.intan_rhx.processing import (
     PSD_BUFFER_SEC, SPIKE_BIN_SEC, WAVEFORM_BUFFER_SEC,
@@ -15,8 +15,7 @@ class PgCanvas(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.glw = pg.GraphicsLayoutWidget()
-        self.glw.setViewportUpdateMode(QtWidgets.QGraphicsView.FullViewportUpdate)
-        self.glw.setRenderHint(QtGui.QPainter.Antialiasing)
+        self.glw.setViewportUpdateMode(QtWidgets.QGraphicsView.MinimalViewportUpdate)
         layout.addWidget(self.glw)
 
         self.glw.setContextMenuPolicy(QtCore.Qt.DefaultContextMenu)

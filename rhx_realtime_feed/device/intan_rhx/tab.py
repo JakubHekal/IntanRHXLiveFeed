@@ -511,6 +511,7 @@ class NeuralDeviceTab(DeviceTab):
         t0 = time.perf_counter()
         now = t0
         did_work = False
+        spike_did_work = False
 
         if (now - self._last_raw_render_t) >= 1.0 / RAW_RENDER_HZ:
             did_work = True
@@ -518,7 +519,10 @@ class NeuralDeviceTab(DeviceTab):
             if self._follow_axes['raw']:
                 n_vis = int(self.sampling_rate * DISPLAY_WINDOW_SEC)
                 x_vis, y_vis = self._ring.read_tail(n_vis)
-                xd, yd = _minmax_downsample(x_vis, y_vis, MAX_DISPLAY_POINTS)
+                # ponytail: strided take, zero-alloc. _minmax_downsample costs 3-6ms
+                # with 5 numpy allocs for 200K→5K; strided take is ~0.001ms.
+                step = max(1, x_vis.size // MAX_DISPLAY_POINTS)
+                xd, yd = x_vis[::step], y_vis[::step]
                 self.canvas.raw_curve.setData(xd, yd)
                 x_end = float(x_vis[-1]) if x_vis.size else 0.0
                 x_start = max(0.0, x_end - DISPLAY_WINDOW_SEC)
@@ -529,7 +533,8 @@ class NeuralDeviceTab(DeviceTab):
                     self.canvas.raw_plot.setXRange(x_start, x_end, padding=0)
                 finally:
                     self._suspend_follow_detection = False
-                peak = float(np.max(np.abs(y_vis))) if y_vis.size else 0.0
+                # ponytail: zero-alloc peak — np.max(np.abs(y_vis)) allocates a 200K temp
+                peak = max(abs(float(y_vis.min())), abs(float(y_vis.max()))) if y_vis.size else 0.0
                 y_lim = max(0.2, peak * 1.2)
                 self._suspend_follow_detection = True
                 try:
@@ -613,6 +618,7 @@ class NeuralDeviceTab(DeviceTab):
 
         if r is not None and self._spike_pending and (now - self._last_spike_render_t) >= 1.0 / SPIKE_RENDER_HZ:
             did_work = True
+            spike_did_work = True
             if r.spike_minute_idx is not None and r.spike_counts is not None:
                 self.canvas.spike_curve.setData(r.spike_minute_idx, r.spike_counts)
                 max_count = max(1, int(np.max(r.spike_counts)) if r.spike_counts.size else 1)
@@ -651,9 +657,11 @@ class NeuralDeviceTab(DeviceTab):
             self._spike_pending = False
             self._last_spike_render_t = now
 
-        spike_vr = self.canvas.spike_plot.vb.viewRange()[0]
-        if len(spike_vr) >= 2:
-            self._sync_spike_marker_lines(float(spike_vr[0]), float(spike_vr[1]))
+        # ponytail: only sync spike markers when spike data actually rendered, not at 90Hz
+        if spike_did_work:
+            spike_vr = self.canvas.spike_plot.vb.viewRange()[0]
+            if len(spike_vr) >= 2:
+                self._sync_spike_marker_lines(float(spike_vr[0]), float(spike_vr[1]))
 
         self._render_dur_ms = (time.perf_counter() - t0) * 1000.0
         if did_work:

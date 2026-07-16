@@ -5,6 +5,7 @@ from PyQt5 import QtWidgets, QtCore
 
 from rhx_realtime_feed.screens.plot_helpers import PLOT_UPDATE_FREQ_HZ
 from rhx_realtime_feed.screens._registry import _DEVICE_CLASSES
+from rhx_realtime_feed.device.ring_buffer import RingBuffer
 
 
 class PlotScreen(QtWidgets.QWidget):
@@ -94,10 +95,17 @@ class PlotScreen(QtWidgets.QWidget):
             self._empty_label.show()
             self.tab_widget.hide()
 
-    def on_device_configured(self, device_name: str, num_channels: int, channel_labels: list[str]):
+    def on_device_configured(self, device_name: str, num_channels: int, channel_labels: list[str], sample_rate: float = 0.0):
         tab = self._tabs.get(device_name)
-        if tab is not None and hasattr(tab, '_resize'):
+        if tab is None:
+            return
+        if hasattr(tab, 'clear'):
+            tab.clear()
+        if hasattr(tab, '_resize'):
             tab._resize(num_channels, channel_labels)
+        if sample_rate > 0 and hasattr(tab, 'sampling_rate'):
+            tab.sampling_rate = float(sample_rate)
+            tab._ring = RingBuffer(tab.sampling_rate, tab._ring.num_channels, duration_sec=300)
 
     def clear_all(self):
         for name in list(self._tabs):

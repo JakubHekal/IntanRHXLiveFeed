@@ -1,5 +1,5 @@
 import pyqtgraph as pg
-from PyQt5 import QtWidgets, QtCore, QtGui
+from PyQt5 import QtWidgets, QtCore
 
 
 class SmuCanvas(QtWidgets.QWidget):
@@ -9,8 +9,7 @@ class SmuCanvas(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.glw = pg.GraphicsLayoutWidget()
-        self.glw.setViewportUpdateMode(QtWidgets.QGraphicsView.FullViewportUpdate)
-        self.glw.setRenderHint(QtGui.QPainter.Antialiasing)
+        self.glw.setViewportUpdateMode(QtWidgets.QGraphicsView.MinimalViewportUpdate)
         self.glw.setContextMenuPolicy(QtCore.Qt.DefaultContextMenu)
         layout.addWidget(self.glw)
 
