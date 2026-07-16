@@ -300,15 +300,17 @@ class ExperimentTimeline(QWidget):
             self.update()
 
     def _step_timeline_range(self, step_index):
-        all_blocks = []
+        # ponytail: iterate in device order matching set_active_step counting,
+        # not sorted by start time — interleaved blocks from different devices
+        # would map to wrong positions when sorted.
+        count = 0
         for row in self._devices:
             if row[2] == "__system__":
                 continue
             for block in row[1]:
-                all_blocks.append((block[1], block[2]))  # start, dur
-        all_blocks.sort(key=lambda x: x[0])
-        if step_index < len(all_blocks):
-            return all_blocks[step_index][0], all_blocks[step_index][1]
+                if count == step_index:
+                    return block[1], block[2]  # start, dur
+                count += 1
         return None, None
 
     def _on_cursor_tick(self):

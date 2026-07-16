@@ -477,7 +477,14 @@ class MainWindow(QMainWindow):
                 continue
             name, dev_type = d[0], d[2]
             if name not in self.main_stage.plot_screen._tabs:
-                sr = 1000.0 if dev_type == "smu" else 20000.0
+                inst = None
+                for ri in self._run_device_instances:
+                    if hasattr(ri, 'name') and ri.name == name:
+                        inst = ri
+                        break
+                    if hasattr(ri, 'device_type') and ri.device_type == dev_type:
+                        inst = ri
+                sr = inst.sample_rate if (inst and inst.sample_rate) else (10.0 if dev_type == "smu" else 20000.0)
                 self.main_stage.plot_screen.add_device(name, dev_type, sample_rate=sr)
 
         timeline_devs = self._devices_with_instances()

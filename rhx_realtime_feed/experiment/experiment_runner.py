@@ -15,7 +15,7 @@ class ExperimentRunner(QtCore.QObject):
     experiment_finished = QtCore.pyqtSignal(bool, str)  # success, message
     error_occurred = QtCore.pyqtSignal(str, str)  # device_name, error_message
     data_received = QtCore.pyqtSignal(str, object)  # device_name, chunk
-    device_configured = QtCore.pyqtSignal(str, int, list)  # device_name, num_channels, labels
+    device_configured = QtCore.pyqtSignal(str, int, list, float)  # device_name, num_channels, labels, sample_rate
     user_input_requested = QtCore.pyqtSignal(str)  # message
 
     def __init__(self, devices: list, sequence: list, run_path: str, parent=None):
@@ -76,7 +76,7 @@ class _RunnerThread(QtCore.QThread):
     error_occurred = QtCore.pyqtSignal(str, str)
     data_received = QtCore.pyqtSignal(str, object)
     user_input_requested = QtCore.pyqtSignal(str)
-    device_configured = QtCore.pyqtSignal(str, int, list)  # device_name, num_channels, labels
+    device_configured = QtCore.pyqtSignal(str, int, list, float)  # device_name, num_channels, labels, sample_rate
 
     def __init__(self, devices, sequence, run_path, parent=None):
         super().__init__(parent)
@@ -152,7 +152,7 @@ class _RunnerThread(QtCore.QThread):
                         sr = device.sample_rate if device.sample_rate else 20000.0
                         ch_labels = [c.name for c in getattr(device, 'channels', [])]
                         num_ch = len(ch_labels) or 1
-                        self.device_configured.emit(device_name, num_ch, ch_labels)
+                        self.device_configured.emit(device_name, num_ch, ch_labels, sr)
 
                         # raw/{device_name}/ per run
                         dev_raw_dir = self._run_path / "raw" / (device_name.replace(" ", "_"))
