@@ -519,6 +519,7 @@ class MainWindow(QMainWindow):
         self.main_stage.btn_play.setEnabled(False)
         self.main_stage.btn_pause.setEnabled(True)
         self.main_stage.btn_stop.setEnabled(True)
+        self.main_stage.timeline.set_running(True)
 
         # init telemetry + run.json
         set_telemetry_file(str(Path(self._current_run_path) / "run.log"))
@@ -568,6 +569,7 @@ class MainWindow(QMainWindow):
     def _on_exp_finished(self, success, message):
         self._exp_run_action.setEnabled(True)
         self.progress.setValue(0)
+        self.main_stage.timeline.set_running(False)
         self.main_stage.timeline.clear_active_step()
         status = "success" if success else "failed"
         ExperimentManager.update_run(self._current_run_path, status)

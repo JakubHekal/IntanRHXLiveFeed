@@ -1,4 +1,6 @@
-from PyQt5.QtCore import pyqtSignal, Qt, QRect
+import time
+
+from PyQt5.QtCore import pyqtSignal, Qt, QRect, QTimer
 from PyQt5.QtGui import QPainter, QPen, QColor, QFont, QFontMetrics
 from PyQt5.QtWidgets import QWidget, QMenu, QInputDialog
 
@@ -34,6 +36,15 @@ class ExperimentTimeline(QWidget):
         self._drag_press_x = 0.0
         self._drag_orig_start = 0.0
         self._drag_orig_dur = 0.0
+        self._running = False
+        self._cursor_time = None
+        self._cursor_step_start = 0.0
+        self._cursor_step_end = 0.0
+        self._cursor_wall_start = 0.0
+        self._cursor_wall_dur = 1.0
+        self._cursor_timer = QTimer(self)
+        self._cursor_timer.setInterval(30)
+        self._cursor_timer.timeout.connect(self._on_cursor_tick)
         self._update_total_time()
         self._update_height()
 
@@ -111,16 +122,28 @@ class ExperimentTimeline(QWidget):
             if step_index < count + len(blocks):
                 self._active_dev = i
                 self._active_block = step_index - count
-                self.update()
-                return
+                break
             count += len(blocks)
-        self._active_dev = None
-        self._active_block = None
+        else:
+            self._active_dev = None
+            self._active_block = None
+
+        start, dur = self._step_timeline_range(step_index)
+        if start is not None and dur is not None:
+            self._cursor_step_start = start
+            self._cursor_step_end = start + dur
+            self._cursor_wall_start = time.perf_counter()
+            self._cursor_wall_dur = dur if dur > 0 else 1.0
+            self._cursor_time = start
+            if not self._cursor_timer.isActive():
+                self._cursor_timer.start()
         self.update()
 
     def clear_active_step(self):
         self._active_dev = None
         self._active_block = None
+        self._cursor_timer.stop()
+        self._cursor_time = None
         self.update()
 
     def add_block(self, dev_idx, op_name="New Block", start=None, duration=None, params=None):
@@ -170,6 +193,8 @@ class ExperimentTimeline(QWidget):
         self.update()
 
     def contextMenuEvent(self, event):
+        if self._running:
+            return
         mx, my = event.x(), event.y()
         menu = QMenu(self)
         dev_idx, block_idx, _ = self._block_at(mx, my)
@@ -248,6 +273,31 @@ class ExperimentTimeline(QWidget):
         )
         if self._total_time <= 0:
             self._total_time = 1200
+
+    def set_running(self, running):
+        self._running = running
+        if not running:
+            self._cursor_timer.stop()
+            self._cursor_time = None
+            self.update()
+
+    def _step_timeline_range(self, step_index):
+        all_blocks = []
+        for row in self._devices:
+            if row[2] == "__system__":
+                continue
+            for block in row[1]:
+                all_blocks.append((block[1], block[2]))  # start, dur
+        all_blocks.sort(key=lambda x: x[0])
+        if step_index < len(all_blocks):
+            return all_blocks[step_index][0], all_blocks[step_index][1]
+        return None, None
+
+    def _on_cursor_tick(self):
+        elapsed = time.perf_counter() - self._cursor_wall_start
+        frac = min(1.0, elapsed / self._cursor_wall_dur) if self._cursor_wall_dur > 0 else 1.0
+        self._cursor_time = self._cursor_step_start + frac * (self._cursor_step_end - self._cursor_step_start)
+        self.update()
 
     def _plot_left(self):
         return self.LABEL_WIDTH
@@ -357,6 +407,8 @@ class ExperimentTimeline(QWidget):
         self.data_changed.emit()
 
     def mousePressEvent(self, event):
+        if self._running:
+            return
         if event.button() != Qt.LeftButton:
             return
         mx, my = event.x(), event.y()
@@ -380,6 +432,9 @@ class ExperimentTimeline(QWidget):
     def mouseMoveEvent(self, event):
         mx = event.x()
         my = event.y()
+        if self._running:
+            self.setCursor(Qt.ArrowCursor)
+            return
         if self._drag_state:
             if self._drag_state in ("resize_left", "resize_right"):
                 self.setCursor(Qt.SizeHorCursor)
@@ -435,6 +490,8 @@ class ExperimentTimeline(QWidget):
                 self.setCursor(Qt.ArrowCursor)
 
     def mouseReleaseEvent(self, event):
+        if self._running:
+            return
         self._drag_state = None
         self._drag_dev = None
         self._drag_block = None
@@ -656,3 +713,15 @@ class ExperimentTimeline(QWidget):
                     else:
                         bw_act = max(4, int((dur / self._total_time) * plot_w))
                         painter.drawRoundedRect(bx - 2, by - 2, bw_act + 4, bh + 4, 5, 5)
+
+        # Phase 5: Scrolling cursor during experiment run
+        if self._running and self._cursor_time is not None:
+            cx = self._x_from_time(self._cursor_time)
+            elapsed_rect = QRect(plot_left, rows_top, cx - plot_left, rows_height)
+            painter.fillRect(elapsed_rect, QColor(255, 255, 255, 15))
+            painter.setPen(QPen(QColor("#FFD700"), 2))
+            painter.drawLine(cx, rows_top, cx, rows_top + rows_height)
+            painter.setFont(QFont("Consolas", 8))
+            painter.setPen(QPen(QColor("#FFD700"), 1))
+            label = f"{self._cursor_time:.1f}s"
+            painter.drawText(cx - 20, rows_top - 4, 40, 16, Qt.AlignCenter, label)
