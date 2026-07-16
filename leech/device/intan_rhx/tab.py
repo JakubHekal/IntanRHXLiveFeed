@@ -6,12 +6,12 @@ import pyqtgraph as pg
 from PyQt5 import QtWidgets, QtCore
 import numpy as np
 
-from rhx_realtime_feed.plot_settings import load_plot_setting, save_plot_setting, DEFAULT_PSDS, DEFAULT_WAVEFORM, DEFAULT_SPIKE_BIN
-from rhx_realtime_feed.device.background_worker import BackgroundWorker
+from leech.plot_settings import load_plot_setting, save_plot_setting, DEFAULT_PSDS, DEFAULT_WAVEFORM, DEFAULT_SPIKE_BIN
+from leech.device.background_worker import BackgroundWorker
 from . import processing as _proc_cfg
 from ._processing_tasks import _run_spike_detect, _run_spike_rebin
 from .processing import PSD_YLIM_MIN, PSD_YLIM_MAX, SPIKE_INCREMENTAL_MIN_SAMPLES, SPIKE_OVERLAP_SAMPLES, configure_processing_windows
-from rhx_realtime_feed.screens.plot_helpers import (
+from leech.screens.plot_helpers import (
     _minmax_downsample,
     DISPLAY_WINDOW_SEC, DEFAULT_SAMPLING_RATE,
     MAX_DISPLAY_POINTS, PLOT_UPDATE_FREQ_HZ, RAW_RENDER_HZ, PSD_RENDER_HZ, SPIKE_RENDER_HZ,
@@ -21,14 +21,14 @@ from rhx_realtime_feed.screens.plot_helpers import (
     RAW_MANUAL_VIEW_MARGIN_SEC, MAX_RAW_HISTORY_PLOT_POINTS,
     PSD_PLOT_UPDATE_EVERY_N, SPIKE_PLOT_UPDATE_EVERY_N,
 )
-from rhx_realtime_feed.telemetry_logger import append_telemetry_line
-from rhx_realtime_feed.device.tabs.base import DeviceTab
-from rhx_realtime_feed.device.ring_buffer import RingBuffer
-from rhx_realtime_feed.screens.marker_dialog import MarkerDialog
+from leech.telemetry_logger import append_telemetry_line
+from leech.device.tabs.base import DeviceTab
+from leech.device.ring_buffer import RingBuffer
+from leech.screens.marker_dialog import MarkerDialog
 from .canvas import PgCanvas
 
 
-class NeuralDeviceTab(DeviceTab):
+class IntanDeviceTab(DeviceTab):
     def __init__(self, sample_rate=float(DEFAULT_SAMPLING_RATE), num_channels=1, channel_labels=None, parent=None, **kwargs):
         super().__init__(parent, **kwargs)
         self.sampling_rate = sample_rate

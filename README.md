@@ -1,6 +1,6 @@
-# RHX Realtime Feed
+# LEECH
 
-Stream, visualize, and analyze neural recordings from Intan RHX systems in real time.
+Live Electrophysiology Equipment Capture Hub — stream, visualize, and analyze neural recordings from Intan RHX systems in real time.
 
 ## Features
 

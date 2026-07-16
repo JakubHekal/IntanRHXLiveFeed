@@ -1,5 +1,5 @@
 from PyQt5.QtWidgets import QWidget, QDoubleSpinBox, QSpinBox, QCheckBox, QComboBox, QLineEdit, QFormLayout
-from rhx_realtime_feed.device.base import ParamDef
+from leech.device.base import ParamDef
 
 
 def build_param_widget(param_def: ParamDef, current_value=None) -> QWidget:
@@ -26,7 +26,7 @@ def build_param_widget(param_def: ParamDef, current_value=None) -> QWidget:
             w.setCurrentText(value)
         return w
     elif param_def.dtype == "channel_list":
-        from rhx_realtime_feed.screens.channel_selector import ChannelSelector
+        from leech.screens.channel_selector import ChannelSelector
         w = ChannelSelector()
         w.setValue(str(value or ""))
         return w
@@ -65,7 +65,7 @@ def populate_form_from_params(form_layout: QFormLayout, param_defs: list, curren
 
 def connect_param_signals(store: list, slot):
     from PyQt5.QtWidgets import QDoubleSpinBox, QSpinBox, QCheckBox, QComboBox, QLineEdit
-    from rhx_realtime_feed.screens.channel_selector import ChannelSelector
+    from leech.screens.channel_selector import ChannelSelector
     for name, w, pd in store:
         if isinstance(w, (QDoubleSpinBox, QSpinBox)):
             w.valueChanged.connect(slot)

@@ -3,16 +3,16 @@ from pathlib import Path
 
 from PyQt5 import QtCore, QtWidgets, QtGui
 
-from rhx_realtime_feed import __version__
-from rhx_realtime_feed.screens.connect_screen import ConnectDialog
-from rhx_realtime_feed.updater import UpdateCheckThread, UpdateInfo
-from rhx_realtime_feed.screens.marker_dialog import MarkerDialog
-from rhx_realtime_feed.screens.plot_screen import PlotScreen
-from rhx_realtime_feed.device import IntanRHXDevice
-from rhx_realtime_feed.workers.chunk_writer import ChunkWriter
-from rhx_realtime_feed.workers.device_worker import DeviceWorker, RAW_CHUNK_SEC, CSV_FILE_BUFFER_BYTES, CSV_FLUSH_INTERVAL_SEC
-from rhx_realtime_feed.state_manager import StateManager, AppState
-from rhx_realtime_feed.telemetry_logger import set_telemetry_file, append_telemetry_line
+from leech import __version__
+from leech.screens.connect_screen import ConnectDialog
+from leech.updater import UpdateCheckThread, UpdateInfo
+from leech.screens.marker_dialog import MarkerDialog
+from leech.screens.plot_screen import PlotScreen
+from leech.device import IntanRHXDevice
+from leech.workers.chunk_writer import ChunkWriter
+from leech.workers.device_worker import DeviceWorker, RAW_CHUNK_SEC, CSV_FILE_BUFFER_BYTES, CSV_FLUSH_INTERVAL_SEC
+from leech.state_manager import StateManager, AppState
+from leech.telemetry_logger import set_telemetry_file, append_telemetry_line
 
 
 class LegacyMainWindow(QtWidgets.QMainWindow):
@@ -90,7 +90,7 @@ class LegacyMainWindow(QtWidgets.QMainWindow):
         }
 
         # Set up main window
-        self.setWindowTitle("RHX Realtime Feed")
+        self.setWindowTitle("LEECH")
 
         self.plot_screen = PlotScreen()
         self.setCentralWidget(self.plot_screen)
@@ -168,7 +168,7 @@ class LegacyMainWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(3000, self._check_for_updates_auto)
 
     def _check_for_updates_auto(self):
-        settings = QtCore.QSettings("RHX", "RealtimeFeed")
+        settings = QtCore.QSettings("LEECH", "LEECH")
         last_check = settings.value("update/last_check_time", 0, type=int)
         if time.time() - last_check < 86400:
             return
@@ -195,7 +195,7 @@ class LegacyMainWindow(QtWidgets.QMainWindow):
         force_show = getattr(self, "_update_force_show", False)
 
         if isinstance(result, UpdateInfo):
-            QtCore.QSettings("RHX", "RealtimeFeed").setValue(
+            QtCore.QSettings("LEECH", "LEECH").setValue(
                 "update/last_check_time", int(time.time())
             )
             if result.available:

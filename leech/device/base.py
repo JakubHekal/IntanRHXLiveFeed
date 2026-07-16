@@ -99,7 +99,7 @@ class Device(ABC):
 
     @classmethod
     def get_tab_class(cls):
-        from rhx_realtime_feed.device.tabs.base import DeviceTab
+        from leech.device.tabs.base import DeviceTab
         return DeviceTab
 
 

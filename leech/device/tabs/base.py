@@ -2,7 +2,7 @@ import time
 
 from PyQt5 import QtWidgets
 
-from rhx_realtime_feed.telemetry_logger import append_telemetry_line
+from leech.telemetry_logger import append_telemetry_line
 
 
 class DeviceTab(QtWidgets.QWidget):

@@ -13,7 +13,7 @@ from collections.abc import Iterable
 from typing import Optional, List, Union
 
 from ..base import Device, ChannelInfo
-from .tab import NeuralDeviceTab
+from .tab import IntanDeviceTab
 
 FRAMES_PER_BLOCK = 128
 MAGIC_NUMBER = 0x2ef07a08
@@ -496,4 +496,4 @@ class IntanRHXDevice(Device):
 
     @classmethod
     def get_tab_class(cls):
-        return NeuralDeviceTab
+        return IntanDeviceTab

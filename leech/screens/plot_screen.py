@@ -3,9 +3,9 @@ import time
 import pyqtgraph as pg
 from PyQt5 import QtWidgets, QtCore
 
-from rhx_realtime_feed.screens.plot_helpers import PLOT_UPDATE_FREQ_HZ
-from rhx_realtime_feed.screens._registry import _DEVICE_CLASSES
-from rhx_realtime_feed.device.ring_buffer import RingBuffer
+from leech.screens.plot_helpers import PLOT_UPDATE_FREQ_HZ
+from leech.screens._registry import _DEVICE_CLASSES
+from leech.device.ring_buffer import RingBuffer
 
 
 class PlotScreen(QtWidgets.QWidget):

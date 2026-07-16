@@ -16,17 +16,17 @@ from PyQt5.QtWidgets import (
 
 import qdarkstyle
 from qdarkstyle.dark.palette import DarkPalette
-from rhx_realtime_feed.experiment import ExperimentManager, ExperimentDialog, RunExperimentDialog
-from rhx_realtime_feed.experiment.experiment import ExperimentConfig, SequenceStep, _config_to_dict
-from rhx_realtime_feed.telemetry_logger import append_telemetry_line, set_telemetry_file
-from rhx_realtime_feed import __version__
-from rhx_realtime_feed.updater import UpdateCheckThread, UpdateInfo
-from rhx_realtime_feed.experiment.experiment_runner import ExperimentRunner
-from rhx_realtime_feed.screens.legacy_main_window import LegacyMainWindow
-from rhx_realtime_feed.screens._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
-from rhx_realtime_feed.screens.timeline import ExperimentTimeline
-from rhx_realtime_feed.screens.stage import FluentExpander, LeftSidebar, RightSidebar, MainStage
-from rhx_realtime_feed.plot_settings import save_recent_experiment, load_recent_experiment
+from leech.experiment import ExperimentManager, ExperimentDialog, RunExperimentDialog
+from leech.experiment.experiment import ExperimentConfig, SequenceStep, _config_to_dict
+from leech.telemetry_logger import append_telemetry_line, set_telemetry_file
+from leech import __version__
+from leech.updater import UpdateCheckThread, UpdateInfo
+from leech.experiment.experiment_runner import ExperimentRunner
+from leech.screens.legacy_main_window import LegacyMainWindow
+from leech.screens._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
+from leech.screens.timeline import ExperimentTimeline
+from leech.screens.stage import FluentExpander, LeftSidebar, RightSidebar, MainStage
+from leech.plot_settings import save_recent_experiment, load_recent_experiment
 
 BG_DARK = "#1E1E1E"
 BG_SURFACE = "#252526"
@@ -38,7 +38,7 @@ ACCENT_BLUE = "#0078D4"
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("NeuroSense Data")
+        self.setWindowTitle("LEECH")
         self.resize(1700, 980)
 
         central = QWidget()
@@ -79,7 +79,7 @@ class MainWindow(QMainWindow):
                 self._current_experiment_path = path
                 config = ExperimentManager.load(path)
                 self._populate_timeline_from_config(config)
-                self.setWindowTitle(f"NeuroSense Data \u2014 {config.metadata.experiment_name}")
+                self.setWindowTitle(f"LEECH \u2014 {config.metadata.experiment_name}")
                 self.main_stage.left_sidebar.reload_runs(str(Path(path) / "runs"))
 
     def _close_devices(self):
@@ -251,12 +251,12 @@ class MainWindow(QMainWindow):
         self._current_experiment_path = str(dst)
         config = ExperimentManager.load(dst)
         self._populate_timeline_from_config(config)
-        self.setWindowTitle(f"NeuroSense Data \u2014 {config.metadata.experiment_name}")
+        self.setWindowTitle(f"LEECH \u2014 {config.metadata.experiment_name}")
         self.main_stage.left_sidebar.reload_runs(str(dst / "runs"))
 
     def _on_about(self):
-        QMessageBox.about(self, "NeuroSense Data",
-            f"NeuroSense Data v{__version__}\n\nReal-time feed for Intan RHX devices.")
+        QMessageBox.about(self, "LEECH",
+            f"LEECH v{__version__}\n\nLive Electrophysiology Equipment Capture Hub.")
 
     def _check_for_updates(self):
         if getattr(self, '_update_thread', None) is not None and self._update_thread.isRunning():
@@ -291,7 +291,7 @@ class MainWindow(QMainWindow):
                 self._current_experiment_path = path
                 config = ExperimentManager.load(path)
                 self._populate_timeline_from_config(config)
-                self.setWindowTitle(f"NeuroSense Data \u2014 {config.metadata.experiment_name}")
+                self.setWindowTitle(f"LEECH \u2014 {config.metadata.experiment_name}")
                 self.main_stage.left_sidebar.reload_runs(str(Path(path) / "runs"))
 
     def _on_experiment_open(self):
@@ -311,7 +311,7 @@ class MainWindow(QMainWindow):
         self._current_experiment_path = path
         config = ExperimentManager.load(path)
         self._populate_timeline_from_config(config)
-        self.setWindowTitle(f"NeuroSense Data \u2014 {config.metadata.experiment_name}")
+        self.setWindowTitle(f"LEECH \u2014 {config.metadata.experiment_name}")
         self.main_stage.left_sidebar.reload_runs(str(Path(path) / "runs"))
 
     def _on_experiment_save(self):
@@ -403,7 +403,7 @@ class MainWindow(QMainWindow):
             self._run_device_instances = dialog.device_instances()
             run_name = Path(self._current_run_path).name
             self.setWindowTitle(
-                f"NeuroSense Data \u2014 {exp_name} \u2014 Run: {run_name}"
+                f"LEECH \u2014 {exp_name} \u2014 Run: {run_name}"
             )
 
             self._start_experiment_sequence(exp_name)
@@ -597,7 +597,7 @@ class MainWindow(QMainWindow):
         self._experiment_runner = None
 
     def _on_replay_run(self, run_path):
-        from rhx_realtime_feed.workers.replay_worker import ReplayWorker
+        from leech.workers.replay_worker import ReplayWorker
         meta_path = Path(run_path) / "run.json"
         if not meta_path.exists():
             meta_path = Path(run_path) / "metadata.json"

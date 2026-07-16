@@ -1,11 +1,11 @@
 import pyqtgraph as pg
 from PyQt5 import QtWidgets, QtCore
 
-from rhx_realtime_feed.device.intan_rhx.processing import (
+from leech.device.intan_rhx.processing import (
     PSD_BUFFER_SEC, SPIKE_BIN_SEC, WAVEFORM_BUFFER_SEC,
     PSD_YLIM_MIN, PSD_YLIM_MAX,
 )
-from rhx_realtime_feed.screens.plot_helpers import WAVEFORM_YLIM_ABS_UV
+from leech.screens.plot_helpers import WAVEFORM_YLIM_ABS_UV
 
 
 class PgCanvas(QtWidgets.QWidget):

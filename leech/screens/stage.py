@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
-from rhx_realtime_feed.device.widget_builder import build_param_widget, read_param_widget
+from leech.device.widget_builder import build_param_widget, read_param_widget
 from .timeline import ExperimentTimeline
 from .plot_screen import PlotScreen
 
@@ -322,15 +322,15 @@ class RightSidebar(QFrame):
         self._update_visibility()
 
     def _populate_dynamic_form(self, form_layout, param_defs, current_values, store):
-        from rhx_realtime_feed.device.widget_builder import populate_form_from_params
+        from leech.device.widget_builder import populate_form_from_params
         populate_form_from_params(form_layout, param_defs, current_values, store)
 
     def _connect_param_signals(self, store, slot):
-        from rhx_realtime_feed.device.widget_builder import connect_param_signals
+        from leech.device.widget_builder import connect_param_signals
         connect_param_signals(store, slot)
 
     def _gather_params(self, store):
-        from rhx_realtime_feed.device.widget_builder import gather_params
+        from leech.device.widget_builder import gather_params
         return gather_params(store)
 
     def _emit_block_params(self):

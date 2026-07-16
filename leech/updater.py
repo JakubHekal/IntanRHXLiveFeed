@@ -32,7 +32,7 @@ def _do_check(current_version: str) -> UpdateInfo:
         API_URL,
         headers={
             "Accept": "application/vnd.github.v3+json",
-            "User-Agent": f"RHX-Realtime-Feed/{current_version}",
+            "User-Agent": f"Leech/{current_version}",
         },
     )
     with urllib.request.urlopen(req, timeout=5) as resp:

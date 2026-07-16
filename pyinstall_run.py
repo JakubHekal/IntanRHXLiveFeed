@@ -6,16 +6,16 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 
 # Dynamically gather your internal modules so you don't miss any
 try:
-    rhx_hidden_imports = collect_submodules('rhx_realtime_feed')
+    rhx_hidden_imports = collect_submodules('leech')
 except Exception:
     rhx_hidden_imports = [
-        'rhx_realtime_feed.device._rhx_config', 'rhx_realtime_feed.device._rhx_device',
-        'rhx_realtime_feed.state_machine', 'rhx_realtime_feed.state_manager', 'rhx_realtime_feed.telemetry_logger',
-        'rhx_realtime_feed.workers.rhx_worker', 'rhx_realtime_feed.workers.processing_worker',
-        'rhx_realtime_feed.workers.chunk_writer', 'rhx_realtime_feed.workers.marker_manager',
-        'rhx_realtime_feed.processing.psd', 'rhx_realtime_feed.processing.spike_count',
-        'rhx_realtime_feed.processing.spike_plot', 'rhx_realtime_feed.screens.connect_screen',
-        'rhx_realtime_feed.screens.plot_screen', 'rhx_realtime_feed.screens.marker_dialog',
+        'leech.device._rhx_config', 'leech.device._rhx_device',
+        'leech.state_machine', 'leech.state_manager', 'leech.telemetry_logger',
+        'leech.workers.rhx_worker', 'leech.workers.processing_worker',
+        'leech.workers.chunk_writer', 'leech.workers.marker_manager',
+        'leech.processing.psd', 'leech.processing.spike_count',
+        'leech.processing.spike_plot', 'leech.screens.connect_screen',
+        'leech.screens.plot_screen', 'leech.screens.marker_dialog',
     ]
 
 # Aggressive Exclusions to strip out bloat
@@ -47,7 +47,7 @@ exclusions = [
 
 pyinstaller_args = [
     os.path.join(project_root, 'main.py'),
-    '--name', 'RHX Realtime Feed',
+    '--name', 'Leech',
     '--icon', os.path.join(project_root, 'assets', 'icon.ico'),
     '--splash', os.path.join(project_root, 'assets', 'icon.png'),
     '--onefile',
@@ -66,5 +66,5 @@ for mod in exclusions:
 for mod in rhx_hidden_imports:
     pyinstaller_args.extend(['--hidden-import', mod])
 
-print("Building RHX Realtime Feed with PyInstaller...")
+print("Building Leech with PyInstaller...")
 PyInstaller.__main__.run(pyinstaller_args)

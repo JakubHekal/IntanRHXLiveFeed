@@ -4,9 +4,9 @@ import pyqtgraph as pg
 from PyQt5 import QtWidgets, QtGui, QtCore
 import numpy as np
 
-from rhx_realtime_feed.device.tabs.base import DeviceTab
-from rhx_realtime_feed.device.ring_buffer import RingBuffer
-from rhx_realtime_feed.screens.plot_helpers import MAX_DISPLAY_POINTS, _minmax_downsample
+from leech.device.tabs.base import DeviceTab
+from leech.device.ring_buffer import RingBuffer
+from leech.screens.plot_helpers import MAX_DISPLAY_POINTS, _minmax_downsample
 
 
 class SimpleDeviceTab(DeviceTab):

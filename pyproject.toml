@@ -1,7 +1,7 @@
 [project]
-name = "rhx-realtime-feed"
+name = "leech"
 version = "0.1.0"
-description = "Real-time feed for Intan RHX device"
+description = "Live Electrophysiology Equipment Capture Hub"
 requires-python = ">=3.8"
 dependencies = [
     "PyQt5>=5.15.0",
@@ -20,7 +20,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["rhx_realtime_feed*"]
+include = ["leech*"]
 
 [project.scripts]
-rhx-realtime-feed = "main:main"
+leech = "main:main"

@@ -1,4 +1,4 @@
-"""rhx_realtime_feed.device - Hardware device abstraction layer."""
+"""leech.device - Hardware device abstraction layer."""
 
 from .device import Device, ChannelInfo, OutputSink, DeviceOperation, ParamDef
 from .intan_rhx import IntanRHXDevice, GetSampleRateFailure

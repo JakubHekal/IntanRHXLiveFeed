@@ -1,4 +1,4 @@
-from rhx_realtime_feed.ui import main
+from leech.ui import main
 
 if __name__ == "__main__":
     main()

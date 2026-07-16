@@ -3,10 +3,10 @@ import time
 from PyQt5 import QtCore
 import numpy as np
 
-from rhx_realtime_feed.device import Device, OutputSink
-from rhx_realtime_feed.state_manager import StateManager, AppState
-from rhx_realtime_feed.telemetry_logger import append_telemetry_line
-from rhx_realtime_feed.workers.marker_manager import MarkerManager
+from leech.device import Device, OutputSink
+from leech.state_manager import StateManager, AppState
+from leech.telemetry_logger import append_telemetry_line
+from leech.workers.marker_manager import MarkerManager
 
 
 PLOT_UPDATE_HZ = 20

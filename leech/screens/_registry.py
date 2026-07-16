@@ -1,4 +1,4 @@
-from rhx_realtime_feed.device import _PLUGIN_REGISTRY, DeviceOperation, ParamDef
+from leech.device import _PLUGIN_REGISTRY, DeviceOperation, ParamDef
 
 _DEVICE_CLASSES = dict(_PLUGIN_REGISTRY)
 

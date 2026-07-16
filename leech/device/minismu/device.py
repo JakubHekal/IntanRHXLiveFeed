@@ -3,7 +3,7 @@ from typing import Optional, List, Union
 
 from ..base import Device, ChannelInfo
 from .tab import SmuDeviceTab
-from rhx_realtime_feed.telemetry_logger import append_telemetry_line
+from leech.telemetry_logger import append_telemetry_line
 
 from minismu_py import SMU as MiniSMU, ConnectionType, SMUException
 
