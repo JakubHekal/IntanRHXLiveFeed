@@ -7,7 +7,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor
+from PyQt5.QtGui import QColor, QIcon
 from PyQt5.QtWidgets import (
     QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
     QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton, QStatusBar,
@@ -40,6 +40,13 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("LEECH")
         self.resize(1700, 980)
+
+        if getattr(sys, 'frozen', False):
+            _icon_path = Path(sys._MEIPASS) / "icon.png"
+        else:
+            _icon_path = Path(__file__).resolve().parent.parent / "assets" / "icon.png"
+        if _icon_path.exists():
+            self.setWindowIcon(QIcon(str(_icon_path)))
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -732,6 +739,14 @@ def main():
         )
 
     app = QApplication(sys.argv)
+
+    if getattr(sys, 'frozen', False):
+        icon_path = Path(sys._MEIPASS) / "icon.png"
+    else:
+        icon_path = Path(__file__).resolve().parent.parent / "assets" / "icon.png"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
+
     base_ss = qdarkstyle.load_stylesheet(qt_api='pyqt5', palette=DarkPalette)
     override_ss = f"""
         QMainWindow {{ background-color: {BG_DARK}; }}
