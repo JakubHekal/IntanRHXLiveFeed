@@ -537,8 +537,8 @@ class ExperimentTimeline(QWidget):
         step = max(2, int(self._total_time * min_gap / plot_w))
         for t in range(0, int(self._total_time) + 1, step):
             x = plot_left + int((t / self._total_time) * plot_w)
-            painter.drawLine(x, self.HEADER_HEIGHT, x, self.HEADER_HEIGHT + 4)
-            painter.drawText(x - 10, self.HEADER_HEIGHT + 16, str(t))
+            painter.drawLine(x, self.HEADER_HEIGHT - 4, x, self.HEADER_HEIGHT)
+            painter.drawText(x - 10, self.HEADER_HEIGHT - 8, str(t))
 
         if not any(d[2] != "__system__" or d[1] for d in self._devices):
             fnt = self.font()
