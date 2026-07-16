@@ -633,6 +633,7 @@ class MainWindow(QMainWindow):
         self.main_stage.btn_stop.setEnabled(False)
 
     def _on_user_input_requested(self, message):
+        self.main_stage.timeline.clear_active_step()
         dialog = QDialog(self)
         dialog.setWindowTitle("User Input Required")
         dialog.setModal(True)

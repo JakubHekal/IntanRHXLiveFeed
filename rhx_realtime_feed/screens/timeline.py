@@ -533,11 +533,12 @@ class ExperimentTimeline(QWidget):
         painter.setFont(QFont("Segoe UI", 9))
         painter.fillRect(0, 0, w, self.HEADER_HEIGHT, QColor("#2D2D2D"))
 
-        num_ticks = max(2, int(self._total_time / 2))
-        for i in range(num_ticks + 1):
-            x = plot_left + int((i / num_ticks) * plot_w)
+        min_gap = 80
+        step = max(2, int(self._total_time * min_gap / plot_w))
+        for t in range(0, int(self._total_time) + 1, step):
+            x = plot_left + int((t / self._total_time) * plot_w)
             painter.drawLine(x, self.HEADER_HEIGHT, x, self.HEADER_HEIGHT + 4)
-            painter.drawText(x - 10, self.HEADER_HEIGHT + 16, str(i * 120))
+            painter.drawText(x - 10, self.HEADER_HEIGHT + 16, str(t))
 
         if not any(d[2] != "__system__" or d[1] for d in self._devices):
             fnt = self.font()
@@ -744,4 +745,8 @@ class ExperimentTimeline(QWidget):
             painter.setFont(QFont("Consolas", 8))
             painter.setPen(QPen(QColor("#FFD700"), 1))
             label = f"{self._cursor_time:.1f}s"
-            painter.drawText(cx - 20, rows_top - 4, 40, 16, Qt.AlignCenter, label)
+            fm = painter.fontMetrics()
+            lw = fm.horizontalAdvance(label)
+            bg = QRect(cx - lw // 2 - 2, rows_top - 4, lw + 4, 16)
+            painter.fillRect(bg, QColor("#2D2D2D"))
+            painter.drawText(cx - lw // 2, rows_top - 4, lw, 16, Qt.AlignCenter, label)
