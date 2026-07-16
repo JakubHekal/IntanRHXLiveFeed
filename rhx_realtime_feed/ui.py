@@ -338,7 +338,7 @@ class MainWindow(QMainWindow):
                 op_name = block[4] if len(block) >= 5 else block[0]
                 params = block[5] if len(block) >= 6 else {}
                 p = dict(params)
-                p["duration_s"] = block[2] * 60.0
+                p["duration_s"] = block[2]
                 p["_start"] = block[1]
                 sequence.append(SequenceStep(
                     step_id=step_id,
@@ -418,7 +418,8 @@ class MainWindow(QMainWindow):
                     params = block[5] if len(block) >= 6 else {}
                     p = dict(params)
                     p["block_label"] = block[0]
-                    p.setdefault("duration_s", block[2] * 60.0)
+                    p.setdefault("duration_s", block[2])
+                    p["_start"] = block[1]
                     sequence.append(SequenceStep(
                         step_id=step_id,
                         action=op_name,
@@ -432,7 +433,8 @@ class MainWindow(QMainWindow):
                 params = block[5] if len(block) >= 6 else {}
                 p = dict(params)
                 p["block_label"] = block[0]
-                p.setdefault("duration_s", block[2] * 60.0)
+                p.setdefault("duration_s", block[2])
+                p["_start"] = block[1]
                 sequence.append(SequenceStep(
                     step_id=step_id,
                     action=op_name,
@@ -440,6 +442,10 @@ class MainWindow(QMainWindow):
                     device_name=dev[0],
                 ))
                 step_id += 1
+        sequence.sort(key=lambda s: (s.parameters["_start"], s.parameters["duration_s"]))
+        for i, s in enumerate(sequence):
+            s.step_id = i + 1
+            s.parameters.pop("_start", None)
         return sequence
 
     def _devices_with_instances(self):
@@ -687,7 +693,7 @@ class MainWindow(QMainWindow):
         current_time = 0.0
         for step in sorted_steps:
             start = step.parameters.get("_start", current_time)
-            duration = step.parameters.get("duration_s", 2.0) / 60.0
+            duration = step.parameters.get("duration_s", 2.0)
             dev_idx = name_to_idx.get(step.device_name) if step.device_name else None
             if dev_idx is None:
                 dev_idx = next(iter(non_system_idxs.values()))

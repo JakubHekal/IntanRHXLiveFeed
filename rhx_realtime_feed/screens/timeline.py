@@ -11,7 +11,7 @@ class ExperimentTimeline(QWidget):
     LABEL_WIDTH = 130
     HEADER_HEIGHT = 28
     RESIZE_THRESHOLD = 6
-    SNAP = 0.5
+    SNAP = 30.0
     _BLOCK_COLORS = ["#0078D4", "#2B88D8", "#4BA3E3", "#107C10", "#498205",
                      "#D13438", "#E74856", "#F1707A", "#8764B8", "#B146C2", "#C239B3"]
 
@@ -244,10 +244,10 @@ class ExperimentTimeline(QWidget):
     def _update_total_time(self):
         self._total_time = max(
             (s + d for row in self._devices for _, s, d, *_ in row[1]),
-            default=20,
+            default=1200,
         )
         if self._total_time <= 0:
-            self._total_time = 20
+            self._total_time = 1200
 
     def _plot_left(self):
         return self.LABEL_WIDTH
@@ -460,7 +460,7 @@ class ExperimentTimeline(QWidget):
         for i in range(num_ticks + 1):
             x = plot_left + int((i / num_ticks) * plot_w)
             painter.drawLine(x, self.HEADER_HEIGHT, x, self.HEADER_HEIGHT + 4)
-            painter.drawText(x - 10, self.HEADER_HEIGHT + 16, str(i * 2))
+            painter.drawText(x - 10, self.HEADER_HEIGHT + 16, str(i * 120))
 
         if not any(d[2] != "__system__" or d[1] for d in self._devices):
             fnt = self.font()
