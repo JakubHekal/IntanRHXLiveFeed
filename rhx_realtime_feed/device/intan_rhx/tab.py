@@ -491,7 +491,7 @@ class NeuralDeviceTab(DeviceTab):
             self.canvas.raw_plot.removeItem(line)
         self.canvas._marker_lines.clear()
         for label in self.canvas._marker_labels:
-            label.close()
+            self.canvas.raw_plot.removeItem(label)
         self.canvas._marker_labels.clear()
         self.canvas._last_marker_set = []
 
@@ -500,7 +500,7 @@ class NeuralDeviceTab(DeviceTab):
             self.canvas.spike_plot.removeItem(line)
         self.canvas._spike_marker_lines.clear()
         for label in self.canvas._spike_marker_labels:
-            label.close()
+            self.canvas.spike_plot.removeItem(label)
         self.canvas._spike_marker_labels.clear()
         self.canvas._last_spike_marker_set = []
 
