@@ -1,48 +1,49 @@
 # LEECH
 
-Live Electrophysiology Equipment Capture Hub — stream, visualize, and analyze neural recordings from Intan RHX systems in real time.
+Live Electrophysiology Equipment Capture Hub
+
+Real-time data acquisition, visualization, and recording for electrophysiology hardware.
+
+## Supported Devices
+
+- **Intan RHX** -- up to 128 channels via TCP/IP
+- **miniSMU MS01** -- source-measure unit via USB or TCP
 
 ## Features
 
-- Connects to Intan RHX systems via TCP
-- Real-time streaming with configurable sample rates
-- PSD (Power Spectral Density) visualization
-- Spike detection with average waveform plotting
-- Marker management (add, rename, delete)
-- Snapshot capture (PSD and waveforms)
-- Project-based recording with structured storage
-- State-machine-driven lifecycle management
-- Telemetry logging for session diagnostics
+- Real-time signal streaming and visualization (raw waveforms, PSD, spike counts, averaged waveforms)
+- Experiment sequencing with drag-and-drop timeline editor
+- Marker management (add, rename, delete, embedded in CSV recordings)
+- Run history with replay support
+- Dark theme
 
-## Quick Start (from source)
+## Quick Start
 
 ### Requirements
 
 - Python 3.8+
-- Intan RHX software running with TCP server enabled
+- For Intan RHX: Intan software running with TCP server enabled
 
-### Installation
+### Install
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Usage
+### Run
 
 ```bash
 python main.py
 ```
 
-## Pre-built Executable
-
-Pre-built executables are available on the [Releases page](https://github.com/JakubHekal/IntanRHXLiveFeed/releases). Download the latest version and run it directly -- no Python installation required.
-
-## Build Executable from Source
-
-To build a standalone executable with PyInstaller:
+## Build Executable
 
 ```bash
 python pyinstall_run.py
 ```
 
 The executable will be placed in the `dist/` directory.
+
+## Pre-built Executable
+
+Pre-built executables are available on the [Releases page](https://github.com/JakubHekal/IntanRHXLiveFeed/releases). Download the latest version and run it directly -- no Python installation required.
