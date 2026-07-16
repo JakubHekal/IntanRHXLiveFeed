@@ -192,6 +192,21 @@ class ExperimentTimeline(QWidget):
         self.data_changed.emit()
         self.update()
 
+    def duplicate_block(self, dev_idx, block_idx):
+        if dev_idx < 0 or dev_idx >= len(self._devices):
+            return
+        blocks = self._devices[dev_idx][1]
+        if block_idx < 0 or block_idx >= len(blocks):
+            return
+        orig = blocks[block_idx]
+        new_start = orig[1] + (orig[2] if orig[2] > 0 else self.SNAP)
+        dup = [orig[0], new_start, orig[2], orig[3], orig[4],
+               dict(orig[5]) if len(orig) >= 6 and isinstance(orig[5], dict) else {}]
+        blocks.insert(block_idx + 1, dup)
+        self._update_total_time()
+        self.data_changed.emit()
+        self.update()
+
     def contextMenuEvent(self, event):
         if self._running:
             return
@@ -220,6 +235,7 @@ class ExperimentTimeline(QWidget):
         is_system_dev = dev_idx is not None and self._devices[dev_idx][2] == "__system__"
 
         if block_idx is not None:
+            a_dup = menu.addAction(f"Duplicate  \u00ab{self._devices[dev_idx][1][block_idx][0]}\u00bb")
             a_del = menu.addAction(f"Remove  \u00ab{self._devices[dev_idx][1][block_idx][0]}\u00bb")
             menu.addSeparator()
             add_menu, add_actions = _build_add_block_menu(menu, dev_idx)
@@ -227,7 +243,9 @@ class ExperimentTimeline(QWidget):
             if not is_system_dev:
                 a_del_d = menu.addAction(f"Remove  \u00ab{self._devices[dev_idx][0]}\u00bb")
             action = menu.exec_(event.globalPos())
-            if action == a_del:
+            if action == a_dup:
+                self.duplicate_block(dev_idx, block_idx)
+            elif action == a_del:
                 self.remove_block(dev_idx, block_idx)
             elif action in add_actions:
                 self.add_block(dev_idx, add_actions[action])
