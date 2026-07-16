@@ -338,6 +338,7 @@ class MainWindow(QMainWindow):
                 op_name = block[4] if len(block) >= 5 else block[0]
                 params = block[5] if len(block) >= 6 else {}
                 p = dict(params)
+                p["block_label"] = block[0]
                 p["duration_s"] = block[2]
                 p["_start"] = block[1]
                 sequence.append(SequenceStep(

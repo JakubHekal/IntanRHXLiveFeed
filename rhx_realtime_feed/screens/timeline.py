@@ -159,7 +159,7 @@ class ExperimentTimeline(QWidget):
         op_duration = duration
         for op in ops:
             if op.name == op_name:
-                label = op.label
+                label = params.pop("block_label", op.label) if params else op.label
                 color = op.color
                 if op.instantaneous:
                     op_duration = 0
