@@ -113,6 +113,31 @@ class ExperimentTimeline(QWidget):
         self.data_changed.emit()
         self.update()
 
+    def set_active_block(self, device_name, block_label):
+        for i, row in enumerate(self._devices):
+            if row[2] == "__system__":
+                continue
+            if row[0] != device_name:
+                continue
+            for bi, block in enumerate(row[1]):
+                if block[0] == block_label:
+                    self._active_dev = i
+                    self._active_block = bi
+                    start, dur = block[1], block[2]
+                    if start is not None and dur is not None:
+                        self._cursor_step_start = start
+                        self._cursor_step_end = start + dur
+                        self._cursor_wall_start = time.perf_counter()
+                        self._cursor_wall_dur = dur if dur > 0 else 1.0
+                        self._cursor_time = start
+                        if not self._cursor_timer.isActive():
+                            self._cursor_timer.start()
+                    self.update()
+                    return
+        self._active_dev = None
+        self._active_block = None
+        self.update()
+
     def set_active_step(self, step_index):
         count = 0
         for i, row in enumerate(self._devices):

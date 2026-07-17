@@ -453,7 +453,6 @@ class MainWindow(QMainWindow):
         sequence.sort(key=lambda s: (s.parameters["_start"], s.parameters["duration_s"]))
         for i, s in enumerate(sequence):
             s.step_id = i + 1
-            s.parameters.pop("_start", None)
         return sequence
 
     def _devices_with_instances(self):
@@ -567,15 +566,17 @@ class MainWindow(QMainWindow):
         self._exp_run_action.setEnabled(False)
         self.statusBar().showMessage(f"Running: {exp_name}")
 
-    def _on_exp_step_started(self, step_index, device_name, action, duration):
+    def _on_exp_step_started(self, step_index, device_name, action, duration, block_label):
         self.statusBar().showMessage(
             f"Step {step_index + 1}: {device_name} \u2192 {action} ({duration:.1f}s)"
         )
         if hasattr(self, 'progress'):
-            total = len(self._build_sequence_for_runner())
+            total = sum(1 for s in self._build_sequence_for_runner()
+                        if s.action not in ("wait_input", "log_event", "pause",
+                                             "start_recording", "stop_recording"))
             self.progress.setMaximum(total)
             self.progress.setValue(step_index)
-        self.main_stage.timeline.set_active_step(step_index)
+        self.main_stage.timeline.set_active_block(device_name, block_label)
 
     def _on_exp_step_completed(self, step_index, device_name, action):
         if hasattr(self, 'progress'):
