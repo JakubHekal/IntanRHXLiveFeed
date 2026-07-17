@@ -518,7 +518,7 @@ class IntanDeviceTab(DeviceTab):
             self._tel_raw_renders += 1
             if self._follow_axes['raw']:
                 n_vis = int(self.sampling_rate * DISPLAY_WINDOW_SEC)
-                x_vis, y_vis = self._ring.read_tail(n_vis)
+                x_vis, y_vis = self._ring.read_tail(n_vis, ch_idx=self._current_channel_idx)
                 # ponytail: strided take, zero-alloc. _minmax_downsample costs 3-6ms
                 # with 5 numpy allocs for 200K→5K; strided take is ~0.001ms.
                 step = max(1, x_vis.size // MAX_DISPLAY_POINTS)
@@ -595,6 +595,8 @@ class IntanDeviceTab(DeviceTab):
                 if t_src is not None and y_src is not None and np.asarray(t_src).size:
                     xd, yd = _minmax_downsample(np.asarray(t_src), np.asarray(y_src), MAX_RAW_HISTORY_PLOT_POINTS)
                     self.canvas.raw_curve.setData(xd, yd)
+                else:
+                    self.canvas.raw_curve.setData([], [])
             self._sync_marker_lines(max(0.0, min(x_start, x_end)), max(0.0, max(x_start, x_end)))
             self._last_raw_render_t = now
 
