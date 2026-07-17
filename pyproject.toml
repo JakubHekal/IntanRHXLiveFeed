@@ -1,7 +1,7 @@
 [project]
 name = "leech"
 version = "1.0.0"
-description = "Live Electrophysiology Equipment Capture Hub"
+description = "Live Electrophysiology Experiment Capture Hub"
 requires-python = ">=3.8"
 dependencies = [
     "PyQt5>=5.15.0",

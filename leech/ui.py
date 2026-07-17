@@ -263,7 +263,7 @@ class MainWindow(QMainWindow):
 
     def _on_about(self):
         QMessageBox.about(self, "LEECH",
-            f"LEECH v{__version__}\n\nLive Electrophysiology Equipment Capture Hub.")
+            f"LEECH v{__version__}\n\nLive Electrophysiology Experiment Capture Hub.")
 
     def _check_for_updates(self):
         if getattr(self, '_update_thread', None) is not None and self._update_thread.isRunning():

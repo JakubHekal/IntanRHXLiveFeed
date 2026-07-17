@@ -1,13 +1,11 @@
-# LEECH
-
-Live Electrophysiology Equipment Capture Hub
+# LEECH - Live Electrophysiology Experiment Capture Hub
 
 Real-time data acquisition, visualization, and recording for electrophysiology hardware.
 
 ## Supported Devices
 
-- **Intan RHX** -- up to 128 channels via TCP/IP
-- **miniSMU MS01** -- source-measure unit via USB or TCP
+- **Intan RHX** - up to 128 channels via TCP/IP
+- **miniSMU MS01** - source-measure unit via USB or TCP
 
 ## Features
 
