@@ -270,6 +270,16 @@ class IntanRHXDevice(Device):
     def _streaming_worker(self):
         rolling_buffer = bytearray()
         self.set_run_mode("run")
+        # ponytail: drain stale TCP data from previous stream so parser
+        # doesn't misalign on leftover bytes with different num_channels
+        try:
+            while True:
+                self.data_socket.recv(self.read_size)
+        except socket.timeout:
+            pass
+        except (ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
+        self._synced = False
         _intentional_stop = True
         try:
             while self.streaming:
@@ -277,7 +287,7 @@ class IntanRHXDevice(Device):
                 if peer_closed:
                     _intentional_stop = False
                     break
-                emg_data, timestamps, consumed, self._synced = self.parse_emg_stream_fast(rolling_buffer)
+                emg_data, timestamps, consumed, self._synced = self.parse_emg_stream_fast(rolling_buffer, synced=self._synced)
                 rolling_buffer = rolling_buffer[consumed:]
                 if emg_data is not None:
                     n = emg_data.shape[1]
@@ -446,7 +456,12 @@ class IntanRHXDevice(Device):
             prev = int(self._last_read_cursor)
             buf_len = self.circular_buffer.shape[1]
             n_new = (cur - prev) % buf_len
-            if n_new <= 0 or n_new > buf_len // 2:
+            if n_new <= 0:
+                return None
+            if n_new > buf_len // 2:
+                # ponytail: advance cursor so next call sees n_new=0, not same
+                # large value — breaks permanent stall after reconfigure
+                self._last_read_cursor = cur
                 return None
             if prev < cur:
                 data = self.circular_buffer[:, prev:cur].copy()
