@@ -9,7 +9,7 @@ import numpy as np
 from leech.plot_settings import load_plot_setting, save_plot_setting, DEFAULT_PSDS, DEFAULT_WAVEFORM, DEFAULT_SPIKE_BIN
 from leech.device.background_worker import BackgroundWorker
 from . import processing as _proc_cfg
-from ._processing_tasks import _run_spike_detect, _run_spike_rebin
+from ._processing_tasks import _run_spike_detect, _run_spike_rebin, _run_all_channels
 from .processing import PSD_YLIM_MIN, PSD_YLIM_MAX, SPIKE_INCREMENTAL_MIN_SAMPLES, SPIKE_OVERLAP_SAMPLES, configure_processing_windows
 from leech.screens.plot_helpers import (
     _minmax_downsample,
@@ -45,6 +45,8 @@ class IntanDeviceTab(DeviceTab):
         self._channel_results: dict[int, _Result] = {}
         self._spike_times_cache: dict[int, list] = {}
         self._last_spike_scan_sample: dict[int, int] = {}
+        self._hist_states: dict[int, dict] = {}
+        self._hist_last_time_s = 0.0
         self._last_proc_abs_start = 0
         self._psd_buffer_sec = load_plot_setting("psd_buffer_sec", DEFAULT_PSDS)
         self._waveform_buffer_sec = load_plot_setting("waveform_buffer_sec", DEFAULT_WAVEFORM)
@@ -161,6 +163,14 @@ class IntanDeviceTab(DeviceTab):
                     step = max(1, t.size // MAX_RAW_HISTORY_PLOT_POINTS)
                     self._raw_hist_t_high[ch] = t[::step].tolist()
                     self._raw_hist_y_high[ch] = y[::step].tolist()
+        # push cached spike histogram for new channel
+        hist_state = self._hist_states.get(ch)
+        if hist_state is not None:
+            minute_idx = hist_state.get('minute_idx_cache')
+            counts = hist_state.get('counts')
+            if minute_idx is not None and counts is not None:
+                self.canvas.spike_curve.setData(minute_idx, counts)
+                self._spike_pending = True
 
     def _next_task_id(self):
         self._task_id_counter += 1
@@ -284,51 +294,45 @@ class IntanDeviceTab(DeviceTab):
         do_psd = (self.psd_update_counter % max(1, PSD_PLOT_UPDATE_EVERY_N) == 0)
         do_spike = (self.spike_plot_frame_counter % max(1, SPIKE_PLOT_UPDATE_EVERY_N) == 0)
 
-        if self._channel_results.get(self._current_channel_idx) is None:
-            do_psd = do_spike = True
-
         ch = self._current_channel_idx
         if ch >= self.num_channels:
             ch = 0
 
-        last_scan = self._last_spike_scan_sample.get(ch, 0)
-        gap = self._ring.total - last_scan
+        # first render or no results yet → force everything
+        if not self._channel_results:
+            do_psd = do_spike = True
+
+        stored = min(self._ring.total, self._ring.cap)
+        # compute tail size for matrix read
+        last_scan_any = max(self._last_spike_scan_sample.values()) if self._last_spike_scan_sample else 0
+        gap = self._ring.total - last_scan_any
         should_run_spike = do_spike and (gap >= SPIKE_INCREMENTAL_MIN_SAMPLES)
         should_run_psd = do_psd
 
         if should_run_psd or should_run_spike:
             if should_run_spike:
-                stored = min(self._ring.total, self._ring.cap)
                 psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec))) if should_run_psd else 0
                 wf_n = max(8, int(round(self.sampling_rate * max(1, self._waveform_buffer_sec + 1))))
                 spike_n = int(max(SPIKE_INCREMENTAL_MIN_SAMPLES, gap) + SPIKE_OVERLAP_SAMPLES)
                 tail_n = min(stored, max(psd_n, wf_n, spike_n))
-
-                t_tail, sig_tail = self._ring.read_tail(tail_n, ch_idx=ch)
-                abs_start = self._ring.total - t_tail.size
-                rel_last = max(0, int(last_scan - abs_start))
-                rel_last = min(rel_last, t_tail.size)
-                self._last_proc_abs_start = abs_start
-                self._pending_channel = ch
-
-                self._proc_worker.schedule(
-                    _run_spike_detect,
-                    sig_tail.copy(), t_tail.copy(), self.sampling_rate,
-                    list(self._spike_times_cache.get(ch, [])),
-                    rel_last, t_tail.size,
-                    bool(should_run_psd), True,
-                )
             else:
                 psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec)))
-                t_tail, sig_tail = self._ring.read_tail(psd_n, ch_idx=ch)
-                self._last_proc_abs_start = self._ring.total - t_tail.size
-                self._pending_channel = ch
-                self._proc_worker.schedule(
-                    _run_spike_detect,
-                    sig_tail.copy(), t_tail.copy(), self.sampling_rate,
-                    [], 0, sig_tail.size,
-                    True, False,
-                )
+                tail_n = psd_n
+
+            # matrix read: (1+num_channels, tail_n)
+            t_tail, sig_matrix = self._ring.read_tail_matrix(tail_n)
+            self._last_proc_abs_start = self._ring.total - t_tail.size
+            self._hist_last_time_s = float(t_tail[-1]) if t_tail.size else self._hist_last_time_s
+
+            self._proc_worker.schedule(
+                _run_all_channels,
+                sig_matrix, t_tail, self.sampling_rate,
+                ch,
+                list(self._spike_times_cache.get(ch, [])),
+                bool(should_run_psd), bool(should_run_spike),
+                dict(self._hist_states),
+            )
+
         self._tel_ingest_ms_total += (time.perf_counter() - ingest_t0) * 1000.0
         self._emit_telemetry_if_due("neural")
 
@@ -368,16 +372,19 @@ class IntanDeviceTab(DeviceTab):
         )
 
     def _on_processing_result(self, result):
-        ch = self._pending_channel
-        self._channel_results[ch] = result
-        if result.spike_times_cache is not None:
+        ch = result.selected_ch if hasattr(result, 'selected_ch') else None
+        if ch is not None:
+            self._channel_results[ch] = result
+        if getattr(result, 'spike_times_cache', None) is not None and ch is not None:
             self._spike_times_cache[ch] = result.spike_times_cache
-        if result.last_scan_sample is not None:
-            self._last_spike_scan_sample[ch] = self._last_proc_abs_start + int(result.last_scan_sample)
-        if ch == self._current_channel_idx:
+        if getattr(result, 'last_scans', None) is not None:
+            self._last_spike_scan_sample.update(result.last_scans)
+        if getattr(result, 'hist_states', None) is not None:
+            self._hist_states = result.hist_states
+        if ch is not None and ch == self._current_channel_idx:
             if getattr(result, 'has_psd_update', False) and result.psd_f is not None:
                 self._psd_pending = True
-            if getattr(result, 'has_spike_update', False) and result.spike_minute_idx is not None:
+            if getattr(result, 'has_spike_update', False) and getattr(result, 'hist_minute_idx', None) is not None:
                 self._spike_pending = True
 
     def _on_expensive_task_result(self, result):
@@ -397,10 +404,13 @@ class IntanDeviceTab(DeviceTab):
             counts = np.asarray(data.get("counts", []), dtype=np.int64)
             if minute_idx.size and counts.size and minute_idx.size == counts.size:
                 ch = self._current_channel_idx
-                if ch not in self._channel_results:
-                    self._channel_results[ch] = _Result()
-                self._channel_results[ch].spike_minute_idx = minute_idx
-                self._channel_results[ch].spike_counts = counts
+                self._hist_states[ch] = {
+                    'minute_idx_cache': minute_idx,
+                    'counts': counts,
+                    'bin_sec': data.get('bin_sec', self._spike_bin_sec),
+                    'spike_count': len(self._spike_times_cache.get(ch, [])),
+                    'last_t': data.get('last_time_s', self._hist_last_time_s),
+                }
                 self._spike_pending = True
 
     def _schedule_spike_rebin_task(self):
@@ -621,12 +631,18 @@ class IntanDeviceTab(DeviceTab):
         if r is not None and self._spike_pending and (now - self._last_spike_render_t) >= 1.0 / SPIKE_RENDER_HZ:
             did_work = True
             spike_did_work = True
-            if r.spike_minute_idx is not None and r.spike_counts is not None:
-                self.canvas.spike_curve.setData(r.spike_minute_idx, r.spike_counts)
-                max_count = max(1, int(np.max(r.spike_counts)) if r.spike_counts.size else 1)
+            hist_state = self._hist_states.get(self._current_channel_idx)
+            minute_idx = None
+            counts = None
+            if hist_state is not None:
+                minute_idx = hist_state.get('minute_idx_cache')
+                counts = hist_state.get('counts')
+            if minute_idx is not None and counts is not None:
+                self.canvas.spike_curve.setData(minute_idx, counts)
+                max_count = max(1, int(np.max(counts)) if counts.size else 1)
                 right_min = 0.0
-                if r.spike_minute_idx.size:
-                    right_min = float(r.spike_minute_idx[-1]) + float(self._spike_bin_sec) / 60.0
+                if minute_idx.size:
+                    right_min = float(minute_idx[-1]) + float(self._spike_bin_sec) / 60.0
                 self.canvas.spike_plot.setLimits(xMin=0.0, xMax=max(0.0, right_min + 0.1))
                 if self._follow_axes['spike']:
                     self._suspend_follow_detection = True
@@ -688,6 +704,7 @@ class IntanDeviceTab(DeviceTab):
         self._channel_results.clear()
         self._spike_times_cache.clear()
         self._last_spike_scan_sample.clear()
+        self._hist_states.clear()
         self._last_proc_abs_start = 0
         self._latest_psd_f = None
         self._latest_psd_db = None
@@ -804,6 +821,7 @@ class IntanDeviceTab(DeviceTab):
         self._channel_results.clear()
         self._spike_times_cache.clear()
         self._last_spike_scan_sample.clear()
+        self._hist_states.clear()
 
     def set_connection_details(self, host="", command_port=0, data_port=0, sample_rate=0, project_name=""):
         self.clear()

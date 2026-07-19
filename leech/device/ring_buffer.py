@@ -75,6 +75,28 @@ class RingBuffer:
         start = cnt - n
         return self._ring[0, start:cnt].copy(), self._ring[1 + ch_idx, start:cnt].copy()
 
+    def read_tail_matrix(self, n: int):
+        cnt = min(self._total, self.cap)
+        n = min(n, cnt)
+        if n == 0:
+            return np.array([]), np.empty((0, 0))
+        if cnt >= self.cap:
+            start = (self._wpos - n) % self.cap
+            tail = self.cap - start
+            if tail >= n:
+                return (self._ring[0, start:start + n].copy(),
+                        self._ring[1:, start:start + n].copy())
+            t = np.empty(n, dtype=np.float64)
+            y = np.empty((self.num_channels, n), dtype=np.float64)
+            t[:tail] = self._ring[0, start:]
+            y[:, :tail] = self._ring[1:, start:]
+            head = n - tail
+            t[tail:] = self._ring[0, :head]
+            y[:, tail:] = self._ring[1:, :head]
+            return t, y
+        start = cnt - n
+        return self._ring[0, start:cnt].copy(), self._ring[1:, start:cnt].copy()
+
     def raw_time_bounds(self):
         if self._total == 0:
             return 0.0, 0.0
