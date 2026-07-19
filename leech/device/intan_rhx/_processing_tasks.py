@@ -12,12 +12,12 @@ _SOS_CACHE_FS = 0.0
 
 
 def _get_sos(fs):
+    global _SOS_CACHE_FS
     if fs != _SOS_CACHE_FS:
         ny = fs / 2.0
         lo = max(_spike_count.HP_SPIKE_BAND[0] / ny, 1e-6)
         hi = min(_spike_count.HP_SPIKE_BAND[1] / ny, 0.999999)
         _SOS_CACHE[0] = butter(3, [lo, hi], btype='bandpass', output='sos')
-        global _SOS_CACHE_FS
         _SOS_CACHE_FS = fs
     return _SOS_CACHE[0]
 
