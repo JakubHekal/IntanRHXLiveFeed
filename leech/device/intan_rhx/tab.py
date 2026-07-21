@@ -329,6 +329,7 @@ class IntanDeviceTab(DeviceTab):
                 sig_matrix, t_tail, self.sampling_rate,
                 ch,
                 list(self._spike_times_cache.get(ch, [])),
+                dict(self._last_spike_scan_sample),
                 bool(should_run_psd), bool(should_run_spike),
                 dict(self._hist_states),
             )
