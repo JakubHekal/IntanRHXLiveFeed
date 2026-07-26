@@ -31,6 +31,7 @@ class _ProcessingResult:
         'spike_times_cache', 'last_scan_sample',
         'hist_minute_idx', 'hist_counts',
         'hist_states', 'last_scans',
+        'all_spike_caches',
     )
 
     def __init__(self):
@@ -74,7 +75,6 @@ def _update_histogram_state(spike_times, last_time_s, state):
     cur_count = len(spike_times)
 
     counts = state.get('counts', np.zeros(0, dtype=np.int64))
-    prev_count = state.get('spike_count', 0)
     prev_last_t = state.get('last_t', 0.0)
     prev_bin_sec = state.get('bin_sec', bin_sec)
     minute_idx_cache = state.get('minute_idx_cache', None)
@@ -82,28 +82,27 @@ def _update_histogram_state(spike_times, last_time_s, state):
     need_reset = (
         counts.size == 0
         or not np.isclose(prev_bin_sec, bin_sec)
-        or cur_count < prev_count
         or float(last_time_s) + 1e-9 < float(prev_last_t)
     )
 
     if need_reset:
         minute_idx_cache = None
         counts = np.zeros(total_bins, dtype=np.int64)
-        if cur_count:
-            spike_arr = np.asarray(spike_times, dtype=np.float64)
-            bins = np.floor(spike_arr / bin_sec).astype(np.int64)
-            bins = bins[(bins >= 0) & (bins < total_bins)]
-            if bins.size:
-                counts += np.bincount(bins, minlength=total_bins).astype(np.int64)
+        spike_arr = np.asarray(spike_times, dtype=np.float64) if cur_count else np.array([], dtype=np.float64)
     else:
         if total_bins > counts.size:
             counts = np.pad(counts, (0, total_bins - counts.size), mode='constant')
-        if cur_count > prev_count:
-            new_spikes = np.asarray(spike_times[prev_count:], dtype=np.float64)
-            bins = np.floor(new_spikes / bin_sec).astype(np.int64)
-            bins = bins[(bins >= 0) & (bins < counts.size)]
-            if bins.size:
-                counts += np.bincount(bins, minlength=counts.size).astype(np.int64)
+        # ponytail: time-based incremental — bin only spikes after prev_last_t.
+        # Replaces count-based slice which broke when segment sizes varied.
+        spike_arr = np.asarray(spike_times, dtype=np.float64) if cur_count else np.array([], dtype=np.float64)
+        if spike_arr.size:
+            spike_arr = spike_arr[spike_arr > prev_last_t]
+
+    if spike_arr.size:
+        bins = np.floor(spike_arr / bin_sec).astype(np.int64)
+        bins = bins[(bins >= 0) & (bins < counts.size)]
+        if bins.size:
+            counts += np.bincount(bins, minlength=counts.size).astype(np.int64)
 
     if minute_idx_cache is None or minute_idx_cache.size != counts.size:
         minute_idx_cache = (np.arange(counts.size, dtype=np.float64) * bin_sec) / 60.0
@@ -118,8 +117,8 @@ def _update_histogram_state(spike_times, last_time_s, state):
     return minute_idx_cache, counts.copy(), new_state
 
 
-def _run_all_channels(signal_matrix, t, fs, selected_ch, spike_cache,
-                      last_scans, do_psd, do_spike, hist_states):
+def _run_all_channels(signal_matrix, t, fs, selected_ch, all_spike_caches,
+                      last_scans, do_psd, do_spike, hist_states, abs_start=0):
     """Vectorized matrix pipeline: spike detection + histogram for all channels."""
     result = _ProcessingResult()
     result.selected_ch = selected_ch
@@ -127,11 +126,11 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, spike_cache,
     result.has_spike_update = do_spike
 
     n_ch, n_samp = signal_matrix.shape
-    stored = n_samp
+    stored_abs = abs_start + n_samp
 
     new_last_scans = dict(last_scans) if last_scans else {}
     new_hist_states = dict(hist_states) if hist_states else {}
-    ch_spike_times = {}
+    all_caches = {}
 
     if do_spike and n_samp >= 10:
         sos = _get_sos(fs)
@@ -147,19 +146,20 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, spike_cache,
         refractory = max(1, int(round((_spike_count.REFRACTORY_MS / 1000.0) * fs)))
 
         for ch in range(n_ch):
-            last_scan = last_scans.get(ch, 0) if last_scans else 0
-            gap = stored - last_scan
+            last_scan_abs = last_scans.get(ch, 0) if last_scans else 0
+            gap = stored_abs - last_scan_abs
             if gap < SPIKE_INCREMENTAL_MIN_SAMPLES:
                 continue
 
             overlap = SPIKE_OVERLAP_SAMPLES
-            scan_start = max(0, last_scan - overlap)
+            scan_start_abs = max(abs_start, last_scan_abs - overlap)
+            scan_start_rel = scan_start_abs - abs_start
 
-            ch_mask = mask[ch, scan_start:stored]
+            ch_mask = mask[ch, scan_start_rel:n_samp]
             peak_idx = np.where(ch_mask)[0]
 
             if peak_idx.size > 0:
-                peak_idx = peak_idx + scan_start
+                peak_idx = peak_idx + scan_start_rel
                 keep = np.concatenate([[True], np.diff(peak_idx) >= refractory])
                 peak_idx = peak_idx[keep]
 
@@ -173,28 +173,21 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, spike_cache,
                     peak_idx = peak_idx[amp_keep]
 
             spike_times = t[peak_idx] if peak_idx.size else np.array([], dtype=float)
-            ch_spike_times[ch] = spike_times
-            new_last_scans[ch] = stored
+            new_last_scans[ch] = stored_abs
 
-            prev_cache = list(spike_cache) if (ch == selected_ch and spike_cache) else []
+            prev_cache = list(all_spike_caches.get(ch, []))
             if prev_cache:
-                if last_scan < t.size:
-                    cutoff = t[last_scan]
-                    new_cache = [s for s in prev_cache if s < cutoff]
-                    new_cache.extend(spike_times.tolist())
-                else:
-                    new_cache = prev_cache
+                cutoff = float(t[scan_start_rel]) if scan_start_rel < t.size else prev_cache[-1] + 1.0
+                new_cache = [s for s in prev_cache if s < cutoff]
+                new_cache.extend(spike_times.tolist())
             else:
                 new_cache = spike_times.tolist()
 
-            if ch == selected_ch:
-                result.spike_times_cache = new_cache
+            all_caches[ch] = new_cache
 
             state = new_hist_states.get(ch, {})
             minute_idx, counts, new_state = _update_histogram_state(
-                new_cache if ch == selected_ch else spike_times.tolist(),
-                float(t[-1]) if t.size else 0.0,
-                state,
+                new_cache, float(t[-1]) if t.size else 0.0, state,
             )
             new_hist_states[ch] = new_state
 
@@ -210,17 +203,17 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, spike_cache,
                 if wf_spike_arr.size >= 1 and t.size:
                     pk_indices = np.searchsorted(t, wf_spike_arr, side='left').astype(int)
                     if pk_indices.size:
-                        pk_indices = np.clip(pk_indices, 0, max(0, stored - 1))
+                        pk_indices = np.clip(pk_indices, 0, max(0, n_samp - 1))
                         left_idx = np.maximum(pk_indices - 1, 0)
                         use_left = np.abs(t[left_idx] - wf_spike_arr) <= np.abs(t[pk_indices] - wf_spike_arr)
                         pk_indices = np.where(use_left, left_idx, pk_indices)
                     pk_indices = np.unique(pk_indices)
-                    pk_indices = pk_indices[(pk_indices > 0) & (pk_indices < stored)]
+                    pk_indices = pk_indices[(pk_indices > 0) & (pk_indices < n_samp)]
                     try:
                         pre_samp = int(round((_spike_plot.PRE_MS / 1000.0) * fs))
                         post_samp = int(round((_spike_plot.POST_MS / 1000.0) * fs))
                         seg_start = max(0, int(pk_indices[0]) - pre_samp - 2)
-                        seg_end = min(int(stored), int(pk_indices[-1]) + post_samp + 3)
+                        seg_end = min(n_samp, int(pk_indices[-1]) + post_samp + 3)
                         if seg_end - seg_start >= 10:
                             x_hp_seg = _spike_count.bandpass_filt(
                                 signal_matrix[selected_ch, seg_start:seg_end].astype(float),
@@ -241,7 +234,7 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, spike_cache,
 
     elif do_spike:
         for ch in range(n_ch):
-            new_last_scans[ch] = stored
+            new_last_scans[ch] = stored_abs
 
     if do_psd and selected_ch < n_ch:
         try:
@@ -261,6 +254,7 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, spike_cache,
 
     result.hist_states = new_hist_states
     result.last_scans = new_last_scans
+    result.all_spike_caches = all_caches
     return result
 
 

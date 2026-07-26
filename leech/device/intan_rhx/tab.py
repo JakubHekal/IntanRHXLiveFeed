@@ -312,26 +312,29 @@ class IntanDeviceTab(DeviceTab):
         if should_run_psd or should_run_spike:
             if should_run_spike:
                 psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec))) if should_run_psd else 0
-                wf_n = max(8, int(round(self.sampling_rate * max(1, self._waveform_buffer_sec + 1))))
                 spike_n = int(max(SPIKE_INCREMENTAL_MIN_SAMPLES, gap) + SPIKE_OVERLAP_SAMPLES)
-                tail_n = min(stored, max(psd_n, wf_n, spike_n))
+                # ponytail: no wf_n inflation — waveform extraction uses time-based
+                # searchsorted, doesn't need the full window in the matrix.
+                tail_n = min(stored, max(psd_n, spike_n))
             else:
                 psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec)))
                 tail_n = psd_n
 
             # matrix read: (1+num_channels, tail_n)
             t_tail, sig_matrix = self._ring.read_tail_matrix(tail_n)
-            self._last_proc_abs_start = self._ring.total - t_tail.size
+            abs_start = self._ring.total - t_tail.size
+            self._last_proc_abs_start = abs_start
             self._hist_last_time_s = float(t_tail[-1]) if t_tail.size else self._hist_last_time_s
 
             self._proc_worker.schedule(
                 _run_all_channels,
                 sig_matrix, t_tail, self.sampling_rate,
                 ch,
-                list(self._spike_times_cache.get(ch, [])),
+                dict(self._spike_times_cache),
                 dict(self._last_spike_scan_sample),
                 bool(should_run_psd), bool(should_run_spike),
                 dict(self._hist_states),
+                abs_start,
             )
 
         self._tel_ingest_ms_total += (time.perf_counter() - ingest_t0) * 1000.0
@@ -376,8 +379,11 @@ class IntanDeviceTab(DeviceTab):
         ch = result.selected_ch if hasattr(result, 'selected_ch') else None
         if ch is not None:
             self._channel_results[ch] = result
-        if getattr(result, 'spike_times_cache', None) is not None and ch is not None:
-            self._spike_times_cache[ch] = result.spike_times_cache
+        # accumulate spike caches for all channels
+        all_caches = getattr(result, 'all_spike_caches', None)
+        if all_caches:
+            for ach, acache in all_caches.items():
+                self._spike_times_cache[ach] = acache
         if getattr(result, 'last_scans', None) is not None:
             self._last_spike_scan_sample.update(result.last_scans)
         if getattr(result, 'hist_states', None) is not None:
