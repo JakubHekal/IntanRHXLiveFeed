@@ -22,7 +22,6 @@ from leech.telemetry_logger import append_telemetry_line, set_telemetry_file
 from leech import __version__
 from leech.updater import UpdateCheckThread, UpdateInfo
 from leech.experiment.experiment_runner import ExperimentRunner
-from leech.screens.legacy_main_window import LegacyMainWindow
 from leech.screens._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
 from leech.screens.timeline import ExperimentTimeline
 from leech.screens.stage import FluentExpander, LeftSidebar, RightSidebar, MainStage
@@ -60,7 +59,6 @@ class MainWindow(QMainWindow):
         self._current_run_path = None
         self._run_device_configs = {}
         self._run_device_instances = []
-        self._legacy_window = None
         self._experiment_runner = None
         self.main_stage = MainStage()
         root_layout.addWidget(self.main_stage, 1)
@@ -103,8 +101,6 @@ class MainWindow(QMainWindow):
             self._experiment_runner.stop()
         self._close_devices()
         self.main_stage.plot_screen.shutdown_workers()
-        if self._legacy_window is not None:
-            self._legacy_window.close()
         super().closeEvent(event)
 
     def _create_text_toolbar(self, parent_layout):
@@ -125,8 +121,6 @@ class MainWindow(QMainWindow):
         menubar_layout.addWidget(exp_btn)
 
         help_menu = QMenu("Help", self)
-        self._legacy_ui_action = help_menu.addAction("Legacy UI\u2026")
-        help_menu.addSeparator()
         self._check_update_action = help_menu.addAction("Check for Updates")
         help_menu.addSeparator()
         self._about_action = help_menu.addAction("About")
@@ -168,7 +162,6 @@ class MainWindow(QMainWindow):
         self._exp_duplicate_action.triggered.connect(self._on_experiment_duplicate)
         self._exp_run_action.triggered.connect(self._on_experiment_run)
         self._about_action.triggered.connect(self._on_about)
-        self._legacy_ui_action.triggered.connect(self._on_open_legacy_ui)
         self._check_update_action.triggered.connect(self._check_for_updates)
         self.main_stage.left_sidebar.run_selected.connect(self._on_replay_run)
         self.main_stage.left_sidebar.run_action.connect(self._on_run_action)
@@ -358,13 +351,6 @@ class MainWindow(QMainWindow):
         config.sequence = sequence
         ExperimentManager.save(self._current_experiment_path, config)
         QMessageBox.information(self, "Saved", f"Experiment saved to {self._current_experiment_path}")
-
-    def _on_open_legacy_ui(self):
-        if not hasattr(self, '_legacy_window') or self._legacy_window is None:
-            self._legacy_window = LegacyMainWindow()
-        self._legacy_window.show()
-        self._legacy_window.raise_()
-        self._legacy_window.activateWindow()
 
     def _on_play_clicked(self):
         if self._experiment_runner is not None:

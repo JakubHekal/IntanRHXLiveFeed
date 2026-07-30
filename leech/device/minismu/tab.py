@@ -224,12 +224,5 @@ class SmuDeviceTab(DeviceTab):
     def is_auto_follow_enabled(self) -> bool:
         return any(self._follow_axes.values())
 
-    def set_connection_details(self, host="", command_port=0, data_port=0, sample_rate=0, project_name=""):
-        self.clear()
-        if sample_rate > 0:
-            self.sampling_rate = float(sample_rate)
-            self._ring = RingBuffer(self.sampling_rate, 2, duration_sec=300)
-        self.set_receiving_state(True)
-
     def set_receiving_state(self, receiving: bool):
         self.is_receiving = bool(receiving)

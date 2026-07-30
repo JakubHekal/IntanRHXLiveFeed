@@ -4,39 +4,31 @@ from PyInstaller.utils.hooks import collect_submodules
 
 project_root = os.path.dirname(os.path.abspath(__file__))
 
-# Dynamically gather internal modules so none are missed
+# ponytail: dynamic collection primary, hardcoded fallback
 try:
     hidden_imports = collect_submodules('leech')
+    if not hidden_imports:
+        raise ValueError("empty")
 except Exception:
     hidden_imports = [
-        # Core
-        'leech.state_machine', 'leech.state_manager', 'leech.telemetry_logger',
-        'leech.plot_settings', 'leech.updater',
-        # Device layer
-        'leech.device.base', 'leech.device.device', 'leech.device.ring_buffer',
+        'leech', 'leech.ui',
+        'leech.telemetry_logger', 'leech.plot_settings', 'leech.updater',
+        'leech.device.base', 'leech.device.ring_buffer',
         'leech.device.background_worker', 'leech.device.widget_builder',
         'leech.device.tabs.base',
-        # Intan RHX
         'leech.device.intan_rhx.device', 'leech.device.intan_rhx.tab',
         'leech.device.intan_rhx.canvas', 'leech.device.intan_rhx._processing_tasks',
         'leech.device.intan_rhx.processing.psd',
         'leech.device.intan_rhx.processing.spike_count',
         'leech.device.intan_rhx.processing.spike_plot',
-        # miniSMU
         'leech.device.minismu.device', 'leech.device.minismu.tab',
         'leech.device.minismu.canvas',
-        # Simulated
         'leech.device.simulated.device', 'leech.device.simulated.tab',
-        # Screens
         'leech.screens.stage', 'leech.screens.timeline',
         'leech.screens.plot_screen', 'leech.screens.plot_helpers',
-        'leech.screens.connect_screen', 'leech.screens.marker_dialog',
-        'leech.screens.channel_selector', 'leech.screens._registry',
-        'leech.screens.legacy_main_window',
-        # Workers
-        'leech.workers.device_worker', 'leech.workers.chunk_writer',
-        'leech.workers.marker_manager', 'leech.workers.replay_worker',
-        # Experiment
+        'leech.screens.marker_dialog', 'leech.screens.channel_selector',
+        'leech.screens._registry',
+        'leech.workers.chunk_writer', 'leech.workers.replay_worker',
         'leech.experiment.experiment', 'leech.experiment.experiment_dialog',
         'leech.experiment.experiment_runner',
     ]

@@ -93,12 +93,5 @@ class SimpleDeviceTab(DeviceTab):
     def shutdown(self) -> bool:
         return True
 
-    def set_connection_details(self, host="", command_port=0, data_port=0, sample_rate=0, project_name=""):
-        self.clear()
-        if sample_rate > 0:
-            self.sampling_rate = float(sample_rate)
-            self._ring = RingBuffer(self.sampling_rate, 1, duration_sec=300)
-        self.set_receiving_state(True)
-
     def set_receiving_state(self, receiving: bool):
         self.is_receiving = bool(receiving)

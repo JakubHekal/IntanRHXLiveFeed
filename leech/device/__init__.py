@@ -1,6 +1,6 @@
 """leech.device - Hardware device abstraction layer."""
 
-from .device import Device, ChannelInfo, OutputSink, DeviceOperation, ParamDef
+from .base import Device, ChannelInfo, OutputSink, DeviceOperation, ParamDef
 from .intan_rhx import IntanRHXDevice, GetSampleRateFailure
 from .simulated import SimulatedRecordingDevice, SimulatedActorDevice, SimulatedCombinedDevice
 

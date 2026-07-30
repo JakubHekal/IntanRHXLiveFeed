@@ -1,8 +1,7 @@
+# Runtime deps are in pyproject.toml — this is for pip install -r workflows
 PyQt5>=5.15.0
 pyqtgraph>=0.14.0
 numpy>=1.19.0
-pandas>=1.1.0
 scipy>=1.5.0
-matplotlib>=3.3.0
-pyinstaller>=6.19.0
+minismu-py>=0.1.0
 qdarkstyle>=3.2.0

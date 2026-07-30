@@ -6,7 +6,7 @@ from .spike_count import (
 )
 from .spike_plot import PRE_MS, POST_MS, extract_waveforms
 
-# ponytail: constants used externally by plot_settings.py, connect_screen.py, canvas.py
+# ponytail: constants used externally by plot_settings.py, canvas.py
 PSD_BUFFER_SEC = 10
 SPIKE_BIN_SEC = 5
 WAVEFORM_BUFFER_SEC = 10

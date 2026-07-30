@@ -5,7 +5,9 @@ from pathlib import Path
 from PyQt5 import QtCore
 import numpy as np
 
-from leech.workers.device_worker import RAW_CHUNK_SEC, CSV_FILE_BUFFER_BYTES, CSV_FLUSH_INTERVAL_SEC
+RAW_CHUNK_SEC = 300
+CSV_FILE_BUFFER_BYTES = 1024 * 1024
+CSV_FLUSH_INTERVAL_SEC = 1.0
 from leech.workers.chunk_writer import ChunkWriter
 from leech.telemetry_logger import append_telemetry_line
 
