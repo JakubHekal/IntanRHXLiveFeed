@@ -15,9 +15,10 @@ import numpy as np
 class ChunkWriter:
     """Handles writing multi-channel data to chunked CSV files with automatic rotation."""
 
-    def __init__(self, sample_rate, num_channels=1, chunk_max_sec=300, buffer_bytes=1024 * 1024, flush_interval_sec=1.0):
+    def __init__(self, sample_rate, num_channels=1, channel_names=None, chunk_max_sec=300, buffer_bytes=1024 * 1024, flush_interval_sec=1.0):
         self.sample_rate = float(sample_rate)
         self.num_channels = int(num_channels)
+        self.channel_names = list(channel_names) if channel_names else None
         self.chunk_max_sec = float(chunk_max_sec)
         self.buffer_bytes = int(buffer_bytes)
         self.flush_interval_sec = float(flush_interval_sec)
@@ -158,7 +159,10 @@ class ChunkWriter:
             buffering=self.buffer_bytes,
         )
         self.csv_writer = csv.writer(self.csv_file_handle)
-        header = ["time_s"] + [f"ch_{i}_uV" for i in range(self.num_channels)] + ["marker_id", "marker_name"]
+        if self.channel_names and len(self.channel_names) == self.num_channels:
+            header = ["time_s"] + [f"{n}_uV" for n in self.channel_names] + ["marker_id", "marker_name"]
+        else:
+            header = ["time_s"] + [f"ch_{i}_uV" for i in range(self.num_channels)] + ["marker_id", "marker_name"]
         self.csv_writer.writerow(header)
         self._chunk_samples_written = 0
         self._current_chunk_path = path

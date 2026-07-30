@@ -11,6 +11,17 @@ from .canvas import SmuCanvas
 
 SMU_DISPLAY_WINDOW_SEC = 30.0
 
+_SI_PREFIXES = [(1e-12, 'p'), (1e-9, 'n'), (1e-6, 'µ'), (1e-3, 'm'), (1.0, ''), (1e3, 'k')]
+
+
+def _si_scale(abs_peak):
+    if abs_peak == 0:
+        return 1.0, ''
+    for base, prefix in _SI_PREFIXES:
+        if abs_peak < base * 1000 or prefix == 'k':
+            return base, prefix
+    return 1.0, ''
+
 
 class SmuDeviceTab(DeviceTab):
     def __init__(self, sample_rate=1000.0, parent=None, **kwargs):
@@ -122,7 +133,13 @@ class SmuDeviceTab(DeviceTab):
                     continue
                 step = max(1, t.size // MAX_DISPLAY_POINTS)
                 xd, yd = t[::step], y[::step]
+                peak = max(abs(float(y.min())), abs(float(y.max()))) if y.size else 0.0
+                base, prefix = _si_scale(peak)
+                yd = yd / base
                 curve.setData(xd, yd)
+                symbol = 'U' if key == 'voltage' else 'I'
+                unit = 'V' if key == 'voltage' else 'A'
+                plot_item.setLabel('left', f'{symbol} [{prefix}{unit}]')
                 x_end = float(t[-1])
                 x_start = max(0.0, x_end - SMU_DISPLAY_WINDOW_SEC)
                 x_min_lim, _ = self._ring.raw_time_bounds()
@@ -130,8 +147,7 @@ class SmuDeviceTab(DeviceTab):
                 try:
                     plot_item.setLimits(xMin=max(0.0, x_min_lim), xMax=max(0.0, x_end + 0.1))
                     plot_item.setXRange(x_start, x_end, padding=0)
-                    peak = max(abs(float(y.min())), abs(float(y.max()))) if y.size else 0.0
-                    y_lim = max(0.1, peak * 1.2)
+                    y_lim = max(0.1, peak * 1.2 / base)
                     plot_item.setYRange(-y_lim, y_lim, padding=0)
                 finally:
                     self._suspend_follow_detection = False
@@ -157,13 +173,18 @@ class SmuDeviceTab(DeviceTab):
                     xd, yd = _minmax_downsample(t_src, y_src, MAX_DISPLAY_POINTS)
                 else:
                     xd, yd = t_src, y_src
+                peak = max(abs(float(y_src.min())), abs(float(y_src.max()))) if y_src.size else 0.0
+                base, prefix = _si_scale(peak)
+                yd = yd / base
                 curve.setData(xd, yd)
+                symbol = 'U' if key == 'voltage' else 'I'
+                unit = 'V' if key == 'voltage' else 'A'
+                plot_item.setLabel('left', f'{symbol} [{prefix}{unit}]')
                 latest_t = float(t_full[-1]) if t_full.size else 0.0
                 self._suspend_follow_detection = True
                 try:
                     plot_item.setLimits(xMin=0.0, xMax=max(0.1, latest_t + 0.1))
-                    peak = max(abs(float(y_src.min())), abs(float(y_src.max()))) if y_src.size else 0.0
-                    y_lim = max(0.1, peak * 1.2)
+                    y_lim = max(0.1, peak * 1.2 / base)
                     plot_item.setYRange(-y_lim, y_lim, padding=0)
                 finally:
                     self._suspend_follow_detection = False

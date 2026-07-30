@@ -320,6 +320,7 @@ class _RunnerThread(QtCore.QThread):
         sink = ChunkWriter(
             sample_rate=sr,
             num_channels=num_ch,
+            channel_names=ch_labels,
             chunk_max_sec=RAW_CHUNK_SEC,
             buffer_bytes=CSV_FILE_BUFFER_BYTES,
             flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
@@ -380,7 +381,8 @@ class _RunnerThread(QtCore.QThread):
             device.configure(mode="FIMV")
 
         sr = getattr(device, 'sample_rate', 1000.0) or 1000.0
-        num_ch = len(getattr(device, 'channels', [])) or 2
+        ch_labels = [c.name for c in getattr(device, 'channels', [])]
+        num_ch = len(ch_labels) or 2
 
         dev_raw_dir = self._run_path / "raw" / (device_name.replace(" ", "_"))
         dev_raw_dir.mkdir(parents=True, exist_ok=True)
@@ -388,6 +390,7 @@ class _RunnerThread(QtCore.QThread):
         sink = ChunkWriter(
             sample_rate=sr,
             num_channels=num_ch,
+            channel_names=ch_labels,
             chunk_max_sec=RAW_CHUNK_SEC,
             buffer_bytes=CSV_FILE_BUFFER_BYTES,
             flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,

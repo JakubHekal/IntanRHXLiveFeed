@@ -398,10 +398,12 @@ class LegacyMainWindow(QtWidgets.QMainWindow):
         device.configure(enable_wide_channel=[channel], port=port, blocks_per_write=1)
 
         effective_fs = float(device.sample_rate)
-        self.plot_screen.add_device("Intan RHX", "rhx", sample_rate=effective_fs, num_channels=1)
+        ch_names = [c.name for c in getattr(device, 'channels', [])]
+        self.plot_screen.add_device("Intan RHX", "rhx", sample_rate=effective_fs, num_channels=len(ch_names) or 1)
         sink = ChunkWriter(
             sample_rate=effective_fs,
-            num_channels=1,
+            num_channels=len(ch_names) or 1,
+            channel_names=ch_names or None,
             chunk_max_sec=RAW_CHUNK_SEC,
             buffer_bytes=CSV_FILE_BUFFER_BYTES,
             flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
