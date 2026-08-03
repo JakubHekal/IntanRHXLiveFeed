@@ -260,19 +260,10 @@ class _RunnerThread(QtCore.QThread):
                 ch = params.get("channel", 1) - 1
                 device.trigger_action(ch)
                 time.sleep(0.1)
-            elif action in ("Stimulus", "force_voltage"):
-                if hasattr(device, 'configure'):
-                    device.configure(mode="FVMI")
-                if hasattr(device, 'write_output'):
-                    ch = params.get("channel", 1) - 1
-                    val = params.get("voltage", params.get("amplitude", 5.0))
-                    device.write_output(max(0, ch), val)
-                dur = params.get("duration_s", 1.0)
-                time.sleep(dur)
-                try:
-                    device.write_output(max(0, ch), 0.0)
-                except Exception:
-                    pass
+            elif action == "Stimulus":
+                self._run_stimulus(step_idx, device, device_name, params, duration)
+            elif action == "force_voltage":
+                self._run_force_voltage(device, params)
             elif action == "Measure":
                 if hasattr(device, 'read_data'):
                     data = device.read_data()
@@ -372,6 +363,70 @@ class _RunnerThread(QtCore.QThread):
             device.stop_acquisition()
         except Exception:
             pass
+
+    def _run_force_voltage(self, device, params):
+        if hasattr(device, 'configure'):
+            device.configure(mode="FVMI")
+        if hasattr(device, 'write_output'):
+            ch = params.get("channel", 1) - 1
+            val = params.get("voltage", params.get("amplitude", 5.0))
+            device.write_output(max(0, ch), val)
+        dur = params.get("duration_s", 1.0)
+        time.sleep(dur)
+        try:
+            device.write_output(max(0, ch), 0.0)
+        except Exception:
+            pass
+
+    def _sleep_until(self, deadline):
+        """Sleep until perf_counter deadline, extending it across pauses. Returns False if aborted."""
+        while time.perf_counter() < deadline and not self._abort:
+            if self._paused:
+                pause_start = time.perf_counter()
+                while self._paused and not self._abort:
+                    time.sleep(0.1)
+                deadline += time.perf_counter() - pause_start
+            remaining = deadline - time.perf_counter()
+            time.sleep(min(0.1, max(0, remaining)) if remaining > 0 else 0.01)
+        return not self._abort
+
+    def _run_stimulus(self, step_idx, device, device_name, params, duration):
+        if not getattr(device, 'connected', False):
+            self.error_occurred.emit(device_name, "Device not connected")
+            return
+        label = params.get("block_label", "Stimulus")
+        stim_params = {k: v for k, v in params.items() if k not in ('duration_s', 'block_label', '_start')}
+        eff = device.start_stimulation(stim_params)
+        append_telemetry_line(
+            f"stim_start | {step_idx} | {device_name} | {stim_params} dur={duration}s label={label}"
+        )
+        burst_on = float(params.get("burst_on_s", 0.0) or 0.0)
+        burst_off = float(params.get("burst_off_s", 0.0) or 0.0)
+        try:
+            if burst_on <= 0 or burst_off <= 0:
+                device.hold_trigger(True)
+                self._sleep_until(time.perf_counter() + duration)
+            else:
+                deadline = time.perf_counter() + duration
+                while time.perf_counter() < deadline and not self._abort:
+                    device.hold_trigger(True)
+                    if not self._sleep_until(min(time.perf_counter() + burst_on, deadline)):
+                        break
+                    device.hold_trigger(False)
+                    if not self._sleep_until(min(time.perf_counter() + burst_off, deadline)):
+                        break
+        finally:
+            try:
+                device.stop_stimulation()
+            except Exception:
+                pass
+        period_us = eff.get('PulseTrainPeriodMicroseconds') if isinstance(eff, dict) else None
+        if period_us is None:
+            period_us = float(params.get("pulse_period_us", 200.0) or 200.0)
+        duty = burst_on / (burst_on + burst_off) if (burst_on > 0 and burst_off > 0) else 1.0
+        pulses = int(duration * 1e6 / period_us * duty)
+        append_telemetry_line(f"stim_end | {step_idx} | {device_name} | Stimulus | ~{pulses} pulses (+/- 1 train)")
+        print(f"[Runner] Stimulus {label}: ~{pulses} pulses delivered (estimate, +/- 256)")
 
     def _run_force_current(self, step_idx, device, device_name, params):
         ch = params.get("channel", 1) - 1

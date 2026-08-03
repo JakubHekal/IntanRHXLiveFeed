@@ -13,7 +13,9 @@ from collections.abc import Iterable
 from typing import Optional, List, Union
 
 from ..base import Device, ChannelInfo
+from .stim import build_stim_params, _fmt
 from .tab import IntanDeviceTab
+from leech.telemetry_logger import append_telemetry_line
 
 FRAMES_PER_BLOCK = 128
 MAGIC_NUMBER = 0x2ef07a08
@@ -106,6 +108,57 @@ class IntanRHXDevice(Device):
     def clear_all_data_outputs(self):
         self.command_socket.sendall(b"execute clearalldataoutputs\n")
         time.sleep(self.send_delay)
+
+    def execute_command(self, cmd, delay=0.01):
+        self.command_socket.sendall(cmd.encode())
+        time.sleep(delay)
+
+    def _channel_names(self, channel_str):
+        if str(channel_str).strip():
+            indices = self._parse_channel_range(str(channel_str))
+        else:
+            indices = self._enabled_channel_indices
+        return [f"{self._PORTS[idx // 32]}-{idx % 32:03d}" for idx in sorted(set(indices)) if idx // 32 < 4]
+
+    _STIM_KEYS = ("shape", "polarity", "amplitude_uA", "second_amplitude_uA",
+                  "phase_duration_us", "second_phase_duration_us", "interphase_delay_us",
+                  "pulse_period_us", "refractory_period_us",
+                  "pre_stim_amp_settle_us", "post_stim_amp_settle_us")
+
+    def start_stimulation(self, params=None):
+        kwargs = {k: params[k] for k in self._STIM_KEYS if params and k in params}
+        stim_params, warnings = build_stim_params(**kwargs)
+        p = dict(stim_params)
+        channel_str = str((params or {}).get("channels", "") or "").strip()
+        if not channel_str:
+            raise ValueError(
+                "No stimulation channels specified — set the 'Channels' field "
+                "explicitly; stimulating all enabled channels is not allowed"
+            )
+        for w in warnings:
+            append_telemetry_line(f"intanrhx | stim_warning | {w}")
+            print(f"[IntanRHX] Warning: {w}")
+        names = self._channel_names(channel_str)
+        if not names:
+            raise ValueError(f"No valid stimulation channels in '{channel_str}'")
+        self._stim_trigger = "f1"
+        for name in names:
+            for param, value in stim_params:
+                self.execute_command(f"set {name}.{param} {_fmt(value)}\n")
+            self.execute_command(f"execute uploadstimparameters {name}\n")
+        time.sleep(0.2)
+        print(f"[IntanRHX] Stimulation programmed: ch={names} "
+              f"amp={_fmt(p['FirstPhaseAmplitudeMicroAmps'])}uA "
+              f"period={_fmt(p['PulseTrainPeriodMicroseconds'])}us")
+        return p
+
+    def hold_trigger(self, on=True):
+        trigger = getattr(self, "_stim_trigger", "f1")
+        self.execute_command(f"execute manualstimtrigger{'on' if on else 'off'} {trigger}\n", delay=0.05)
+
+    def stop_stimulation(self):
+        self.hold_trigger(False)
+        print("[IntanRHX] Stimulation off")
 
     def get_run_mode(self):
         response = self.get_parameter("runmode")
@@ -495,6 +548,24 @@ class IntanRHXDevice(Device):
             ]),
             DeviceOperation("Stream", "Stream", default_duration=10.0, color="#4BA3E3", params=[
                 ParamDef("channels", "Channels (e.g. 0-31)", "channel_list", default=""),
+            ]),
+            DeviceOperation("Stimulus", "Stimulation", default_duration=1200.0, color="#E67E22", params=[
+                ParamDef("channels", "Channels (e.g. 0-31)", "channel_list", default=""),
+                ParamDef("shape", "Shape", "choice", default="Biphasic",
+                         choices=["Biphasic", "BiphasicWithInterphaseDelay", "Triphasic"]),
+                ParamDef("polarity", "Polarity", "choice", default="NegativeFirst",
+                         choices=["NegativeFirst", "PositiveFirst"]),
+                ParamDef("amplitude_uA", "First Phase Amplitude (uA)", "float", default=0.5, min_val=0.0, max_val=2550.0),
+                ParamDef("second_amplitude_uA", "Second Phase Amplitude (uA)", "float", default=0.5, min_val=0.0, max_val=2550.0),
+                ParamDef("phase_duration_us", "First Phase Duration (us)", "float", default=100.0, min_val=1.0, max_val=5000.0),
+                ParamDef("second_phase_duration_us", "Second Phase Duration (us)", "float", default=100.0, min_val=1.0, max_val=5000.0),
+                ParamDef("interphase_delay_us", "Interphase Delay (us)", "float", default=0.0, min_val=0.0, max_val=5000.0),
+                ParamDef("pulse_period_us", "Pulse Period (us)", "float", default=200.0, min_val=1.0, max_val=1000000.0),
+                ParamDef("refractory_period_us", "Refractory Period (us)", "float", default=0.0, min_val=0.0, max_val=1000000.0),
+                ParamDef("pre_stim_amp_settle_us", "Pre-Stim Amp Settle (us)", "float", default=0.0, min_val=0.0, max_val=500000.0),
+                ParamDef("post_stim_amp_settle_us", "Post-Stim Amp Settle (us)", "float", default=0.0, min_val=0.0, max_val=500000.0),
+                ParamDef("burst_on_s", "Burst On (s, 0 = continuous)", "float", default=0.0, min_val=0.0, max_val=100000.0),
+                ParamDef("burst_off_s", "Burst Off (s, 0 = continuous)", "float", default=0.0, min_val=0.0, max_val=100000.0),
             ])
         ]
 
