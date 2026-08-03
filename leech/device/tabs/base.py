@@ -31,9 +31,6 @@ class DeviceTab(QtWidgets.QWidget):
     def shutdown(self) -> bool:
         raise NotImplementedError
 
-    def set_connection_details(self, host="", command_port=0, data_port=0, sample_rate=0, project_name=""):
-        pass
-
     def set_receiving_state(self, receiving: bool):
         pass
 

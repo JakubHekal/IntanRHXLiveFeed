@@ -145,23 +145,6 @@ class PlotScreen(QtWidgets.QWidget):
                 self._fps_frame_count = 0
                 self._fps_last_t = now
 
-    # ── Connection details display ─────────────────────────────────────────
-
-    def set_connection_details(self, host, command_port, data_port, sample_rate, project_name):
-        tab = self._active_tab()
-        if tab is not None:
-            tab.set_connection_details(
-                host=host, command_port=command_port,
-                data_port=data_port, sample_rate=sample_rate,
-                project_name=project_name,
-            )
-
-    def set_connection_status(self, status_text=""):
-        pass  # delegating to tab-based layout; label kept for backward compat
-
-    def set_project_storage_paths(self, run_dir, snapshots_dir):
-        pass
-
     def set_receiving_state(self, receiving: bool):
         tab = self._active_tab()
         if tab is not None:
@@ -184,24 +167,6 @@ class PlotScreen(QtWidgets.QWidget):
         if tab is not None and hasattr(tab, 'get_markers'):
             return tab.get_markers()
         return []
-
-    # ── Processing settings ────────────────────────────────────────────────
-
-    def configure_processing_settings(self, psd_buffer_sec, waveform_buffer_sec, spike_bin_sec):
-        for tab in self._tabs.values():
-            if hasattr(tab, 'configure_processing_settings'):
-                tab.configure_processing_settings(
-                    psd_buffer_sec=psd_buffer_sec,
-                    waveform_buffer_sec=waveform_buffer_sec,
-                    spike_bin_sec=spike_bin_sec,
-                )
-
-    # ── Session state ──────────────────────────────────────────────────────
-
-    def clear_project_buffers(self):
-        for tab in self._tabs.values():
-            if hasattr(tab, 'clear'):
-                tab.clear()
 
     def shutdown_workers(self) -> bool:
         ok = True
@@ -242,13 +207,6 @@ class PlotScreen(QtWidgets.QWidget):
         for tab in self._tabs.values():
             if hasattr(tab, 'set_auto_follow'):
                 tab.set_auto_follow(enabled)
-
-    # ── Legacy compat (single-device data routing) ────────────────────────
-
-    def _on_data_received(self, chunk):
-        if self._tabs:
-            name = next(iter(self._tabs))
-            self._tabs[name].on_data(chunk)
 
     def changeEvent(self, event):
         if event.type() in (13, QtCore.QEvent.WindowStateChange):

@@ -9,7 +9,7 @@ import numpy as np
 from leech.plot_settings import load_plot_setting, save_plot_setting, DEFAULT_PSDS, DEFAULT_WAVEFORM, DEFAULT_SPIKE_BIN
 from leech.device.background_worker import BackgroundWorker
 from . import processing as _proc_cfg
-from ._processing_tasks import _run_spike_detect, _run_spike_rebin, _run_all_channels
+from ._processing_tasks import _run_spike_rebin, _run_all_channels
 from .processing import PSD_YLIM_MIN, PSD_YLIM_MAX, SPIKE_INCREMENTAL_MIN_SAMPLES, SPIKE_OVERLAP_SAMPLES, configure_processing_windows
 from leech.screens.plot_helpers import (
     _minmax_downsample,
@@ -830,17 +830,6 @@ class IntanDeviceTab(DeviceTab):
         self._last_spike_scan_sample.clear()
         self._hist_states.clear()
 
-    def set_connection_details(self, host="", command_port=0, data_port=0, sample_rate=0, project_name=""):
-        self.clear()
-        self._session_id += 1
-        if sample_rate > 0:
-            self.sampling_rate = float(sample_rate)
-        self._ring = RingBuffer(self.sampling_rate, self.num_channels, DISPLAY_WINDOW_SEC)
-        self._update_raw_history_stride()
-        self._raw_hist_sample_mod_low = 0
-        self._raw_hist_sample_mod_high = 0
-        self.set_receiving_state(True)
-
     def set_receiving_state(self, receiving: bool):
         receiving = bool(receiving)
         if receiving == self.is_receiving:
@@ -854,26 +843,6 @@ class IntanDeviceTab(DeviceTab):
                 self._receiving_wall_active_sec += max(0.0, now - float(self._receiving_wall_run_start))
                 self._receiving_wall_run_start = None
         self.is_receiving = receiving
-
-    def configure_processing_settings(self, psd_buffer_sec, waveform_buffer_sec, spike_bin_sec):
-        prev_spike_bin_sec = int(self._spike_bin_sec)
-        self._psd_buffer_sec = int(psd_buffer_sec)
-        self._waveform_buffer_sec = int(waveform_buffer_sec)
-        self._spike_bin_sec = int(spike_bin_sec)
-        save_plot_setting("psd_buffer_sec", self._psd_buffer_sec)
-        save_plot_setting("waveform_buffer_sec", self._waveform_buffer_sec)
-        save_plot_setting("spike_bin_sec", self._spike_bin_sec)
-        configure_processing_windows(
-            psd_buffer_sec=self._psd_buffer_sec,
-            waveform_buffer_sec=self._waveform_buffer_sec,
-            spike_bin_sec=self._spike_bin_sec,
-        )
-        self.canvas.psd_plot.setTitle(f"Power spectrum (last {self._psd_buffer_sec}s)")
-        self.canvas.spike_plot.setTitle(f"Spike counts ({self._spike_bin_sec}s bins)")
-        self.canvas.wf_plot.setTitle(f"Averaged spike waveform (last {self._waveform_buffer_sec}s)")
-        if self._spike_bin_sec != prev_spike_bin_sec:
-            self._schedule_spike_rebin_task()
-
 
     def _add_marker(self):
         vb = self.canvas.raw_plot.getViewBox()
