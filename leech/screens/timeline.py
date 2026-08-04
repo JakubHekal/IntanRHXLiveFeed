@@ -9,6 +9,8 @@ from ._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
 
 class ExperimentTimeline(QWidget):
     ROW_HEIGHT = 36
+    BLOCK_H = ROW_HEIGHT - 6
+    LANE_OFF = 10
     FLAG_HEIGHT = 18
     LABEL_WIDTH = 130
     HEADER_HEIGHT = 28
@@ -49,21 +51,51 @@ class ExperimentTimeline(QWidget):
         self._update_height()
 
     def _update_height(self):
-        per_device = self.FLAG_HEIGHT + self.ROW_HEIGHT
-        h = self.HEADER_HEIGHT + 6 + len(self._devices) * per_device + 16
+        h = self.HEADER_HEIGHT + 6 + sum(self._row_height(i) for i in range(len(self._devices))) + 16
         self.setMinimumHeight(max(h, 200))
+
+    def _row_lanes(self, blocks):
+        events = []
+        for i, block in enumerate(blocks):
+            start, dur = block[1], block[2]
+            if dur == 0:
+                continue
+            events.append((start, start + dur, i))
+        events.sort()
+        lanes = {}
+        lane_ends = []
+        for start, end, i in events:
+            for li, le in enumerate(lane_ends):
+                if le <= start:
+                    lane_ends[li] = end
+                    lanes[i] = li
+                    break
+            else:
+                lane_ends.append(end)
+                lanes[i] = len(lane_ends) - 1
+        return lanes, len(lane_ends)
+
+    def _row_height(self, dev_idx):
+        if self._devices[dev_idx][2] == "__system__":
+            return self.FLAG_HEIGHT + self.ROW_HEIGHT
+        _, lanes = self._row_lanes(self._devices[dev_idx][1])
+        return self.FLAG_HEIGHT + max(self.ROW_HEIGHT, 33 + self.LANE_OFF * (lanes - 1))
+
+    def _row_origins(self):
+        origins = []
+        y = self.HEADER_HEIGHT + 6
+        for i in range(len(self._devices)):
+            origins.append(y)
+            y += self._row_height(i)
+        return origins
 
     def _row_at(self, my):
         if my < self.HEADER_HEIGHT + 6:
             return None
-        per_device = self.FLAG_HEIGHT + self.ROW_HEIGHT
-        dev_idx = (my - self.HEADER_HEIGHT - 6) // per_device
-        if dev_idx < 0 or dev_idx >= len(self._devices):
-            return None
-        row_origin = self.HEADER_HEIGHT + 6 + dev_idx * per_device
-        if not (row_origin <= my < row_origin + per_device):
-            return None
-        return dev_idx
+        for dev_idx, row_origin in enumerate(self._row_origins()):
+            if row_origin <= my < row_origin + self._row_height(dev_idx):
+                return dev_idx
+        return None
 
     def add_device(self, name=None, device_type=None):
         if not name:
@@ -359,34 +391,33 @@ class ExperimentTimeline(QWidget):
     def _block_at(self, mx, my):
         if my < self.HEADER_HEIGHT + 6:
             return None, None, None
-        per_device = self.FLAG_HEIGHT + self.ROW_HEIGHT
-        dev_idx = (my - self.HEADER_HEIGHT - 6) // per_device
-        if dev_idx < 0 or dev_idx >= len(self._devices):
+        origins = self._row_origins()
+        dev_idx = None
+        for i, row_origin in enumerate(origins):
+            if row_origin <= my < row_origin + self._row_height(i):
+                dev_idx = i
+                break
+        if dev_idx is None:
             return None, None, None
         blocks = self._devices[dev_idx][1]
-        row_origin = self.HEADER_HEIGHT + 6 + dev_idx * per_device
-        if not (row_origin <= my < row_origin + per_device):
-            return None, None, None
+        row_origin = origins[dev_idx]
         in_flag = my < row_origin + self.FLAG_HEIGHT
-        if in_flag:
-            by = row_origin
-            bh = self.FLAG_HEIGHT
-            fm = QFontMetrics(QFont("Segoe UI", 8))
-        else:
-            by = row_origin + self.FLAG_HEIGHT + 3
-            bh = self.ROW_HEIGHT - 6
-        for bi in range(len(blocks) - 1, -1, -1):
+        lanes, _ = self._row_lanes(blocks) if not in_flag else ({}, 0)
+        for bi in sorted(range(len(blocks)), key=lambda i: (lanes.get(i, 0), i), reverse=True):
             func, start, dur, *_ = blocks[bi]
             is_instant = dur == 0
             if in_flag != is_instant:
                 continue
             bx = self._x_from_time(start)
             if is_instant:
+                fm = QFontMetrics(QFont("Segoe UI", 8))
                 pill_w = max(24, fm.horizontalAdvance(func) + 12)
                 pill_x = max(self._plot_left(), bx - pill_w // 2)
-                if pill_x <= mx <= pill_x + pill_w and by <= my < by + bh:
+                if pill_x <= mx <= pill_x + pill_w and row_origin <= my < row_origin + self.FLAG_HEIGHT:
                     return dev_idx, bi, "body"
             else:
+                by = row_origin + self.FLAG_HEIGHT + 3 + lanes.get(bi, 0) * self.LANE_OFF
+                bh = self.BLOCK_H
                 bw = max(4, int((dur / self._total_time) * self._plot_w()))
                 if (bx - self.RESIZE_THRESHOLD <= mx <= bx + bw + self.RESIZE_THRESHOLD
                         and by <= my < by + bh):
@@ -574,21 +605,21 @@ class ExperimentTimeline(QWidget):
             painter.drawText(data_rect, Qt.AlignCenter, "No devices configured.\nRight-click to add a device.")
             return
 
-        per_device = self.FLAG_HEIGHT + self.ROW_HEIGHT
         rows_top = self.HEADER_HEIGHT + 6
-        rows_height = len(self._devices) * per_device
+        origins = self._row_origins()
+        rows_height = sum(self._row_height(i) for i in range(len(self._devices)))
 
         # Phase 2: Draw non-system device rows
         for i, row in enumerate(self._devices):
             name, blocks, device_type = row[0], row[1], row[2]
             if device_type == "__system__":
                 continue
-            flag_y = rows_top + i * per_device
+            flag_y = origins[i]
             row_y = flag_y + self.FLAG_HEIGHT
 
             bg = QColor("#252526") if i % 2 == 0 else QColor("#1E1E1E")
             painter.fillRect(0, flag_y, w, self.FLAG_HEIGHT, bg)
-            painter.fillRect(0, row_y, w, self.ROW_HEIGHT, bg)
+            painter.fillRect(0, row_y, w, self._row_height(i) - self.FLAG_HEIGHT, bg)
 
             painter.setPen(QPen(QColor("#3E3E3E"), 1))
             painter.drawLine(self.LABEL_WIDTH, row_y, w, row_y)
@@ -596,7 +627,9 @@ class ExperimentTimeline(QWidget):
             painter.setPen(QPen(QColor("#EDEBE9"), 1))
             painter.drawText(8, row_y + self.ROW_HEIGHT // 2 + 4, name)
 
-            for bi, block in enumerate(blocks):
+            lanes, _ = self._row_lanes(blocks)
+            for bi in sorted(range(len(blocks)), key=lambda i: (lanes.get(i, 0), i)):
+                block = blocks[bi]
                 func, start, dur, color_str, *_ = block
                 color = QColor(color_str)
                 bx = plot_left + int((start / self._total_time) * plot_w)
@@ -620,8 +653,8 @@ class ExperimentTimeline(QWidget):
                     painter.drawText(QRect(pill_x, pill_y, pill_w, pill_h), Qt.AlignCenter, func)
                     painter.setFont(old_font)
                 else:
-                    by = row_y + 3
-                    bh = self.ROW_HEIGHT - 6
+                    by = row_y + 3 + lanes.get(bi, 0) * self.LANE_OFF
+                    bh = self.BLOCK_H
                     bw = max(4, int((dur / self._total_time) * plot_w))
                     painter.setBrush(color)
                     painter.setPen(Qt.NoPen)
@@ -682,7 +715,7 @@ class ExperimentTimeline(QWidget):
             name, blocks, device_type = row[0], row[1], row[2]
             if device_type != "__system__":
                 continue
-            flag_y = rows_top + i * per_device
+            flag_y = origins[i]
             row_y = flag_y + self.FLAG_HEIGHT
 
             painter.fillRect(0, flag_y, w, self.FLAG_HEIGHT, QColor("#2A2A2A"))
