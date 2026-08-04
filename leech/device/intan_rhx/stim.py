@@ -1,14 +1,16 @@
 """
 Stimulation parameter helpers for the Intan RHX stim channel registers.
 
-Pulse-per-train is capped at 256 by the RHS chip's 8-bit register field, so
-long protocols are delivered as repeated edge-triggered trains: the runner
-fires `manualstimtriggerpulse f1` every 256 * pulse_period (one train), and
-the chip runs the full train per rising edge. Duration of a timeline block is
-the dose: pulse count = trains * 256 = duration / pulse period.
+Pulse-per-train is capped at 256 by the RHS chip's 8-bit register field
+(`pulses_per_train`, default 256), so long protocols are delivered as repeated
+edge-triggered trains: the runner fires the software manual trigger every
+`pulses_per_train * pulse_period + refractory` (one train), and the chip runs
+the full train per rising edge. The runner re-fires on an explicit
+`train_interval_s` when the user wants a slower cadence (e.g. 1 train / 5 s).
+Duration of a timeline block is the dose: pulse count = trains * pulses_per_train.
 
 Trigger source must be the software manual trigger (`KeyPressF1`, asserted by
-`manualstimtriggerpulse f1`); `DigitalIn01` would wire the trigger to the
+`manualstimtriggeron/off f1`); `DigitalIn01` would wire the trigger to the
 connector's physical digital-in pin and the software trigger would be ignored.
 
 `StimParameters::validate()` runs on every per-channel upload and silently
@@ -57,12 +59,21 @@ def build_stim_params(shape="Biphasic", polarity="NegativeFirst",
                       phase_duration_us=100.0, second_phase_duration_us=None,
                       interphase_delay_us=0.0, pulse_period_us=200.0,
                       refractory_period_us=0.0,
-                      pre_stim_amp_settle_us=0.0, post_stim_amp_settle_us=0.0):
+                      pre_stim_amp_settle_us=0.0, post_stim_amp_settle_us=0.0,
+                      pulses_per_train=MAX_PULSES_PER_TRAIN):
     warnings = []
     if shape not in SHAPES:
         raise ValueError(f"shape {shape!r} not in {SHAPES}")
     if polarity not in POLARITIES:
         raise ValueError(f"polarity {polarity!r} not in {POLARITIES}")
+
+    ppt_raw = int(pulses_per_train)
+    pulses_per_train = max(1, min(ppt_raw, MAX_PULSES_PER_TRAIN))
+    if pulses_per_train != ppt_raw:
+        warnings.append(
+            f"pulses per train clamped to {pulses_per_train} "
+            f"(chip field is 1-{MAX_PULSES_PER_TRAIN})"
+        )
 
     if second_amplitude_uA is None:
         second_amplitude_uA = amplitude_uA
@@ -115,7 +126,7 @@ def build_stim_params(shape="Biphasic", polarity="NegativeFirst",
         ("PostStimAmpSettleMicroseconds", post_stim_amp_settle_us),
         ("PostStimChargeRecovOnMicroseconds", 0.0),
         ("PostStimChargeRecovOffMicroseconds", 0.0),
-        ("NumberOfStimPulses", MAX_PULSES_PER_TRAIN),
+        ("NumberOfStimPulses", pulses_per_train),
     ]
     return params, warnings
 
@@ -140,8 +151,30 @@ def _verify():
     trains = int(600.0 // train_dur)
     assert trains == 116, trains
     assert trains * MAX_PULSES_PER_TRAIN == 29696, "600 s of 50 Hz = ~30000 pulses"
-    print(f"stim self-check OK: {train_dur:.2f}s per train, {trains} trains x "
-          f"{MAX_PULSES_PER_TRAIN} = {trains * MAX_PULSES_PER_TRAIN} pulses in 600 s")
+
+    # 20 Hz 10-pulse train repeated every 5 s (the 20-min intervention).
+    p10, w10 = build_stim_params(pulse_period_us=50000.0, refractory_period_us=0.0,
+                                 pulses_per_train=10)
+    assert not w10
+    d10 = dict(p10)
+    assert d10["NumberOfStimPulses"] == 10
+    train_dur_10 = (10 * d10["PulseTrainPeriodMicroseconds"]
+                    + d10["RefractoryPeriodMicroseconds"]) * 1e-6
+    assert abs(train_dur_10 - 0.5) < 1e-9, train_dur_10
+    interval = max(5.0, train_dur_10)  # train_interval_s clamps to >= train duration
+    assert interval == 5.0
+    trains_20min = int(1200.0 // interval)
+    assert trains_20min == 240, trains_20min
+    assert trains_20min * 10 == 2400, "20 min of 10-pulse trains every 5 s = 2400 pulses"
+
+    # Clamp: chip field is 1-256.
+    over, wover = build_stim_params(pulses_per_train=300)
+    assert dict(over)["NumberOfStimPulses"] == MAX_PULSES_PER_TRAIN
+    assert wover, "oversized pulses_per_train must warn"
+
+    print(f"stim self-check OK: {train_dur:.2f}s per {MAX_PULSES_PER_TRAIN}-pulse train "
+          f"({trains} trains in 600 s); {train_dur_10}s per 10-pulse train "
+          f"({trains_20min} trains x 10 = {trains_20min * 10} pulses in 20 min)")
 
 
 if __name__ == "__main__":

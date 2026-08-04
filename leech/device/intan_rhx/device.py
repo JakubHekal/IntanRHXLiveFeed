@@ -13,7 +13,7 @@ from collections.abc import Iterable
 from typing import Optional, List, Union
 
 from ..base import Device, ChannelInfo
-from .stim import build_stim_params, _fmt, MAX_PULSES_PER_TRAIN
+from .stim import build_stim_params, _fmt
 from .tab import IntanDeviceTab
 from leech.telemetry_logger import append_telemetry_line
 
@@ -145,7 +145,8 @@ class IntanRHXDevice(Device):
     _STIM_KEYS = ("shape", "polarity", "amplitude_uA", "second_amplitude_uA",
                   "phase_duration_us", "second_phase_duration_us", "interphase_delay_us",
                   "pulse_period_us", "refractory_period_us",
-                  "pre_stim_amp_settle_us", "post_stim_amp_settle_us")
+                  "pre_stim_amp_settle_us", "post_stim_amp_settle_us",
+                  "pulses_per_train")
 
     def program_stimulation(self, params=None):
         """Program stim registers while the board is STOPPED.
@@ -185,13 +186,15 @@ class IntanRHXDevice(Device):
         # Re-trigger cadence must cover the whole train plus the post-train
         # refractory tail, or the next edge lands while the chip is still busy
         # and is ignored (~5 s gaps between delivered trains).
+        self._stim_pulses_per_train = int(p['NumberOfStimPulses'])
         self._stim_train_duration_s = (
-            p['PulseTrainPeriodMicroseconds'] * MAX_PULSES_PER_TRAIN
+            p['PulseTrainPeriodMicroseconds'] * self._stim_pulses_per_train
             + p['RefractoryPeriodMicroseconds']
         ) * 1e-6
         print(f"[IntanRHX] Stimulation programmed: ch={names} "
               f"amp={_fmt(p['FirstPhaseAmplitudeMicroAmps'])}uA "
               f"period={_fmt(p['PulseTrainPeriodMicroseconds'])}us "
+              f"pulses/train={self._stim_pulses_per_train} "
               f"train={self._stim_train_duration_s:.2f}s")
         return p
 
@@ -212,6 +215,22 @@ class IntanRHXDevice(Device):
         response = self.get_parameter("runmode")
         # real server replies "Return: RunMode Stop"/"Run" (capitalized)
         return response.strip().split()[-1].lower()
+
+    def wait_for_run_mode(self, timeout=10.0):
+        """Block until the board is actually running, or return False.
+
+        The Stimulus step races the Stream step's runmode=run (set from a
+        daemon thread), so the first trigger edge can be written while the chip
+        is still unclocked and silently lost. Gate the first train on this."""
+        deadline = time.perf_counter() + timeout
+        while time.perf_counter() < deadline:
+            try:
+                if self.get_run_mode() == 'run':
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.05)
+        return False
 
     def set_run_mode(self, mode):
         assert mode in ["run", "stop"], "Mode must be 'run' or 'stop'"
@@ -662,10 +681,12 @@ class IntanRHXDevice(Device):
                 ParamDef("interphase_delay_us", "Interphase Delay (us)", "float", default=0.0, min_val=0.0, max_val=5000.0),
                 ParamDef("pulse_period_us", "Pulse Period (us)", "float", default=200.0, min_val=1.0, max_val=1000000.0),
                 ParamDef("refractory_period_us", "Refractory Period (us)", "float", default=0.0, min_val=0.0, max_val=1000000.0),
+                ParamDef("pulses_per_train", "Pulses per Train (1-256)", "int", default=256, min_val=1, max_val=256),
                 ParamDef("pre_stim_amp_settle_us", "Pre-Stim Amp Settle (us)", "float", default=0.0, min_val=0.0, max_val=500000.0),
                 ParamDef("post_stim_amp_settle_us", "Post-Stim Amp Settle (us)", "float", default=0.0, min_val=0.0, max_val=500000.0),
                 ParamDef("burst_on_s", "Burst On (s, 0 = continuous)", "float", default=0.0, min_val=0.0, max_val=100000.0),
                 ParamDef("burst_off_s", "Burst Off (s, 0 = continuous)", "float", default=0.0, min_val=0.0, max_val=100000.0),
+                ParamDef("train_interval_s", "Train Interval (s, 0 = fastest)", "float", default=0.0, min_val=0.0, max_val=100000.0),
             ])
         ]
 

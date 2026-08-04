@@ -441,8 +441,32 @@ class _RunnerThread(QtCore.QThread):
         period_us = float(params.get("pulse_period_us", 200.0) or 200.0)
         train_dur = getattr(device, '_stim_train_duration_s', None)
         if train_dur is None:
-            train_dur = MAX_PULSES_PER_TRAIN * period_us * 1e-6
+            ppt = getattr(device, '_stim_pulses_per_train', MAX_PULSES_PER_TRAIN)
+            train_dur = ppt * period_us * 1e-6
+        interval = float(params.get("train_interval_s", 0.0) or 0.0)
+        if interval > 0:
+            if interval < train_dur:
+                append_telemetry_line(
+                    f"stim_warn | {step_idx} | {device_name} | Stimulus | "
+                    f"train_interval {interval:.3f}s shorter than train "
+                    f"{train_dur:.3f}s; clamped"
+                )
+                print(f"[Runner] Warning: train interval {interval}s < train duration "
+                      f"{train_dur:.3f}s, clamped")
+            interval = max(interval, train_dur)
+        else:
+            interval = train_dur
         burst_cycle = (burst_on + burst_off) if (burst_on > 0 and burst_off > 0) else 0.0
+        # The Stream step sets runmode=run from a daemon thread; the first edge
+        # written before the chip is clocked is silently lost. Wait for the
+        # board to actually run before firing the first train.
+        if getattr(device, 'wait_for_run_mode', None) is not None:
+            if not device.wait_for_run_mode(timeout=10.0):
+                msg = "Stimulus aborted: Intan board did not reach run mode before block start"
+                self.error_occurred.emit(device_name, msg)
+                append_telemetry_line(f"stim_error | {step_idx} | {device_name} | Stimulus | {msg}")
+                print(f"[Runner] {msg}")
+                return
         t0 = time.perf_counter()
         deadline = t0 + duration
         next_train = t0
@@ -462,7 +486,7 @@ class _RunnerThread(QtCore.QThread):
                 if in_burst and time.perf_counter() >= next_train:
                     device.trigger_train()
                     trains += 1
-                    next_train += train_dur
+                    next_train += interval
                 remaining = deadline - time.perf_counter()
                 time.sleep(min(0.01, max(0, remaining)) if remaining > 0 else 0.01)
         finally:
@@ -470,11 +494,12 @@ class _RunnerThread(QtCore.QThread):
                 device.stop_stimulation()
             except Exception:
                 pass
-        pulses = trains * MAX_PULSES_PER_TRAIN
+        ppt = getattr(device, '_stim_pulses_per_train', MAX_PULSES_PER_TRAIN)
+        pulses = trains * ppt
         append_telemetry_line(
-            f"stim_end | {step_idx} | {device_name} | Stimulus | {pulses} pulses ({trains} trains)"
+            f"stim_end | {step_idx} | {device_name} | Stimulus | {pulses} pulses ({trains} trains x {ppt})"
         )
-        print(f"[Runner] Stimulus {label}: {pulses} pulses delivered ({trains} trains x {MAX_PULSES_PER_TRAIN})")
+        print(f"[Runner] Stimulus {label}: {pulses} pulses delivered ({trains} trains x {ppt})")
 
     def _run_force_current(self, step_idx, device, device_name, params):
         ch = params.get("channel", 1) - 1
