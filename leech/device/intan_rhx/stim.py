@@ -2,9 +2,14 @@
 Stimulation parameter helpers for the Intan RHX stim channel registers.
 
 Pulse-per-train is capped at 256 by the RHS chip's 8-bit register field, so
-long protocols are delivered as repeated 256-pulse trains via a Level trigger
-held by `manualstimtriggeron f1`. Duration of a timeline block is the dose:
-pulse count = duration / pulse period.
+long protocols are delivered as repeated edge-triggered trains: the runner
+fires `manualstimtriggerpulse f1` every 256 * pulse_period (one train), and
+the chip runs the full train per rising edge. Duration of a timeline block is
+the dose: pulse count = trains * 256 = duration / pulse period.
+
+Trigger source must be the software manual trigger (`KeyPressF1`, asserted by
+`manualstimtriggerpulse f1`); `DigitalIn01` would wire the trigger to the
+connector's physical digital-in pin and the software trigger would be ignored.
 
 `StimParameters::validate()` runs on every per-channel upload and silently
 skips the upload on any warning, so this module must never produce an invalid
@@ -92,8 +97,8 @@ def build_stim_params(shape="Biphasic", polarity="NegativeFirst",
         ("Polarity", polarity),
         ("PulseOrTrain", "PulseTrain"),
         ("StimEnabled", "true"),
-        ("Source", "DigitalIn01"),
-        ("TriggerEdgeOrLevel", "Level"),
+        ("Source", "KeyPressF1"),
+        ("TriggerEdgeOrLevel", "Edge"),
         ("TriggerHighOrLow", "High"),
         ("MaintainAmpSettle", "false"),
         ("EnableAmpSettle", "true"),
@@ -119,3 +124,25 @@ def _fmt(value):
     if isinstance(value, float):
         return f"{value:g}"
     return str(value)
+
+
+def _verify():
+    """Self-check the edge-trigger train math used by the runner."""
+    params, _ = build_stim_params(pulse_period_us=20000.0, refractory_period_us=40000.0)
+    p = dict(params)
+    assert p["TriggerEdgeOrLevel"] == "Edge", "must edge-trigger for pulse trains"
+    assert p["Source"] == "KeyPressF1", "software trigger must pair with manualstimtrigger f1"
+    assert p["NumberOfStimPulses"] == MAX_PULSES_PER_TRAIN
+    period = p["PulseTrainPeriodMicroseconds"]
+    refractory = p["RefractoryPeriodMicroseconds"]
+    train_dur = (MAX_PULSES_PER_TRAIN * period + refractory) * 1e-6
+    assert abs(train_dur - 5.16) < 1e-9, train_dur
+    trains = int(600.0 // train_dur)
+    assert trains == 116, trains
+    assert trains * MAX_PULSES_PER_TRAIN == 29696, "600 s of 50 Hz = ~30000 pulses"
+    print(f"stim self-check OK: {train_dur:.2f}s per train, {trains} trains x "
+          f"{MAX_PULSES_PER_TRAIN} = {trains * MAX_PULSES_PER_TRAIN} pulses in 600 s")
+
+
+if __name__ == "__main__":
+    _verify()

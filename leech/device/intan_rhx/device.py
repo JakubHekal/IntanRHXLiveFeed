@@ -13,7 +13,7 @@ from collections.abc import Iterable
 from typing import Optional, List, Union
 
 from ..base import Device, ChannelInfo
-from .stim import build_stim_params, _fmt
+from .stim import build_stim_params, _fmt, MAX_PULSES_PER_TRAIN
 from .tab import IntanDeviceTab
 from leech.telemetry_logger import append_telemetry_line
 
@@ -48,6 +48,7 @@ class IntanRHXDevice(Device):
         self.command_socket = None
         self.data_socket = None
         self.send_delay = 0.05
+        self._cmd_lock = threading.Lock()
 
         self.buffer_duration_sec = buffer_duration_sec
         self.circular_buffer = None
@@ -87,14 +88,37 @@ class IntanRHXDevice(Device):
     def sample_rate(self, value):
         self._sample_rate = float(value) if value is not None else None
 
+    def _send(self, cmd, delay=None):
+        with self._cmd_lock:
+            self.command_socket.sendall(cmd.rstrip("\n").encode() + b";\n")
+            time.sleep(delay if delay is not None else self.send_delay)
+            self._drain_command_reply()
+
+    def _drain_command_reply(self):
+        """Consume any async error/reply the server queued for a 'set' command,
+        so the next 'get' doesn't read a stale line (e.g. 'Board must be running
+        in order to stop')."""
+        try:
+            self.command_socket.settimeout(0.01)
+            while True:
+                try:
+                    if not self.command_socket.recv(4096):
+                        break
+                except socket.timeout:
+                    break
+        except OSError:
+            pass
+        finally:
+            self.command_socket.settimeout(2.0)
+
     def set_parameter(self, param, value):
-        self.command_socket.sendall(f"set {param} {value}\n".encode())
-        time.sleep(self.send_delay)
+        self._send(f"set {param} {value}\n")
 
     def get_parameter(self, param):
-        self.command_socket.sendall(f"get {param}\n".encode())
-        time.sleep(self.send_delay)
-        return self.command_socket.recv(1024).decode()
+        with self._cmd_lock:
+            self.command_socket.sendall(f"get {param};\n".encode())
+            time.sleep(self.send_delay)
+            return self.command_socket.recv(1024).decode()
 
     def enable_wide_channel(self, channels, port='a', status=True):
         if isinstance(channels, int):
@@ -106,12 +130,10 @@ class IntanRHXDevice(Device):
             self.set_parameter(f"{name}.tcpdataoutputenabled", 'true' if status else 'false')
 
     def clear_all_data_outputs(self):
-        self.command_socket.sendall(b"execute clearalldataoutputs\n")
-        time.sleep(self.send_delay)
+        self._send("execute clearalldataoutputs\n")
 
     def execute_command(self, cmd, delay=0.01):
-        self.command_socket.sendall(cmd.encode())
-        time.sleep(delay)
+        self._send(cmd, delay=delay)
 
     def _channel_names(self, channel_str):
         if str(channel_str).strip():
@@ -125,7 +147,20 @@ class IntanRHXDevice(Device):
                   "pulse_period_us", "refractory_period_us",
                   "pre_stim_amp_settle_us", "post_stim_amp_settle_us")
 
-    def start_stimulation(self, params=None):
+    def program_stimulation(self, params=None):
+        """Program stim registers while the board is STOPPED.
+
+        Never call while the board is running: the server's upload path
+        (setStimSequenceParameters) does run() then spins on
+        `while (isRunning()) qApp->processEvents()`, which never exits while
+        streaming and freezes the server's FIFO draining (the 45 s data stall).
+        """
+        if self.get_run_mode() != 'stop':
+            raise RuntimeError(
+                "Cannot program stimulation while the Intan controller is running "
+                "(uploading while running wedges the server run loop). Program "
+                "stimulation in a prepare step before streaming starts."
+            )
         kwargs = {k: params[k] for k in self._STIM_KEYS if params and k in params}
         stim_params, warnings = build_stim_params(**kwargs)
         p = dict(stim_params)
@@ -147,22 +182,36 @@ class IntanRHXDevice(Device):
                 self.execute_command(f"set {name}.{param} {_fmt(value)}\n")
             self.execute_command(f"execute uploadstimparameters {name}\n")
         time.sleep(0.2)
+        # Re-trigger cadence must cover the whole train plus the post-train
+        # refractory tail, or the next edge lands while the chip is still busy
+        # and is ignored (~5 s gaps between delivered trains).
+        self._stim_train_duration_s = (
+            p['PulseTrainPeriodMicroseconds'] * MAX_PULSES_PER_TRAIN
+            + p['RefractoryPeriodMicroseconds']
+        ) * 1e-6
         print(f"[IntanRHX] Stimulation programmed: ch={names} "
               f"amp={_fmt(p['FirstPhaseAmplitudeMicroAmps'])}uA "
-              f"period={_fmt(p['PulseTrainPeriodMicroseconds'])}us")
+              f"period={_fmt(p['PulseTrainPeriodMicroseconds'])}us "
+              f"train={self._stim_train_duration_s:.2f}s")
         return p
 
-    def hold_trigger(self, on=True):
+    def trigger_train(self):
+        """Fire one edge-triggered pulse train (up to 256 pulses) on the
+        programmed channel. Hold the wire high ~50 ms so the chip sees a clean
+        rising edge; the server's back-to-back `manualstimtriggerpulse` can
+        coalesce into a sub-ms blip that never registers."""
         trigger = getattr(self, "_stim_trigger", "f1")
-        self.execute_command(f"execute manualstimtrigger{'on' if on else 'off'} {trigger}\n", delay=0.05)
+        self.execute_command(f"execute manualstimtriggeron {trigger}\n", delay=0.05)
+        self.execute_command(f"execute manualstimtriggeroff {trigger}\n")
 
     def stop_stimulation(self):
-        self.hold_trigger(False)
-        print("[IntanRHX] Stimulation off")
+        # Edge trains are self-terminating; nothing to hold off.
+        print("[IntanRHX] Stimulation stopped")
 
     def get_run_mode(self):
         response = self.get_parameter("runmode")
-        return response.strip().split()[-1]
+        # real server replies "Return: RunMode Stop"/"Run" (capitalized)
+        return response.strip().split()[-1].lower()
 
     def set_run_mode(self, mode):
         assert mode in ["run", "stop"], "Mode must be 'run' or 'stop'"
@@ -186,6 +235,7 @@ class IntanRHXDevice(Device):
         try:
             self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.command_socket.connect((self.host, self.command_port))
+            self.command_socket.settimeout(2.0)
             self.data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.data_socket.connect((self.host, self.data_port))
             self.data_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
@@ -195,12 +245,32 @@ class IntanRHXDevice(Device):
                 pass
             self.data_socket.settimeout(0.005)
             self._connected = True
+            # ponytail: force a known-stopped controller before streaming; a board
+            # left running by a previous failed close() desyncs blocksPerWrite,
+            # runmode, and the TCP output geometry on the next session.
+            try:
+                self.set_run_mode("stop")
+            except Exception:
+                pass
+            if self.get_run_mode() != 'stop':
+                raise ConnectionError(
+                    "Intan controller still running after 'set runmode stop' — "
+                    "stop it in the Intan software (or close other sessions) and reconnect."
+                )
             self._sample_rate = self.get_sample_rate()
             self._sample_counter = 0
             self.effective_fs = float(self._sample_rate)
         except Exception as e:
             self._last_connect_error = str(e)
             self._connected = False
+            for sock in (self.command_socket, self.data_socket):
+                try:
+                    if sock is not None:
+                        sock.close()
+                except OSError:
+                    pass
+            self.command_socket = None
+            self.data_socket = None
         return self._connected
 
     def receive_data(self, buffer: bytearray, read_size: int, max_reads: int = 16):
@@ -323,15 +393,22 @@ class IntanRHXDevice(Device):
     def _streaming_worker(self):
         rolling_buffer = bytearray()
         self.set_run_mode("run")
-        # ponytail: drain stale TCP data from previous stream so parser
-        # doesn't misalign on leftover bytes with different num_channels
+        # ponytail: bounded drain of stale TCP data (<=200 ms) so the parser
+        # doesn't misalign on leftover bytes from a previous stream geometry.
+        # Never unbounded — it would eat live data forever when the controller
+        # is already running (runmode set is a no-op then).
+        drain_deadline = time.monotonic() + 0.2
         try:
-            while True:
-                self.data_socket.recv(self.read_size)
+            self.data_socket.settimeout(0.01)
+            while time.monotonic() < drain_deadline:
+                if not self.data_socket.recv(self.read_size):
+                    break
         except socket.timeout:
             pass
         except (ConnectionResetError, ConnectionAbortedError, OSError):
             pass
+        finally:
+            self.data_socket.settimeout(0.005)
         self._synced = False
         _intentional_stop = True
         try:
@@ -404,6 +481,13 @@ class IntanRHXDevice(Device):
             self.set_blocks_per_write(1)
             self.blocks_per_write = 1
             self._update_read_size()
+            resp = self.get_parameter("TCPNumberDataBlocksPerWrite")
+            if resp.strip().split()[-1] != "1":
+                append_telemetry_line(
+                    f"intanrhx | warn | TCPNumberDataBlocksPerWrite="
+                    f"{resp.strip().split()[-1]} (expected 1) — server desynced"
+                )
+                print("[IntanRHX] Warning: TCPNumberDataBlocksPerWrite != 1 on server")
         except Exception:
             pass
         self._connected = True
@@ -477,11 +561,27 @@ class IntanRHXDevice(Device):
             return collected_emg
 
     def close(self, stop_after_disconnect=True):
-        if stop_after_disconnect:
-            if self.get_run_mode() == 'run':
-                self.set_run_mode("stop")
-        self.command_socket.close()
-        self.data_socket.close()
+        # ponytail: idempotent + exception-safe; a double close (runner finally
+        # vs UI _close_devices) previously threw WinError 10038 and skipped the
+        # 'set runmode stop', leaving the board running for the next session.
+        if self.command_socket is None and self.data_socket is None:
+            return
+        if stop_after_disconnect and self.command_socket is not None:
+            try:
+                if self.get_run_mode() != 'stop':
+                    self.set_run_mode("stop")
+            except Exception:
+                pass
+        for sock in (self.command_socket, self.data_socket):
+            try:
+                if sock is not None:
+                    sock.close()
+            except OSError:
+                pass
+        self.command_socket = None
+        self.data_socket = None
+        self._connected = False
+        self.streaming = False
 
     def record_to_file(self, path, duration_sec=10):
         emg = self.record(duration_sec)
