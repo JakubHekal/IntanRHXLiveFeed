@@ -8,6 +8,13 @@ from leech.screens._registry import _DEVICE_CLASSES
 from leech.device.ring_buffer import RingBuffer
 
 
+PLANNING_EMPTY_MESSAGE = (
+    "No live plots yet\n\n"
+    "Use + Add Device beside the timeline, build your plan,\n"
+    "then choose Run Experiment to start live data."
+)
+
+
 class PlotScreen(QtWidgets.QWidget):
 
     toggle_receiving_request_signal = QtCore.pyqtSignal(bool)
@@ -32,7 +39,7 @@ class PlotScreen(QtWidgets.QWidget):
         # toolbar visibility handled per-tab
         layout.addWidget(self.tab_widget, 1)
 
-        self._empty_label = QtWidgets.QLabel("No data sources.\nAdd a device to begin.")
+        self._empty_label = QtWidgets.QLabel(PLANNING_EMPTY_MESSAGE)
         self._empty_label.setAlignment(QtCore.Qt.AlignCenter)
         self._empty_label.setWordWrap(True)
         self._empty_label.setStyleSheet("color: #6C6C6C; padding: 40px 16px; font-size: 13px;")
@@ -57,6 +64,11 @@ class PlotScreen(QtWidgets.QWidget):
     def _update_tab_bar_visibility(self):
         visible = len(self._tabs) > 1
         self.tab_widget.tabBar().setVisible(visible)
+
+    def set_planning_state(self):
+        self._empty_label.setText(PLANNING_EMPTY_MESSAGE)
+        self._empty_label.show()
+        self.tab_widget.hide()
 
     def add_device(self, name, device_type, sample_rate=20000.0, num_channels=None, channel_labels=None):
         if name in self._tabs:
@@ -92,8 +104,7 @@ class PlotScreen(QtWidgets.QWidget):
         tab.deleteLater()
         self._update_tab_bar_visibility()
         if not self._tabs:
-            self._empty_label.show()
-            self.tab_widget.hide()
+            self.set_planning_state()
 
     def on_device_configured(self, device_name: str, num_channels: int, channel_labels: list[str], sample_rate: float = 0.0):
         tab = self._tabs.get(device_name)
@@ -111,8 +122,7 @@ class PlotScreen(QtWidgets.QWidget):
         for name in list(self._tabs):
             self.remove_device(name)
         if not self._tabs:
-            self._empty_label.show()
-            self.tab_widget.hide()
+            self.set_planning_state()
 
     def _active_tab(self):
         widget = self.tab_widget.currentWidget()
@@ -146,9 +156,9 @@ class PlotScreen(QtWidgets.QWidget):
                 self._fps_last_t = now
 
     def set_receiving_state(self, receiving: bool):
-        tab = self._active_tab()
-        if tab is not None:
-            tab.set_receiving_state(receiving)
+        for tab in self._tabs.values():
+            if hasattr(tab, 'set_receiving_state'):
+                tab.set_receiving_state(receiving)
 
     # ── Markers ────────────────────────────────────────────────────────────
 

@@ -477,17 +477,28 @@ class MainStage(QWidget):
         center_layout.addWidget(self.plot_screen, 1)
 
         self.timeline = ExperimentTimeline()
+        self.btn_add_device = self.timeline.add_device_button
+        self.btn_add_device.setStyleSheet(btn_style)
+        self.btn_add_device.setToolTip("Add hardware to this experiment plan")
         center_layout.addWidget(self.timeline)
 
         self.timeline.block_selected.connect(self.right_sidebar.set_block_info)
         self.right_sidebar.block_change_requested.connect(self.timeline.update_block)
         self.timeline.device_selected.connect(self.right_sidebar.set_device_info)
         self.right_sidebar.device_config_changed.connect(self.timeline.update_device_config)
+        self.timeline.data_changed.connect(self._on_timeline_data_changed)
 
         center_layout.addLayout(timeline_bar)
 
         layout.addWidget(self.left_sidebar, 1)
         layout.addWidget(center_widget, 4)
         layout.addWidget(self.right_sidebar, 1)
+
+    def _on_timeline_data_changed(self):
+        if self.timeline._edit_mode:
+            self.plot_screen.clear_all()
+
+    def set_edit_mode(self, enabled):
+        self.timeline.set_edit_mode(enabled)
 
 

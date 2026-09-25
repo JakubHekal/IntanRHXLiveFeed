@@ -60,7 +60,7 @@ def _default_config(name: str, author: str = "", description: str = "") -> dict:
         },
         "execution_control": {
             "is_locked": False,
-            "required_devices": ["rhx"],
+            "required_devices": [],
         },
         "sequence": [],
         "post_processing": [],

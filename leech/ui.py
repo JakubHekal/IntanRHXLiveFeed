@@ -96,6 +96,12 @@ class MainWindow(QMainWindow):
                     print(f"[UI] Error closing device: {e}")
         self._run_device_instances = []
 
+    def _set_edit_mode(self, enabled):
+        self.main_stage.set_edit_mode(enabled)
+        if enabled:
+            self.main_stage.plot_screen.clear_all()
+            self.main_stage.plot_screen.set_planning_state()
+
     def closeEvent(self, event):
         if getattr(self, '_experiment_runner', None) is not None and self._experiment_runner.is_running():
             self._experiment_runner.stop()
@@ -192,23 +198,30 @@ class MainWindow(QMainWindow):
             return
         run_data = ExperimentManager.load_run(run_path)
         timeline = self.main_stage.timeline
+        self._set_edit_mode(True)
         timeline.clear_all()
         self.main_stage.plot_screen.clear_all()
         devices = run_data.get("devices", [])
         for d in devices:
             timeline.add_device(name=d.get("name", "Device"), device_type=d.get("device_type", "rhx"))
-            self.main_stage.plot_screen.add_device(d.get("name", "Device"), d.get("device_type", "rhx"))
-        name_to_idx = {d[0]: i for i, d in enumerate(timeline._devices) if d[2] != "__system__"}
-        if not name_to_idx:
-            timeline.add_device(name="Default", device_type="rhx")
-            self.main_stage.plot_screen.add_device("Default", "rhx")
-            name_to_idx = {d[0]: i for i, d in enumerate(timeline._devices) if d[2] != "__system__"}
+        if not any(d[2] != "__system__" for d in timeline._devices):
+            QMessageBox.information(self, "No Devices", "This run has no devices to rerun.")
+            return
+        if not any(d[2] == "__system__" for d in timeline._devices):
+            timeline._devices.append(["System actions", [], "__system__", {}])
+            timeline._update_total_time()
+            timeline._update_height()
+        name_to_idx = {d[0]: i for i, d in enumerate(timeline._devices)}
+        system_idx = next(
+            (i for i, row in enumerate(timeline._devices) if row[2] == "__system__"),
+            None,
+        )
         current_time = 0.0
         for step in run_data.get("sequence", []):
             duration = step.get("parameters", {}).get("duration_s", 2.0)
-            dev_idx = name_to_idx.get(step.get("device_name", ""))
+            dev_idx = name_to_idx.get(step.get("device_name", "")) if step.get("device_name") else system_idx
             if dev_idx is None:
-                dev_idx = next(iter(name_to_idx.values()))
+                continue
             timeline.add_block(dev_idx, step.get("action", ""), start=current_time, duration=duration, params=dict(step.get("parameters", {})))
             current_time += duration
         self._on_experiment_run()
@@ -327,9 +340,9 @@ class MainWindow(QMainWindow):
             {"name": d[0], "device_type": d[2]}
             for d in devs if d[2] != "__system__"
         ]
-        config.execution_control.required_devices = list(set(
+        config.execution_control.required_devices = [
             d[2] for d in devs if d[2] != "__system__"
-        ))
+        ]
 
         sequence = []
         step_id = 1
@@ -365,6 +378,16 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No Experiment",
                                     "Open or create an experiment first.")
             return
+
+        timeline = self.main_stage.timeline
+        if not any(d[2] != "__system__" for d in timeline._devices):
+            QMessageBox.information(self, "Add Device", "Add a device before running this experiment.")
+            return
+        if not self._build_sequence_for_runner():
+            QMessageBox.information(self, "No Steps", "Add at least one step before running this experiment.")
+            return
+
+        self._set_edit_mode(True)
 
         exp_name = Path(self._current_experiment_path).name
         device_groups = []
@@ -463,28 +486,29 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Already Running", "An experiment is already in progress.")
                 return
 
-        # ensure every timeline device has a plot tab before the run starts
-        for d in self.main_stage.timeline._devices:
-            if d[2] == "__system__":
-                continue
-            name, dev_type = d[0], d[2]
-            if name not in self.main_stage.plot_screen._tabs:
-                inst = None
-                for ri in self._run_device_instances:
-                    if hasattr(ri, 'name') and ri.name == name:
-                        inst = ri
-                        break
-                    if hasattr(ri, 'device_type') and ri.device_type == dev_type:
-                        inst = ri
-                sr = inst.sample_rate if (inst and inst.sample_rate) else (10.0 if dev_type == "smu" else 20000.0)
-                self.main_stage.plot_screen.add_device(name, dev_type, sample_rate=sr)
-
         timeline_devs = self._devices_with_instances()
         sequence = self._build_sequence_for_runner()
 
         if not sequence:
             QMessageBox.information(self, "No Steps", "The experiment has no sequence steps to run.")
             return
+
+        self._set_edit_mode(False)
+        for d in timeline_devs:
+            if d[2] == "__system__":
+                continue
+            name, dev_type = d[0], d[2]
+            if name not in self.main_stage.plot_screen._tabs:
+                inst = d[4] if len(d) >= 5 else None
+                config = d[3] if len(d) >= 4 else {}
+                sr = inst.sample_rate if (inst and inst.sample_rate) else (10.0 if dev_type == "smu" else 20000.0)
+                self.main_stage.plot_screen.add_device(
+                    name,
+                    dev_type,
+                    sample_rate=sr,
+                    num_channels=config.get("num_channels"),
+                )
+        self.main_stage.plot_screen.set_receiving_state(True)
 
         self._experiment_runner = ExperimentRunner(
             devices=timeline_devs,
@@ -573,6 +597,9 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.main_stage.timeline.set_running(False)
         self.main_stage.timeline.clear_active_step()
+        self.main_stage.plot_screen.set_receiving_state(False)
+        self.main_stage.plot_screen.clear_all()
+        self._set_edit_mode(True)
         status = "success" if success else "failed"
         ExperimentManager.update_run(self._current_run_path, status)
         append_telemetry_line(f"run_end | {status} | {message}")
@@ -622,9 +649,7 @@ class MainWindow(QMainWindow):
 
     def _on_exp_error(self, device_name, error_message):
         print(f"[UI] Experiment error: {device_name}: {error_message}")
-        self.main_stage.btn_play.setEnabled(True)
-        self.main_stage.btn_pause.setEnabled(False)
-        self.main_stage.btn_stop.setEnabled(False)
+        self.statusBar().showMessage(f"Experiment error: {device_name}: {error_message}")
 
     def _on_user_input_requested(self, message):
         self.main_stage.timeline.clear_active_step()
@@ -663,45 +688,35 @@ class MainWindow(QMainWindow):
         timeline = self.main_stage.timeline
         timeline.clear_all()
         self.main_stage.plot_screen.clear_all()
+        self._set_edit_mode(True)
 
         # restore devices from stored name + type
         if config.devices:
             for d in config.devices:
                 timeline.add_device(name=d["name"], device_type=d.get("device_type", "rhx"))
-                self.main_stage.plot_screen.add_device(d["name"], d.get("device_type", "rhx"))
         else:
-            # legacy: create one device per required_device type
             for dev_type in config.execution_control.required_devices:
                 timeline.add_device(name=dev_type, device_type=dev_type)
-                self.main_stage.plot_screen.add_device(dev_type, dev_type)
 
-        # ensure system device row exists for system blocks
         if not any(d[2] == "__system__" for d in timeline._devices):
-            timeline._devices.append(["__System__", [], "__system__", {}])
+            timeline._devices.append(["System actions", [], "__system__", {}])
             timeline._update_total_time()
             timeline._update_height()
 
-        # map device name → index
         name_to_idx = {d[0]: i for i, d in enumerate(timeline._devices)}
-
-        # ensure at least one non-system device exists
-        non_system_idxs = {k: v for k, v in name_to_idx.items()
-                           if timeline._devices[v][2] != "__system__"}
-        if not non_system_idxs:
-            timeline.add_device(name="Default", device_type="rhx")
-            self.main_stage.plot_screen.add_device("Default", "rhx")
-            name_to_idx = {d[0]: i for i, d in enumerate(timeline._devices)}
-            non_system_idxs = {k: v for k, v in name_to_idx.items()
-                               if timeline._devices[v][2] != "__system__"}
+        system_idx = next(
+            (i for i, row in enumerate(timeline._devices) if row[2] == "__system__"),
+            None,
+        )
 
         sorted_steps = sorted(config.sequence, key=lambda s: s.parameters.get("_start", 0))
         current_time = 0.0
         for step in sorted_steps:
             start = step.parameters.get("_start", current_time)
             duration = step.parameters.get("duration_s", 2.0)
-            dev_idx = name_to_idx.get(step.device_name) if step.device_name else None
+            dev_idx = name_to_idx.get(step.device_name) if step.device_name else system_idx
             if dev_idx is None:
-                dev_idx = next(iter(non_system_idxs.values()))
+                continue
             clean_params = {k: v for k, v in step.parameters.items()
                             if k not in ('duration_s', '_start')}
             timeline.add_block(dev_idx, step.action, start=start, duration=duration, params=clean_params)

@@ -2,7 +2,7 @@ import time
 
 from PyQt5.QtCore import pyqtSignal, Qt, QRect, QTimer
 from PyQt5.QtGui import QPainter, QPen, QColor, QFont, QFontMetrics
-from PyQt5.QtWidgets import QWidget, QMenu, QInputDialog
+from PyQt5.QtWidgets import QWidget, QMenu, QInputDialog, QMessageBox, QPushButton
 
 from ._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
 
@@ -14,6 +14,8 @@ class ExperimentTimeline(QWidget):
     FLAG_HEIGHT = 18
     LABEL_WIDTH = 130
     HEADER_HEIGHT = 28
+    ADD_ICON_SIZE = 16
+    ADD_ICON_X = 8
     RESIZE_THRESHOLD = 6
     SNAP = 30.0
     _BLOCK_COLORS = ["#0078D4", "#2B88D8", "#4BA3E3", "#107C10", "#498205",
@@ -39,6 +41,7 @@ class ExperimentTimeline(QWidget):
         self._drag_orig_start = 0.0
         self._drag_orig_dur = 0.0
         self._running = False
+        self._edit_mode = True
         self._cursor_time = None
         self._cursor_step_start = 0.0
         self._cursor_step_end = 0.0
@@ -47,12 +50,31 @@ class ExperimentTimeline(QWidget):
         self._cursor_timer = QTimer(self)
         self._cursor_timer.setInterval(30)
         self._cursor_timer.timeout.connect(self._on_cursor_tick)
+        self.add_device_button = QPushButton("+ Add Device", self)
+        self.add_device_button.setFocusPolicy(Qt.NoFocus)
+        self.add_device_button.clicked.connect(self.add_device_dialog)
+        self._position_header_button()
         self._update_total_time()
         self._update_height()
 
     def _update_height(self):
         h = self.HEADER_HEIGHT + 6 + sum(self._row_height(i) for i in range(len(self._devices))) + 16
         self.setMinimumHeight(max(h, 200))
+
+    def _position_header_button(self):
+        if not hasattr(self, "add_device_button"):
+            return
+        self.add_device_button.setGeometry(
+            4,
+            3,
+            max(1, self.LABEL_WIDTH - 8),
+            max(1, self.HEADER_HEIGHT - 6),
+        )
+        self.add_device_button.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_header_button()
 
     def _row_lanes(self, blocks):
         events = []
@@ -111,6 +133,62 @@ class ExperimentTimeline(QWidget):
         self._update_total_time()
         self._update_height()
         self.data_changed.emit()
+        self.update()
+
+    def add_device_dialog(self):
+        if not self._edit_mode:
+            return
+        choices = sorted(_DEVICE_CLASSES.items(), key=lambda item: item[1].name)
+        labels = [f"{cls.name} ({device_type})" for device_type, cls in choices]
+        label, ok = QInputDialog.getItem(self, "Add Device", "Device type:", labels, 0, False)
+        if not ok or not label:
+            return
+        device_type = next(
+            device_type for device_type, cls in choices
+            if f"{cls.name} ({device_type})" == label
+        )
+        cls = _DEVICE_CLASSES[device_type]
+        name, ok = QInputDialog.getText(self, "Add Device", "Device name:", text=cls.name)
+        if not ok:
+            return
+        name = name.strip() or cls.name
+        if any(d[0] == name and d[2] != "__system__" for d in self._devices):
+            QMessageBox.warning(self, "Device Exists", f"Device '{name}' is already in this plan.")
+            return
+        self.add_device(name, device_type)
+
+    def _operations_for_device(self, device_type):
+        if device_type == "__system__":
+            return _SYSTEM_OPERATIONS
+        cls = _DEVICE_CLASSES.get(device_type)
+        return cls.get_operations() if cls else []
+
+    def _show_add_block_menu(self, dev_idx, global_pos):
+        if not self._edit_mode or dev_idx < 0 or dev_idx >= len(self._devices):
+            return
+        menu = QMenu("Add Block", self)
+        actions = {}
+        for op in self._operations_for_device(self._devices[dev_idx][2]):
+            action = menu.addAction(op.label)
+            actions[action] = op.name
+        if not actions:
+            action = menu.addAction("Generic Block")
+            actions[action] = "New Block"
+        action = menu.exec_(global_pos)
+        if action in actions:
+            self.add_block(dev_idx, actions[action])
+
+    def _add_button_at(self, mx, my):
+        if not self._edit_mode or mx > self.ADD_ICON_X + self.ADD_ICON_SIZE:
+            return None
+        for dev_idx, row_origin in enumerate(self._row_origins()):
+            if row_origin <= my < row_origin + self.FLAG_HEIGHT:
+                return dev_idx
+        return None
+
+    def set_edit_mode(self, enabled):
+        self._edit_mode = bool(enabled)
+        self.add_device_button.setVisible(self._edit_mode)
         self.update()
 
     def remove_device(self, dev_idx):
@@ -264,41 +342,36 @@ class ExperimentTimeline(QWidget):
         self.data_changed.emit()
         self.update()
 
+    def _build_add_block_menu(self, parent_menu, target_dev):
+        sub = QMenu("Add Block", parent_menu)
+        actions = {}
+        for op in self._operations_for_device(self._devices[target_dev][2]):
+            action = sub.addAction(op.label)
+            actions[action] = op.name
+        if not actions:
+            action = sub.addAction("Generic Block")
+            actions[action] = "New Block"
+        return sub, actions
+
     def contextMenuEvent(self, event):
-        if self._running:
+        if not self._edit_mode:
             return
         mx, my = event.x(), event.y()
         menu = QMenu(self)
         dev_idx, block_idx, _ = self._block_at(mx, my)
         row_idx = self._row_at(my)
 
-        def _build_add_block_menu(parent_menu, target_dev):
-            sub = QMenu("Add Block", parent_menu)
-            device_type = self._devices[target_dev][2]
-            ops = _SYSTEM_OPERATIONS if device_type == "__system__" else []
-            if not ops:
-                cls = _DEVICE_CLASSES.get(device_type)
-                ops = cls.get_operations() if cls else []
-            actions = {}
-            for op in ops:
-                a = sub.addAction(op.label)
-                actions[a] = op.name
-            if not actions:
-                a = sub.addAction("Generic Block")
-                actions[a] = "New Block"
-            return sub, actions
-
         is_system_row = row_idx is not None and self._devices[row_idx][2] == "__system__"
         is_system_dev = dev_idx is not None and self._devices[dev_idx][2] == "__system__"
 
         if block_idx is not None:
-            a_dup = menu.addAction(f"Duplicate  \u00ab{self._devices[dev_idx][1][block_idx][0]}\u00bb")
-            a_del = menu.addAction(f"Remove  \u00ab{self._devices[dev_idx][1][block_idx][0]}\u00bb")
+            a_dup = menu.addAction(f"Duplicate  «{self._devices[dev_idx][1][block_idx][0]}»")
+            a_del = menu.addAction(f"Remove  «{self._devices[dev_idx][1][block_idx][0]}»")
             menu.addSeparator()
-            add_menu, add_actions = _build_add_block_menu(menu, dev_idx)
+            add_menu, add_actions = self._build_add_block_menu(menu, dev_idx)
             menu.addMenu(add_menu)
             if not is_system_dev:
-                a_del_d = menu.addAction(f"Remove  \u00ab{self._devices[dev_idx][0]}\u00bb")
+                a_del_d = menu.addAction(f"Remove  «{self._devices[dev_idx][0]}»")
             action = menu.exec_(event.globalPos())
             if action == a_dup:
                 self.duplicate_block(dev_idx, block_idx)
@@ -309,10 +382,10 @@ class ExperimentTimeline(QWidget):
             elif not is_system_dev and action == a_del_d:
                 self.remove_device(dev_idx)
         elif row_idx is not None:
-            add_menu, add_actions = _build_add_block_menu(menu, row_idx)
+            add_menu, add_actions = self._build_add_block_menu(menu, row_idx)
             menu.addMenu(add_menu)
             if not is_system_row:
-                a_del_d = menu.addAction(f"Remove  \u00ab{self._devices[row_idx][0]}\u00bb")
+                a_del_d = menu.addAction(f"Remove  «{self._devices[row_idx][0]}»")
             action = menu.exec_(event.globalPos())
             if action in add_actions:
                 self.add_block(row_idx, add_actions[action])
@@ -323,23 +396,18 @@ class ExperimentTimeline(QWidget):
             sys_menu = QMenu("Add System Block", menu)
             sys_actions = {}
             for op in _SYSTEM_OPERATIONS:
-                a = sys_menu.addAction(op.label)
-                sys_actions[a] = op.name
+                action = sys_menu.addAction(op.label)
+                sys_actions[action] = op.name
             menu.addMenu(sys_menu)
             action = menu.exec_(event.globalPos())
-            if action is not None:
-                if action == add_dev:
-                    types = sorted(_DEVICE_CLASSES.keys())
-                    type_str, ok = QInputDialog.getItem(self, "Add Device", "Device type:", types, 0, False)
-                    if ok and type_str:
-                        cls = _DEVICE_CLASSES[type_str]
-                        name, ok2 = QInputDialog.getText(self, "Add Device", "Name:", text=cls.name)
-                        if ok2:
-                            self.add_device(name.strip() or cls.name, type_str)
-                elif action in sys_actions:
-                    if not self._devices or self._devices[-1][2] != "__system__":
-                        self._devices.append(["__System__", [], "__system__", {}])
-                    self.add_block(len(self._devices) - 1, sys_actions[action])
+            if action == add_dev:
+                self.add_device_dialog()
+            elif action in sys_actions:
+                if not self._devices or self._devices[-1][2] != "__system__":
+                    self._devices.append(["System actions", [], "__system__", {}])
+                    self._update_height()
+                self.add_block(len(self._devices) - 1, sys_actions[action])
+
 
     def _update_total_time(self):
         self._total_time = max(
@@ -351,6 +419,7 @@ class ExperimentTimeline(QWidget):
 
     def set_running(self, running):
         self._running = running
+        self.set_edit_mode(not running)
         if not running:
             self._cursor_timer.stop()
             self._cursor_time = None
@@ -483,11 +552,16 @@ class ExperimentTimeline(QWidget):
         self.data_changed.emit()
 
     def mousePressEvent(self, event):
-        if self._running:
+        if not self._edit_mode:
             return
         if event.button() != Qt.LeftButton:
             return
         mx, my = event.x(), event.y()
+        add_row = self._add_button_at(mx, my)
+        if add_row is not None:
+            self._select(add_row, None)
+            self._show_add_block_menu(add_row, event.globalPos())
+            return
         dev_idx, block_idx, edge = self._block_at(mx, my)
         if dev_idx is not None and block_idx is not None:
             self._select(dev_idx, block_idx)
@@ -508,7 +582,7 @@ class ExperimentTimeline(QWidget):
     def mouseMoveEvent(self, event):
         mx = event.x()
         my = event.y()
-        if self._running:
+        if not self._edit_mode:
             self.setCursor(Qt.ArrowCursor)
             return
         if self._drag_state:
@@ -558,7 +632,9 @@ class ExperimentTimeline(QWidget):
             self.update()
         else:
             _, _, edge = self._block_at(mx, my)
-            if edge in ("left", "right"):
+            if self._add_button_at(mx, my) is not None:
+                self.setCursor(Qt.PointingHandCursor)
+            elif edge in ("left", "right"):
                 self.setCursor(Qt.SizeHorCursor)
             elif edge == "body":
                 self.setCursor(Qt.SizeAllCursor)
@@ -566,12 +642,27 @@ class ExperimentTimeline(QWidget):
                 self.setCursor(Qt.ArrowCursor)
 
     def mouseReleaseEvent(self, event):
-        if self._running:
+        if not self._edit_mode:
             return
         self._drag_state = None
         self._drag_dev = None
         self._drag_block = None
         self._drag_press_x = 0.0
+
+    def _draw_add_icon(self, painter, flag_y):
+        if not self._edit_mode:
+            return
+        icon = QRect(
+            self.ADD_ICON_X,
+            flag_y + 1,
+            self.ADD_ICON_SIZE,
+            self.ADD_ICON_SIZE,
+        )
+        painter.setPen(QPen(QColor("#EDEBE9"), 1))
+        painter.setBrush(QColor("#3E3E3E"))
+        painter.drawRoundedRect(icon, 3, 3)
+        painter.drawLine(icon.left() + 4, icon.top() + 8, icon.right() - 4, icon.top() + 8)
+        painter.drawLine(icon.left() + 8, icon.top() + 4, icon.left() + 8, icon.bottom() - 4)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -596,18 +687,21 @@ class ExperimentTimeline(QWidget):
             painter.drawLine(x, self.HEADER_HEIGHT - 4, x, self.HEADER_HEIGHT)
             painter.drawText(x - 10, self.HEADER_HEIGHT - 8, str(t))
 
-        if not any(d[2] != "__system__" or d[1] for d in self._devices):
+        rows_top = self.HEADER_HEIGHT + 6
+        origins = self._row_origins()
+        rows_height = sum(self._row_height(i) for i in range(len(self._devices)))
+        empty_plan = not any(d[2] != "__system__" or d[1] for d in self._devices)
+        if empty_plan:
             fnt = self.font()
             fnt.setPointSize(11)
             painter.setFont(fnt)
             painter.setPen(QColor("#6C6C6C"))
-            data_rect = QRect(0, self.HEADER_HEIGHT + 6, w, rect.height() - self.HEADER_HEIGHT - 6)
-            painter.drawText(data_rect, Qt.AlignCenter, "No devices configured.\nRight-click to add a device.")
-            return
-
-        rows_top = self.HEADER_HEIGHT + 6
-        origins = self._row_origins()
-        rows_height = sum(self._row_height(i) for i in range(len(self._devices)))
+            data_rect = QRect(0, rows_top, w, max(40, self.height() - rows_top - 80))
+            painter.drawText(
+                data_rect,
+                Qt.AlignCenter,
+                "No devices yet.\nUse + Add Device in the timeline header.",
+            )
 
         # Phase 2: Draw non-system device rows
         for i, row in enumerate(self._devices):
@@ -623,6 +717,8 @@ class ExperimentTimeline(QWidget):
 
             painter.setPen(QPen(QColor("#3E3E3E"), 1))
             painter.drawLine(self.LABEL_WIDTH, row_y, w, row_y)
+
+            self._draw_add_icon(painter, flag_y)
 
             painter.setPen(QPen(QColor("#EDEBE9"), 1))
             painter.drawText(8, row_y + self.ROW_HEIGHT // 2 + 4, name)
@@ -715,6 +811,7 @@ class ExperimentTimeline(QWidget):
             name, blocks, device_type = row[0], row[1], row[2]
             if device_type != "__system__":
                 continue
+            display_name = "System actions"
             flag_y = origins[i]
             row_y = flag_y + self.FLAG_HEIGHT
 
@@ -724,10 +821,12 @@ class ExperimentTimeline(QWidget):
             painter.setPen(QPen(QColor("#3E3E3E"), 1))
             painter.drawLine(self.LABEL_WIDTH, row_y, w, row_y)
 
+            self._draw_add_icon(painter, flag_y)
+
             font = QFont("Segoe UI", 9, QFont.Bold)
             painter.setFont(font)
             painter.setPen(QPen(QColor("#EDEBE9"), 1))
-            painter.drawText(8, row_y + self.ROW_HEIGHT // 2 + 4, name)
+            painter.drawText(8, row_y + self.ROW_HEIGHT // 2 + 4, display_name)
             painter.setFont(QFont("Segoe UI", 9))
 
             for bi, block in enumerate(blocks):
