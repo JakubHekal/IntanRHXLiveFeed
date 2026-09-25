@@ -10,7 +10,7 @@ from leech.device.ring_buffer import RingBuffer
 
 PLANNING_EMPTY_MESSAGE = (
     "No live plots yet\n\n"
-    "Use + Add Device beside the timeline, build your plan,\n"
+    "Use + Add Device in the timeline header, build your plan,\n"
     "then choose Run Experiment to start live data."
 )
 

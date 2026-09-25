@@ -17,7 +17,10 @@ from PyQt5.QtWidgets import (
 import qdarkstyle
 from qdarkstyle.dark.palette import DarkPalette
 from leech.experiment import ExperimentManager, ExperimentDialog, RunExperimentDialog
-from leech.experiment.experiment import ExperimentConfig, SequenceStep, _config_to_dict
+from leech.experiment.experiment import (
+    ExperimentConfig, SequenceStep, _config_to_dict,
+    is_system_device_name, migrate_system_device_names,
+)
 from leech.telemetry_logger import append_telemetry_line, set_telemetry_file
 from leech import __version__
 from leech.updater import UpdateCheckThread, UpdateInfo
@@ -219,7 +222,8 @@ class MainWindow(QMainWindow):
         current_time = 0.0
         for step in run_data.get("sequence", []):
             duration = step.get("parameters", {}).get("duration_s", 2.0)
-            dev_idx = name_to_idx.get(step.get("device_name", "")) if step.get("device_name") else system_idx
+            device_name = step.get("device_name", "")
+            dev_idx = system_idx if not device_name or is_system_device_name(device_name) else name_to_idx.get(device_name)
             if dev_idx is None:
                 continue
             timeline.add_block(dev_idx, step.get("action", ""), start=current_time, duration=duration, params=dict(step.get("parameters", {})))
@@ -358,7 +362,7 @@ class MainWindow(QMainWindow):
                     step_id=step_id,
                     action=op_name,
                     parameters=p,
-                    device_name=dev[0],
+                    device_name="" if dev[2] == "__system__" else dev[0],
                 ))
                 step_id += 1
         config.sequence = sequence
@@ -446,6 +450,7 @@ class MainWindow(QMainWindow):
                     step_id += 1
                 continue
             for block in dev[1]:
+
                 op_name = block[4] if len(block) >= 5 else block[0]
                 params = block[5] if len(block) >= 6 else {}
                 p = dict(params)
@@ -685,6 +690,7 @@ class MainWindow(QMainWindow):
             self._experiment_runner._thread._input_result = ("ok", True)
 
     def _populate_timeline_from_config(self, config: ExperimentConfig):
+        migrated = migrate_system_device_names(config)
         timeline = self.main_stage.timeline
         timeline.clear_all()
         self.main_stage.plot_screen.clear_all()
@@ -722,6 +728,16 @@ class MainWindow(QMainWindow):
             timeline.add_block(dev_idx, step.action, start=start, duration=duration, params=clean_params)
             if "_start" not in step.parameters:
                 current_time += timeline._devices[dev_idx][1][-1][2]
+
+        if migrated and self._current_experiment_path:
+            try:
+                ExperimentManager.save(self._current_experiment_path, config)
+            except OSError as exc:
+                QMessageBox.warning(
+                    self,
+                    "Project Migration Failed",
+                    f"Could not upgrade project format:\n\n{exc}",
+                )
 
 
 def main():

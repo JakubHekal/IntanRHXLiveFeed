@@ -1,9 +1,18 @@
 import json
+import os
 import shutil
+import tempfile
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+
+_SYSTEM_DEVICE_NAMES = frozenset(("__System__", "System actions", "__system__"))
+
+
+def is_system_device_name(name):
+    return name in _SYSTEM_DEVICE_NAMES
 
 
 @dataclass
@@ -46,6 +55,15 @@ class ExperimentConfig:
     sequence: list[SequenceStep] = field(default_factory=list)
     post_processing: list[PostProcessingScript] = field(default_factory=list)
     devices: list[dict] = field(default_factory=list)
+
+
+def migrate_system_device_names(config):
+    changed = False
+    for step in config.sequence:
+        if is_system_device_name(step.device_name):
+            step.device_name = ""
+            changed = True
+    return changed
 
 
 def _default_config(name: str, author: str = "", description: str = "") -> dict:
@@ -128,7 +146,7 @@ def _config_to_dict(config: ExperimentConfig) -> dict:
                 "step_id": s.step_id,
                 "action": s.action,
                 "parameters": dict(s.parameters),
-                "device_name": s.device_name,
+                "device_name": "" if is_system_device_name(s.device_name) else s.device_name,
             }
             for s in config.sequence
         ],
@@ -176,8 +194,28 @@ class ExperimentManager:
     def save(experiment_path: str | Path, config: ExperimentConfig):
         config_path = Path(experiment_path) / "config.json"
         data = _config_to_dict(config)
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=config_path.parent,
+                prefix=f".{config_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as f:
+                temp_path = Path(f.name)
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, config_path)
+        except Exception:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
+            raise
 
     @staticmethod
     def list_experiments(experiments_dir: str | Path) -> list[Path]:
