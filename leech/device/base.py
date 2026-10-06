@@ -24,6 +24,10 @@ class DeviceOperation:
     params: List[ParamDef] = field(default_factory=list)
     color: str = "#0078D4"
 
+    @property
+    def operation_id(self):
+        return self.name
+
 
 @dataclass
 class ChannelInfo:
@@ -37,6 +41,9 @@ class ChannelInfo:
 
 
 class Device(ABC):
+    config_version = 1
+    operation_aliases = {}
+
     @property
     @abstractmethod
     def name(self) -> str: ...
@@ -96,6 +103,14 @@ class Device(ABC):
     @classmethod
     def get_config_params(cls) -> List[ParamDef]:
         return []
+
+    @classmethod
+    def migrate_config(cls, config: dict, from_version: int) -> dict:
+        return dict(config or {})
+
+    @classmethod
+    def canonical_operation_id(cls, operation_id: str) -> str:
+        return cls.operation_aliases.get(operation_id, operation_id)
 
     @classmethod
     def get_tab_class(cls):

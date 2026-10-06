@@ -399,7 +399,7 @@ class RightSidebar(QFrame):
                 cls = _DEVICE_CLASSES.get(device_type)
                 ops = cls.get_operations() if cls else []
             for op in ops:
-                if op.name == op_name:
+                if op.operation_id == op_name:
                     param_defs = op.params
                     break
 

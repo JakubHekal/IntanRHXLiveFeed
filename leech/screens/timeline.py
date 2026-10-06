@@ -4,7 +4,19 @@ from PyQt5.QtCore import pyqtSignal, Qt, QRect, QTimer
 from PyQt5.QtGui import QPainter, QPen, QColor, QFont, QFontMetrics
 from PyQt5.QtWidgets import QWidget, QMenu, QInputDialog, QMessageBox, QPushButton
 
+from leech.experiment.migrations import SYSTEM_DEVICE_ID, SYSTEM_DEVICE_TYPE, new_device_id
+
 from ._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
+
+
+class DeviceRow(list):
+    def __init__(self, name, blocks, device_type, config=None, device_id=None, config_version=1):
+        super().__init__([name, blocks, device_type, dict(config or {})])
+        self.device_id = device_id or (
+            SYSTEM_DEVICE_ID if device_type == SYSTEM_DEVICE_TYPE else new_device_id()
+        )
+        self.config_version = config_version
+        self.instance = None
 
 
 class ExperimentTimeline(QWidget):
@@ -117,21 +129,34 @@ class ExperimentTimeline(QWidget):
                 return dev_idx
         return None
 
-    def add_device(self, name=None, device_type=None):
+    def add_device(self, name=None, device_type=None, config=None, device_id=None, config_version=1):
         if not name:
             self._device_counter += 1
             name = f"Device {self._device_counter}"
         if device_type is None:
             device_type = "rhx"
         cls = _DEVICE_CLASSES.get(device_type)
-        config = {}
-        if cls:
-            config = {p.name: p.default for p in cls.get_config_params()}
-        self._devices.append([name, [], device_type, config])
+        if config is None:
+            config = {}
+            if cls:
+                config = {p.name: p.default for p in cls.get_config_params()}
+        row = DeviceRow(name, [], device_type, config, device_id, config_version)
+        self._devices.append(row)
         self._update_total_time()
         self._update_height()
         self.data_changed.emit()
         self.update()
+        return row
+
+    def add_system_device(self):
+        if any(d[2] == SYSTEM_DEVICE_TYPE for d in self._devices):
+            return next(d for d in self._devices if d[2] == SYSTEM_DEVICE_TYPE)
+        row = DeviceRow("System actions", [], SYSTEM_DEVICE_TYPE, {}, SYSTEM_DEVICE_ID)
+        self._devices.append(row)
+        self._update_total_time()
+        self._update_height()
+        self.update()
+        return row
 
     def add_device_dialog(self):
         if not self._edit_mode:
@@ -196,8 +221,12 @@ class ExperimentTimeline(QWidget):
     def clear_all(self):
         system_entry = None
         for d in self._devices:
-            if d[2] == "__system__":
-                system_entry = [d[0], [], d[2], d[3] if len(d) >= 4 else {}]
+            if d[2] == SYSTEM_DEVICE_TYPE:
+                system_entry = DeviceRow(
+                    d[0], [], d[2], d[3] if len(d) >= 4 else {},
+                    getattr(d, "device_id", SYSTEM_DEVICE_ID),
+                    getattr(d, "config_version", 1),
+                )
                 break
         self._devices.clear()
         if system_entry:
@@ -276,10 +305,17 @@ class ExperimentTimeline(QWidget):
         label = op_name
         color = self._BLOCK_COLORS[len(blocks) % len(self._BLOCK_COLORS)]
         device_type = self._devices[dev_idx][2]
-        ops = _SYSTEM_OPERATIONS if device_type == "__system__" else (getattr(_DEVICE_CLASSES.get(device_type), 'get_operations', lambda: [])())
+        device_class = _DEVICE_CLASSES.get(device_type)
+        canonical_op_name = (
+            device_class.canonical_operation_id(op_name)
+            if device_class and hasattr(device_class, "canonical_operation_id")
+            else op_name
+        )
+        ops = _SYSTEM_OPERATIONS if device_type == SYSTEM_DEVICE_TYPE else (getattr(device_class, 'get_operations', lambda: [])())
         op_duration = duration
         for op in ops:
-            if op.name == op_name:
+            if op.operation_id == canonical_op_name:
+                op_name = canonical_op_name
                 label = params.pop("block_label", op.label) if params else op.label
                 color = op.color
                 if op.instantaneous:
@@ -333,7 +369,7 @@ class ExperimentTimeline(QWidget):
         actions = {}
         for op in self._operations_for_device(self._devices[target_dev][2]):
             action = sub.addAction(op.label)
-            actions[action] = op.name
+            actions[action] = op.operation_id
         if not actions:
             action = sub.addAction("Generic Block")
             actions[action] = "New Block"
@@ -386,16 +422,14 @@ class ExperimentTimeline(QWidget):
             sys_actions = {}
             for op in _SYSTEM_OPERATIONS:
                 action = sys_menu.addAction(op.label)
-                sys_actions[action] = op.name
+                sys_actions[action] = op.operation_id
             menu.addMenu(sys_menu)
             action = menu.exec_(event.globalPos())
             if action == add_dev:
                 self.add_device_dialog()
             elif action in sys_actions:
-                if not self._devices or self._devices[-1][2] != "__system__":
-                    self._devices.append(["System actions", [], "__system__", {}])
-                    self._update_height()
-                self.add_block(len(self._devices) - 1, sys_actions[action])
+                system_row = self.add_system_device()
+                self.add_block(self._devices.index(system_row), sys_actions[action])
 
 
     def _update_total_time(self):

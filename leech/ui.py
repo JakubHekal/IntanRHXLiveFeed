@@ -1,4 +1,5 @@
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 # Ensure project root is on sys.path so package imports resolve
@@ -16,11 +17,14 @@ from PyQt5.QtWidgets import (
 
 import qdarkstyle
 from qdarkstyle.dark.palette import DarkPalette
-from leech.experiment import ExperimentManager, ExperimentDialog, RunExperimentDialog
+from leech.experiment import (
+    ExperimentManager, ExperimentDialog, RunExperimentDialog, MigrationError,
+)
 from leech.experiment.experiment import (
     ExperimentConfig, SequenceStep, _config_to_dict,
-    is_system_device_name, migrate_system_device_names,
+    SYSTEM_DEVICE_ID, SYSTEM_DEVICE_TYPE,
 )
+from leech.experiment.migrations import migrate_device_config
 from leech.telemetry_logger import append_telemetry_line, set_telemetry_file
 from leech import __version__
 from leech.updater import UpdateCheckThread, UpdateInfo
@@ -35,6 +39,26 @@ BG_SURFACE = "#252526"
 BG_HEADER = "#2D2D2D"
 TEXT_PRIMARY = "#EDEBE9"
 ACCENT_BLUE = "#0078D4"
+
+
+def _prepare_device_record(record):
+    if not isinstance(record, dict):
+        raise MigrationError("Device record must be an object")
+    item = deepcopy(record)
+    device_type = item.get("device_type", "unknown")
+    device_class = _DEVICE_CLASSES.get(device_type)
+    config_version = item.get("config_version", 1)
+    if device_class is None:
+        current_config = item.get("config", {})
+        if not isinstance(current_config, dict):
+            raise MigrationError(f"{device_type} config must be an object")
+    else:
+        current_config, config_version, _ = migrate_device_config(
+            device_class, item.get("config", {}), config_version
+        )
+    item["config"] = current_config
+    item["config_version"] = config_version
+    return item
 
 
 class MainWindow(QMainWindow):
@@ -62,6 +86,7 @@ class MainWindow(QMainWindow):
         self._current_run_path = None
         self._run_device_configs = {}
         self._run_device_instances = []
+        self._run_device_instance_map = {}
         self._experiment_runner = None
         self.main_stage = MainStage()
         root_layout.addWidget(self.main_stage, 1)
@@ -70,6 +95,46 @@ class MainWindow(QMainWindow):
         self._prompt_recent_experiment()
         self._setup_status_bar()
         self.main_stage.plot_screen.fps_updated.connect(self._fps_status_label.setText)
+
+    def _read_experiment(self, path):
+        try:
+            return ExperimentManager.load(path)
+        except (OSError, ValueError, TypeError) as exc:
+            QMessageBox.critical(
+                self,
+                "Experiment Load Failed",
+                f"Could not open {path}:\n\n{exc}",
+            )
+            return None
+
+    def _activate_experiment(self, path):
+        config = self._read_experiment(path)
+        if config is None:
+            return None
+        try:
+            self._populate_timeline_from_config(config, str(path))
+        except (OSError, ValueError, TypeError) as exc:
+            QMessageBox.critical(
+                self,
+                "Experiment Load Failed",
+                f"Could not prepare {path}:\n\n{exc}",
+            )
+            return None
+        self._current_experiment_path = str(path)
+        self.setWindowTitle(f"LEECH — {config.metadata.experiment_name}")
+        self.main_stage.left_sidebar.reload_runs(str(Path(path) / "runs"))
+        return config
+
+    def _read_run(self, path):
+        try:
+            return ExperimentManager.load_run(path)
+        except (OSError, ValueError, TypeError) as exc:
+            QMessageBox.critical(
+                self,
+                "Run Load Failed",
+                f"Could not open {path}:\n\n{exc}",
+            )
+            return None
 
     def _prompt_recent_experiment(self):
         path = load_recent_experiment()
@@ -83,12 +148,8 @@ class MainWindow(QMainWindow):
         )
         if reply == QMessageBox.Yes:
             config_path = Path(path) / "config.json"
-            if config_path.exists():
-                self._current_experiment_path = path
-                config = ExperimentManager.load(path)
-                self._populate_timeline_from_config(config)
-                self.setWindowTitle(f"LEECH \u2014 {config.metadata.experiment_name}")
-                self.main_stage.left_sidebar.reload_runs(str(Path(path) / "runs"))
+            if config_path.exists() and self._activate_experiment(path) is not None:
+                save_recent_experiment(str(path))
 
     def _close_devices(self):
         for inst in getattr(self, '_run_device_instances', []):
@@ -98,6 +159,7 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     print(f"[UI] Error closing device: {e}")
         self._run_device_instances = []
+        self._run_device_instance_map = {}
 
     def _set_edit_mode(self, enabled):
         self.main_stage.set_edit_mode(enabled)
@@ -196,38 +258,84 @@ class MainWindow(QMainWindow):
             self._on_run_delete(run_path)
 
     def _on_run_rerun(self, run_path):
+        if self._experiment_runner is not None and self._experiment_runner.is_running():
+            QMessageBox.information(self, "Already Running", "An experiment is already in progress.")
+            return
         if not self._current_experiment_path:
             QMessageBox.warning(self, "No Experiment", "Open or create an experiment first.")
             return
-        run_data = ExperimentManager.load_run(run_path)
+        run_data = self._read_run(run_path)
+        if run_data is None:
+            return
+        try:
+            devices = [_prepare_device_record(device) for device in run_data.get("devices", [])]
+        except (MigrationError, TypeError, ValueError) as exc:
+            QMessageBox.critical(self, "Run Load Failed", str(exc))
+            return
+        if not devices:
+            QMessageBox.information(self, "No Devices", "This run has no devices to rerun.")
+            return
+        known_ids = {
+            device.get("device_id", "").casefold()
+            for device in devices
+            if device.get("device_id")
+        }
+        for step in run_data.get("sequence", []):
+            device_id = step.get("device_id", "")
+            if device_id != SYSTEM_DEVICE_ID and device_id.casefold() not in known_ids:
+                QMessageBox.critical(
+                    self,
+                    "Run Load Failed",
+                    f"Run step references unknown device_id {device_id!r}",
+                )
+                return
         timeline = self.main_stage.timeline
         self._set_edit_mode(True)
         timeline.clear_all()
         self.main_stage.plot_screen.clear_all()
-        devices = run_data.get("devices", [])
-        for d in devices:
-            timeline.add_device(name=d.get("name", "Device"), device_type=d.get("device_type", "rhx"))
-        if not any(d[2] != "__system__" for d in timeline._devices):
-            QMessageBox.information(self, "No Devices", "This run has no devices to rerun.")
-            return
-        if not any(d[2] == "__system__" for d in timeline._devices):
-            timeline._devices.append(["System actions", [], "__system__", {}])
-            timeline._update_total_time()
-            timeline._update_height()
-        name_to_idx = {d[0]: i for i, d in enumerate(timeline._devices)}
+        for device in devices:
+            timeline.add_device(
+                name=device.get("name", "Device"),
+                device_type=device.get("device_type", "unknown"),
+                config=device.get("config"),
+                device_id=device.get("device_id"),
+                config_version=device.get("config_version", 1),
+            )
+        timeline.add_system_device()
+        id_to_idx = {
+            row.device_id.casefold(): index
+            for index, row in enumerate(timeline._devices)
+            if row.device_id
+        }
         system_idx = next(
-            (i for i, row in enumerate(timeline._devices) if row[2] == "__system__"),
+            (index for index, row in enumerate(timeline._devices) if row[2] == SYSTEM_DEVICE_TYPE),
             None,
         )
         current_time = 0.0
         for step in run_data.get("sequence", []):
-            duration = step.get("parameters", {}).get("duration_s", 2.0)
-            device_name = step.get("device_name", "")
-            dev_idx = system_idx if not device_name or is_system_device_name(device_name) else name_to_idx.get(device_name)
+            params = dict(step.get("parameters", {}))
+            duration = params.get("duration_s", 2.0)
+            start = params.get("_start", current_time)
+            device_id = step.get("device_id", "")
+            dev_idx = system_idx if device_id == SYSTEM_DEVICE_ID else id_to_idx.get(device_id.casefold())
             if dev_idx is None:
-                continue
-            timeline.add_block(dev_idx, step.get("action", ""), start=current_time, duration=duration, params=dict(step.get("parameters", {})))
-            current_time += duration
+                raise MigrationError(f"Run step references unknown device_id {device_id!r}")
+            clean_params = {
+                key: value for key, value in params.items()
+                if key not in ("duration_s", "_start", "start_s")
+            }
+            operation_id = step.get("operation_id", step.get("action", ""))
+            device_class = _DEVICE_CLASSES.get(timeline._devices[dev_idx][2])
+            if device_class:
+                operation_id = device_class.canonical_operation_id(operation_id)
+            timeline.add_block(
+                dev_idx,
+                operation_id,
+                start=start,
+                duration=duration,
+                params=clean_params,
+            )
+            current_time = max(current_time, start + duration)
         self._on_experiment_run()
 
     def _on_run_rename(self, run_path):
@@ -264,12 +372,8 @@ class MainWindow(QMainWindow):
             return
         new_name = new_name.strip()
         dst = ExperimentManager.clone_experiment(self._current_experiment_path, new_name)
-        save_recent_experiment(str(dst))
-        self._current_experiment_path = str(dst)
-        config = ExperimentManager.load(dst)
-        self._populate_timeline_from_config(config)
-        self.setWindowTitle(f"LEECH \u2014 {config.metadata.experiment_name}")
-        self.main_stage.left_sidebar.reload_runs(str(dst / "runs"))
+        if self._activate_experiment(dst) is not None:
+            save_recent_experiment(str(dst))
 
     def _on_about(self):
         QMessageBox.about(self, "LEECH",
@@ -303,13 +407,8 @@ class MainWindow(QMainWindow):
         dialog = ExperimentDialog(self)
         if dialog.exec_():
             path = dialog.result_path()
-            if path:
+            if path and self._activate_experiment(path) is not None:
                 save_recent_experiment(path)
-                self._current_experiment_path = path
-                config = ExperimentManager.load(path)
-                self._populate_timeline_from_config(config)
-                self.setWindowTitle(f"LEECH \u2014 {config.metadata.experiment_name}")
-                self.main_stage.left_sidebar.reload_runs(str(Path(path) / "runs"))
 
     def _on_experiment_open(self):
         default_dir = str(self._current_experiment_path) if self._current_experiment_path else str(Path.cwd() / "experiments")
@@ -324,49 +423,76 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid Experiment",
                                 "Selected directory does not contain a config.json file.")
             return
-        save_recent_experiment(path)
-        self._current_experiment_path = path
-        config = ExperimentManager.load(path)
-        self._populate_timeline_from_config(config)
-        self.setWindowTitle(f"LEECH \u2014 {config.metadata.experiment_name}")
-        self.main_stage.left_sidebar.reload_runs(str(Path(path) / "runs"))
+        if self._activate_experiment(path) is not None:
+            save_recent_experiment(path)
 
     def _on_experiment_save(self):
         if not self._current_experiment_path:
             QMessageBox.information(self, "No Experiment",
                                     "No experiment is open. Create or open one first.")
             return
-        config = ExperimentManager.load(self._current_experiment_path)
+        config = self._read_experiment(self._current_experiment_path)
+        if config is None:
+            return
         timeline = self.main_stage.timeline
         devs = timeline._devices
-
-        config.devices = [
-            {"name": d[0], "device_type": d[2]}
-            for d in devs if d[2] != "__system__"
-        ]
+        existing_devices = {
+            device.get("device_id"): device
+            for device in config.devices
+            if isinstance(device, dict) and device.get("device_id")
+        }
+        config.devices = []
+        for device in devs:
+            if device[2] == SYSTEM_DEVICE_TYPE:
+                continue
+            device_id = getattr(device, "device_id", "")
+            item = deepcopy(existing_devices.get(device_id, {}))
+            item.update({
+                "device_id": device_id,
+                "name": device[0],
+                "device_type": device[2],
+                "config": deepcopy(device[3]) if len(device) >= 4 and isinstance(device[3], dict) else {},
+                "config_version": getattr(device, "config_version", 1),
+            })
+            config.devices.append(item)
         config.execution_control.required_devices = [
-            d[2] for d in devs if d[2] != "__system__"
+            device[2] for device in devs if device[2] != SYSTEM_DEVICE_TYPE
         ]
 
+        step_extras = {}
+        for step in config.sequence:
+            key = (step.device_id, step.operation_id or step.action, step.parameters.get("block_label", ""))
+            step_extras.setdefault(key, []).append(step.extra)
         sequence = []
         step_id = 1
-        for dev in devs:
-            for block in dev[1]:
-                op_name = block[4] if len(block) >= 5 else block[0]
+        for device in devs:
+            device_id = SYSTEM_DEVICE_ID if device[2] == SYSTEM_DEVICE_TYPE else getattr(device, "device_id", "")
+            device_name = "" if device[2] == SYSTEM_DEVICE_TYPE else device[0]
+            for block in device[1]:
+                operation_id = block[4] if len(block) >= 5 else block[0]
                 params = block[5] if len(block) >= 6 else {}
-                p = dict(params)
-                p["block_label"] = block[0]
-                p["duration_s"] = block[2]
-                p["_start"] = block[1]
+                block_params = dict(params)
+                block_params["block_label"] = block[0]
+                block_params["duration_s"] = block[2]
+                block_params["_start"] = block[1]
+                key = (device_id, operation_id, block[0])
+                extra = step_extras.get(key, []).pop(0) if step_extras.get(key) else {}
                 sequence.append(SequenceStep(
                     step_id=step_id,
-                    action=op_name,
-                    parameters=p,
-                    device_name="" if dev[2] == "__system__" else dev[0],
+                    action=operation_id,
+                    operation_id=operation_id,
+                    parameters=block_params,
+                    device_name=device_name,
+                    device_id=device_id,
+                    extra=deepcopy(extra),
                 ))
                 step_id += 1
         config.sequence = sequence
-        ExperimentManager.save(self._current_experiment_path, config)
+        try:
+            ExperimentManager.save(self._current_experiment_path, config)
+        except (OSError, MigrationError, TypeError, ValueError) as exc:
+            QMessageBox.warning(self, "Save Failed", str(exc))
+            return
         QMessageBox.information(self, "Saved", f"Experiment saved to {self._current_experiment_path}")
 
     def _on_play_clicked(self):
@@ -378,13 +504,16 @@ class MainWindow(QMainWindow):
             self._on_experiment_run()
 
     def _on_experiment_run(self):
+        if self._experiment_runner is not None and self._experiment_runner.is_running():
+            QMessageBox.information(self, "Already Running", "An experiment is already in progress.")
+            return
         if not self._current_experiment_path:
             QMessageBox.information(self, "No Experiment",
                                     "Open or create an experiment first.")
             return
 
         timeline = self.main_stage.timeline
-        if not any(d[2] != "__system__" for d in timeline._devices):
+        if not any(d[2] != SYSTEM_DEVICE_TYPE for d in timeline._devices):
             QMessageBox.information(self, "Add Device", "Add a device before running this experiment.")
             return
         if not self._build_sequence_for_runner():
@@ -396,13 +525,14 @@ class MainWindow(QMainWindow):
         exp_name = Path(self._current_experiment_path).name
         device_groups = []
         for d in self.main_stage.timeline._devices:
-            if d[2] == "__system__":
+            if d[2] == SYSTEM_DEVICE_TYPE:
                 continue
             device_type = d[2]
             cls = _DEVICE_CLASSES.get(device_type)
             param_defs = cls.get_config_params() if cls else []
             current_config = d[3] if len(d) >= 4 else {}
             device_groups.append({
+                "device_id": getattr(d, "device_id", ""),
                 "name": d[0],
                 "device_type": device_type,
                 "device_class": cls,
@@ -420,7 +550,20 @@ class MainWindow(QMainWindow):
         if dialog.exec_():
             self._current_run_path = dialog.run_path()
             self._run_device_configs = dialog.device_configs()
-            self._run_device_instances = dialog.device_instances()
+            for device in self.main_stage.timeline._devices:
+                if device[2] == SYSTEM_DEVICE_TYPE:
+                    continue
+                device_id = getattr(device, "device_id", "")
+                current_config = self._run_device_configs.get(device_id)
+                if current_config is None:
+                    continue
+                merged_config = deepcopy(device[3]) if isinstance(device[3], dict) else {}
+                merged_config.update(deepcopy(current_config))
+                device[3] = merged_config
+                device_class = _DEVICE_CLASSES.get(device[2])
+                if device_class:
+                    device.config_version = getattr(device_class, "config_version", 1)
+            self._run_device_instances, self._run_device_instance_map = dialog.take_devices()
             run_name = Path(self._current_run_path).name
             self.setWindowTitle(
                 f"LEECH \u2014 {exp_name} \u2014 Run: {run_name}"
@@ -444,8 +587,10 @@ class MainWindow(QMainWindow):
                     sequence.append(SequenceStep(
                         step_id=step_id,
                         action=op_name,
+                        operation_id=op_name,
                         parameters=p,
                         device_name="",
+                        device_id=SYSTEM_DEVICE_ID,
                     ))
                     step_id += 1
                 continue
@@ -460,8 +605,10 @@ class MainWindow(QMainWindow):
                 sequence.append(SequenceStep(
                     step_id=step_id,
                     action=op_name,
+                    operation_id=op_name,
                     parameters=p,
                     device_name=dev[0],
+                    device_id=getattr(dev, "device_id", ""),
                 ))
                 step_id += 1
         sequence.sort(key=lambda s: (s.parameters["_start"], s.parameters["duration_s"]))
@@ -471,18 +618,23 @@ class MainWindow(QMainWindow):
 
     def _devices_with_instances(self):
         result = []
+        instance_map = getattr(self, "_run_device_instance_map", {})
         for d in self.main_stage.timeline._devices:
-            if d[2] == "__system__":
+            if d[2] == SYSTEM_DEVICE_TYPE:
                 result.append(d)
                 continue
-            inst = None
-            for runner_inst in self._run_device_instances:
-                if hasattr(runner_inst, 'name') and runner_inst.name == d[0]:
-                    inst = runner_inst
-                    break
-                if hasattr(runner_inst, 'device_type') and runner_inst.device_type == d[2]:
-                    inst = runner_inst
-            result.append(list(d) + [inst])
+            device_id = getattr(d, "device_id", "")
+            inst = instance_map.get(device_id)
+            if inst is None and not device_id:
+                for runner_inst in self._run_device_instances:
+                    if hasattr(runner_inst, 'name') and runner_inst.name == d[0]:
+                        inst = runner_inst
+                        break
+            if hasattr(d, "instance"):
+                d.instance = inst
+                result.append(d)
+            else:
+                result.append(list(d) + [inst])
         return result
 
     def _start_experiment_sequence(self, exp_name):
@@ -493,25 +645,73 @@ class MainWindow(QMainWindow):
 
         timeline_devs = self._devices_with_instances()
         sequence = self._build_sequence_for_runner()
-
         if not sequence:
+            self._close_devices()
             QMessageBox.information(self, "No Steps", "The experiment has no sequence steps to run.")
             return
+        config = self._read_experiment(self._current_experiment_path)
+        if config is None:
+            self._close_devices()
+            return
+        devices_info = [
+            {
+                "device_id": getattr(device, "device_id", ""),
+                "name": device[0],
+                "device_type": device[2],
+                "config": deepcopy(device[3]) if len(device) >= 4 and isinstance(device[3], dict) else {},
+                "config_version": getattr(device, "config_version", 1),
+                "blocks": [
+                    {
+                        "label": block[0],
+                        "action": block[4] if len(block) >= 5 else block[0],
+                        "operation_id": block[4] if len(block) >= 5 else block[0],
+                        "start_min": round(block[1], 1),
+                        "duration_min": round(block[2], 1),
+                    }
+                    for block in device[1]
+                ],
+            }
+            for device in timeline_devs if device[2] != SYSTEM_DEVICE_TYPE
+        ]
+        sequence_info = [
+            {
+                "step_id": step.step_id,
+                "action": step.action,
+                "operation_id": step.operation_id or step.action,
+                "parameters": deepcopy(step.parameters),
+                "device_name": step.device_name,
+                "device_id": step.device_id,
+            }
+            for step in sequence
+        ]
+        try:
+            ExperimentManager.init_run(
+                self._current_run_path,
+                _config_to_dict(config),
+                devices_info,
+                sequence_info,
+            )
+        except (OSError, MigrationError, TypeError, ValueError) as exc:
+            self._close_devices()
+            QMessageBox.critical(self, "Run Initialization Failed", str(exc))
+            return
 
+        set_telemetry_file(str(Path(self._current_run_path) / "run.log"))
+        append_telemetry_line(f"run_start | {exp_name}")
         self._set_edit_mode(False)
-        for d in timeline_devs:
-            if d[2] == "__system__":
+        for device in timeline_devs:
+            if device[2] == SYSTEM_DEVICE_TYPE:
                 continue
-            name, dev_type = d[0], d[2]
+            name, device_type = device[0], device[2]
             if name not in self.main_stage.plot_screen._tabs:
-                inst = d[4] if len(d) >= 5 else None
-                config = d[3] if len(d) >= 4 else {}
-                sr = inst.sample_rate if (inst and inst.sample_rate) else (10.0 if dev_type == "smu" else 20000.0)
+                instance = getattr(device, "instance", None)
+                config_data = device[3] if len(device) >= 4 else {}
+                sample_rate = instance.sample_rate if instance and instance.sample_rate else (10.0 if device_type == "smu" else 20000.0)
                 self.main_stage.plot_screen.add_device(
                     name,
-                    dev_type,
-                    sample_rate=sr,
-                    num_channels=config.get("num_channels"),
+                    device_type,
+                    sample_rate=sample_rate,
+                    num_channels=config_data.get("num_channels"),
                 )
         self.main_stage.plot_screen.set_receiving_state(True)
 
@@ -530,7 +730,6 @@ class MainWindow(QMainWindow):
         self._experiment_runner.user_input_requested.connect(self._on_user_input_requested)
         self._experiment_runner.start()
 
-        # disconnect stale button connections
         try:
             self.main_stage.btn_pause.clicked.disconnect()
         except (TypeError, RuntimeError):
@@ -539,45 +738,19 @@ class MainWindow(QMainWindow):
             self.main_stage.btn_stop.clicked.disconnect()
         except (TypeError, RuntimeError):
             pass
-
         self.main_stage.btn_pause.clicked.connect(self._experiment_runner.pause)
         self.main_stage.btn_pause.clicked.connect(lambda: self.main_stage.btn_pause.setEnabled(False))
         self.main_stage.btn_pause.clicked.connect(lambda: self.main_stage.btn_play.setEnabled(True))
         self.main_stage.btn_stop.clicked.connect(self._experiment_runner.stop)
-
         self.main_stage.btn_play.setEnabled(False)
         self.main_stage.btn_pause.setEnabled(True)
         self.main_stage.btn_stop.setEnabled(True)
         self.main_stage.timeline.set_running(True)
 
-        # init telemetry + run.json
-        set_telemetry_file(str(Path(self._current_run_path) / "run.log"))
-        append_telemetry_line(f"run_start | {exp_name}")
-        config = ExperimentManager.load(self._current_experiment_path)
-        devices_info = [
-            {"name": d[0], "device_type": d[2],
-             "config": d[3] if len(d) >= 4 else {},
-             "blocks": [
-                 {"label": b[0], "action": b[4] if len(b) >= 5 else b[0],
-                  "start_min": round(b[1], 1), "duration_min": round(b[2], 1)}
-                 for b in d[1]
-             ]}
-            for d in timeline_devs if d[2] != "__system__"
-        ]
-        sequence_info = [
-            {"step_id": s.step_id, "action": s.action,
-             "parameters": dict(s.parameters), "device_name": s.device_name}
-            for s in sequence
-        ]
-        ExperimentManager.init_run(
-            self._current_run_path, _config_to_dict(config),
-            devices_info, sequence_info,
-        )
         if self._current_experiment_path:
             self.main_stage.left_sidebar.reload_runs(
                 str(Path(self._current_experiment_path) / "runs")
             )
-
         self._exp_run_action.setEnabled(False)
         self.statusBar().showMessage(f"Running: {exp_name}")
 
@@ -606,7 +779,10 @@ class MainWindow(QMainWindow):
         self.main_stage.plot_screen.clear_all()
         self._set_edit_mode(True)
         status = "success" if success else "failed"
-        ExperimentManager.update_run(self._current_run_path, status)
+        try:
+            ExperimentManager.update_run(self._current_run_path, status)
+        except (OSError, MigrationError, TypeError, ValueError) as exc:
+            QMessageBox.warning(self, "Run Status Update Failed", str(exc))
         append_telemetry_line(f"run_end | {status} | {message}")
         if self._current_experiment_path:
             self.main_stage.left_sidebar.reload_runs(
@@ -624,32 +800,53 @@ class MainWindow(QMainWindow):
 
     def _on_replay_run(self, run_path):
         from leech.workers.replay_worker import ReplayWorker
-        meta_path = Path(run_path) / "run.json"
-        if not meta_path.exists():
-            meta_path = Path(run_path) / "metadata.json"
-            if not meta_path.exists():
-                QMessageBox.warning(self, "Replay", f"No run data in {run_path}")
+        metadata = self._read_run(run_path)
+        if metadata is None:
+            return
+        if "devices" in metadata:
+            devices = metadata.get("devices", [])
+            if not devices:
+                QMessageBox.warning(self, "Replay", "Run contains no replayable device.")
                 return
-        import json
-        meta = json.loads(meta_path.read_text())
-        if "devices" in meta:
-            dev_info = meta.get("devices", [{}])[0]
-            device_type = dev_info.get("device_type", "rhx")
-            cfg = dev_info.get("config", {})
-            sr = cfg.get("sample_rate", 20000.0)
-            nc = cfg.get("num_channels", 1)
+            device = devices[0]
+            device_id = device.get("device_id", "")
+            device_name = device.get("name", "")
+            device_type = device.get("device_type", "unknown")
+            config = device.get("config", {})
         else:
-            device_type = meta.get("device_type", "rhx")
-            sr = meta.get("sample_rate", 20000.0)
-            nc = meta.get("num_channels", 1)
-        replay_name = f"Replay: {Path(run_path).name}"
-        self.main_stage.plot_screen.add_device(replay_name, device_type, sample_rate=sr, num_channels=nc)
-        worker = ReplayWorker(run_path, replay_name, self)
+            device_id = ""
+            device_name = metadata.get("name", Path(run_path).name)
+            device_type = metadata.get("device_type", "unknown")
+            config = metadata
+        sample_rate = config.get("sample_rate", 20000.0)
+        num_channels = config.get("num_channels", 1)
+        raw_root = Path(run_path) / "raw"
+        device_dir = raw_root / device_id if device_id else None
+        if device_dir is None or not device_dir.exists():
+            legacy_dir = raw_root / str(device_name).replace(" ", "_")
+            device_dir = legacy_dir if legacy_dir.exists() else device_dir
+        if device_dir is None or not device_dir.exists():
+            QMessageBox.warning(self, "Replay", f"No raw data found for {device_name or device_type}")
+            return
+        replay_name = f"Replay: {Path(run_path).name} — {device_name}"
+        self.main_stage.plot_screen.add_device(
+            replay_name,
+            device_type,
+            sample_rate=sample_rate,
+            num_channels=num_channels,
+        )
+        worker = ReplayWorker(
+            run_path,
+            replay_name,
+            self,
+            device_dir=device_dir,
+            device_id=device_id,
+            source_device_name=device_name,
+        )
         worker.data_received.connect(self.main_stage.plot_screen.on_data)
         worker.error.connect(lambda msg: self.statusBar().showMessage(f"Replay error: {msg}"))
         worker.finished.connect(lambda: self.statusBar().showMessage("Replay finished"))
         worker.start()
-        # ponytail: keep worker alive via attribute; add worker registry if multiple replays needed
         self._replay_worker = worker
 
     def _on_exp_error(self, device_name, error_message):
@@ -689,50 +886,110 @@ class MainWindow(QMainWindow):
         if self._experiment_runner is not None and self._experiment_runner._thread is not None:
             self._experiment_runner._thread._input_result = ("ok", True)
 
-    def _populate_timeline_from_config(self, config: ExperimentConfig):
-        migrated = migrate_system_device_names(config)
+    def _populate_timeline_from_config(self, config: ExperimentConfig, experiment_path=None):
+        migrated = config.migration_changed
+        prepared_devices = []
+        if config.devices:
+            for device in config.devices:
+                prepared = _prepare_device_record(device)
+                if (
+                    prepared.get("config") != device.get("config")
+                    or prepared.get("config_version") != device.get("config_version")
+                ):
+                    migrated = True
+                device.update(prepared)
+                prepared_devices.append(prepared)
+        else:
+            for device_type in config.execution_control.required_devices:
+                prepared_devices.append({
+                    "name": device_type,
+                    "device_type": device_type,
+                    "device_id": None,
+                    "config": {},
+                    "config_version": 1,
+                })
+
+        known_ids = {
+            device.get("device_id", "").casefold()
+            for device in prepared_devices
+            if device.get("device_id")
+        }
+        sorted_steps = sorted(
+            config.sequence,
+            key=lambda step: step.parameters.get("_start", step.parameters.get("start_s", 0)),
+        )
+        for step in sorted_steps:
+            device_id = step.device_id
+            if device_id != SYSTEM_DEVICE_ID and device_id.casefold() not in known_ids:
+                raise MigrationError(
+                    f"Experiment step references unknown device_id {device_id!r}"
+                )
+
         timeline = self.main_stage.timeline
         timeline.clear_all()
         self.main_stage.plot_screen.clear_all()
         self._set_edit_mode(True)
-
-        # restore devices from stored name + type
-        if config.devices:
-            for d in config.devices:
-                timeline.add_device(name=d["name"], device_type=d.get("device_type", "rhx"))
-        else:
-            for dev_type in config.execution_control.required_devices:
-                timeline.add_device(name=dev_type, device_type=dev_type)
-
-        if not any(d[2] == "__system__" for d in timeline._devices):
-            timeline._devices.append(["System actions", [], "__system__", {}])
-            timeline._update_total_time()
-            timeline._update_height()
-
-        name_to_idx = {d[0]: i for i, d in enumerate(timeline._devices)}
+        for device in prepared_devices:
+            timeline.add_device(
+                name=device.get("name", "Device"),
+                device_type=device.get("device_type", "unknown"),
+                config=device.get("config", {}),
+                device_id=device.get("device_id"),
+                config_version=device.get("config_version", 1),
+            )
+        timeline.add_system_device()
+        id_to_idx = {
+            row.device_id.casefold(): index
+            for index, row in enumerate(timeline._devices)
+            if row.device_id
+        }
         system_idx = next(
-            (i for i, row in enumerate(timeline._devices) if row[2] == "__system__"),
+            (index for index, row in enumerate(timeline._devices) if row[2] == SYSTEM_DEVICE_TYPE),
             None,
         )
-
-        sorted_steps = sorted(config.sequence, key=lambda s: s.parameters.get("_start", 0))
         current_time = 0.0
         for step in sorted_steps:
-            start = step.parameters.get("_start", current_time)
+            start = step.parameters.get(
+                "_start", step.parameters.get("start_s", current_time)
+            )
             duration = step.parameters.get("duration_s", 2.0)
-            dev_idx = name_to_idx.get(step.device_name) if step.device_name else system_idx
+            device_id = step.device_id
+            dev_idx = (
+                system_idx
+                if device_id == SYSTEM_DEVICE_ID
+                else id_to_idx.get(device_id.casefold())
+            )
             if dev_idx is None:
-                continue
-            clean_params = {k: v for k, v in step.parameters.items()
-                            if k not in ('duration_s', '_start')}
-            timeline.add_block(dev_idx, step.action, start=start, duration=duration, params=clean_params)
-            if "_start" not in step.parameters:
-                current_time += timeline._devices[dev_idx][1][-1][2]
+                raise MigrationError(f"Experiment step references unknown device_id {device_id!r}")
+            clean_params = {
+                key: value for key, value in step.parameters.items()
+                if key not in ("duration_s", "_start", "start_s")
+            }
+            operation_id = step.operation_id or step.action
+            device_class = _DEVICE_CLASSES.get(timeline._devices[dev_idx][2])
+            if device_class:
+                operation_id = device_class.canonical_operation_id(operation_id)
+            timeline.add_block(
+                dev_idx,
+                operation_id,
+                start=start,
+                duration=duration,
+                params=clean_params,
+            )
+            current_time = max(current_time, start + duration)
 
-        if migrated and self._current_experiment_path:
+        if config.migration_warnings:
+            QMessageBox.warning(
+                self,
+                "Project Migration Warnings",
+                "\n".join(config.migration_warnings),
+            )
+        target_path = experiment_path or getattr(self, "_current_experiment_path", None)
+        if migrated and target_path:
             try:
-                ExperimentManager.save(self._current_experiment_path, config)
-            except OSError as exc:
+                ExperimentManager.save(target_path, config, backup=True)
+                config.migration_changed = False
+            except (OSError, MigrationError, TypeError, ValueError) as exc:
                 QMessageBox.warning(
                     self,
                     "Project Migration Failed",

@@ -165,7 +165,6 @@ class _DeviceConnectionFrame(QtWidgets.QFrame):
     def _on_connect(self):
         self._connect_button.setEnabled(False)
         self._status_label.setText("\U0001F504 Connecting...")
-        QtWidgets.QApplication.processEvents()
 
         cls = self._dg["device_class"]
         if cls is None:
@@ -175,19 +174,28 @@ class _DeviceConnectionFrame(QtWidgets.QFrame):
             return
 
         params = self._read_params()
+        device = None
         try:
             device = cls(**params)
-            ok = device.connect()
-            if not ok:
+            if not device.connect():
+                failed_device = device
+                device = None
+                failed_device.close()
                 self._status_label.setText("\u2717 Connection failed")
                 self._connect_button.setEnabled(True)
                 self.status_changed.emit()
                 return
             self._device_instance = device
+            device = None
             self._status_label.setText("\u2713 Connected")
             self._connect_button.setText("Connected")
             self._connect_button.setEnabled(False)
         except Exception as e:
+            if device is not None:
+                try:
+                    device.close()
+                except Exception:
+                    pass
             self._status_label.setText(f"\u2717 Failed: {e}")
             tb = traceback.format_exc()
             print(f"[RunDialog] Connection failed for {self._dg['name']}: {tb}")
@@ -203,6 +211,9 @@ class _DeviceConnectionFrame(QtWidgets.QFrame):
 
     def get_device_type(self) -> str:
         return self._dg["device_type"]
+
+    def get_device_id(self) -> str:
+        return self._dg.get("device_id", "")
 
     def get_device_name(self) -> str:
         return self._dg["name"]
@@ -275,6 +286,25 @@ class RunExperimentDialog(QtWidgets.QDialog):
         btn_row.addWidget(self._start_btn)
         layout.addLayout(btn_row)
 
+    def _close_devices(self):
+        for section in self._device_sections:
+            device = section.get_device_instance()
+            if device is None:
+                continue
+            try:
+                device.close()
+            except Exception as exc:
+                print(f"[RunDialog] Error closing {section.get_device_name()}: {exc}")
+            section._device_instance = None
+
+    def reject(self):
+        self._close_devices()
+        super().reject()
+
+    def closeEvent(self, event):
+        self._close_devices()
+        super().closeEvent(event)
+
     def _all_connected(self) -> bool:
         return all(s.is_connected() for s in self._device_sections)
 
@@ -299,10 +329,27 @@ class RunExperimentDialog(QtWidgets.QDialog):
         return str(self._run_path) if self._run_path else ""
 
     def device_configs(self) -> dict:
-        return {s.get_device_type(): s.get_params() for s in self._device_sections}
+        return {
+            s.get_device_id() or s.get_device_type(): s.get_params()
+            for s in self._device_sections
+        }
 
     def device_instances(self) -> list:
         return [s.get_device_instance() for s in self._device_sections if s.is_connected()]
+
+    def device_instance_map(self) -> dict:
+        return {
+            s.get_device_id(): s.get_device_instance()
+            for s in self._device_sections
+            if s.is_connected() and s.get_device_id()
+        }
+
+    def take_devices(self):
+        instances = self.device_instances()
+        instance_map = self.device_instance_map()
+        for section in self._device_sections:
+            section._device_instance = None
+        return instances, instance_map
 
     def device_names(self) -> list[str]:
         return [s.get_device_name() for s in self._device_sections]

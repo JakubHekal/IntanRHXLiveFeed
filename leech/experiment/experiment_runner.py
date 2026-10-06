@@ -1,3 +1,4 @@
+import re
 import threading
 import time
 from pathlib import Path
@@ -10,6 +11,7 @@ CSV_FILE_BUFFER_BYTES = 1024 * 1024
 CSV_FLUSH_INTERVAL_SEC = 1.0
 from leech.workers.chunk_writer import ChunkWriter
 from leech.telemetry_logger import append_telemetry_line
+from leech.experiment.migrations import SYSTEM_DEVICE_ID
 from leech.device.intan_rhx.stim import MAX_PULSES_PER_TRAIN
 
 _SYSTEM_ACTIONS = frozenset(("wait_input", "log_event", "pause", "start_recording", "stop_recording"))
@@ -91,29 +93,77 @@ class _RunnerThread(QtCore.QThread):
         self._paused = False
         self._input_result = None
         self._device_map = {}
+        self._device_key_by_instance = {}
+        self._failed = False
+
+    @staticmethod
+    def _instance_of(device):
+        instance = getattr(device, "instance", None)
+        if instance is not None:
+            return instance
+        return device[4] if isinstance(device, (list, tuple)) and len(device) >= 5 else None
+
+    @staticmethod
+    def _device_id_of(device):
+        return getattr(device, "device_id", "") or ""
+
+    @staticmethod
+    def _device_id_of_step(step):
+        if hasattr(step, "device_id"):
+            return step.device_id or ""
+        return step.get("device_id", "")
+
+    def _device_for_step(self, step):
+        device_id = self._device_id_of_step(step)
+        if device_id and device_id != SYSTEM_DEVICE_ID:
+            return self._device_map.get(device_id)
+        return self._device_map.get(self._name_of(step))
+
+    def _raw_device_key(self, device, fallback):
+        key = str(self._device_key_by_instance.get(id(device), fallback))
+        key = re.sub(r"[^A-Za-z0-9._-]+", "_", key).strip("._")
+        if not key:
+            raise ValueError("Device raw-data key is empty")
+        return key
+
+    def _report_error(self, device_name, message):
+        self._failed = True
+        self.error_occurred.emit(device_name, message)
 
     def abort(self):
         self._abort = True
         self.requestInterruption()
 
-    def _find_device(self, device_name: str):
-        return self._device_map.get(device_name)
+    def _find_device(self, device_key: str):
+        return self._device_map.get(device_key)
 
-    def _find_device_type(self, device_name: str):
+    def _find_device_type(self, device_key: str):
         for d in self._devices:
-            name = d[0] if isinstance(d, (list, tuple)) else ""
-            if name == device_name:
+            if device_key in (self._device_id_of(d), d[0]):
                 return d[2] if len(d) >= 3 else ""
         return ""
 
     def run(self):
         try:
             self._device_map = {}
+            self._device_key_by_instance = {}
+            name_counts = {}
             for d in self._devices:
-                if isinstance(d, (list, tuple)) and len(d) >= 5:
-                    inst = d[4]
-                    if inst is not None:
-                        self._device_map[d[0]] = inst
+                if d[0]:
+                    name_counts[d[0]] = name_counts.get(d[0], 0) + 1
+            for d in self._devices:
+                inst = self._instance_of(d)
+                if inst is None:
+                    continue
+                device_id = self._device_id_of(d)
+                if device_id and device_id != SYSTEM_DEVICE_ID:
+                    self._device_map[device_id] = inst
+                if name_counts.get(d[0]) == 1:
+                    self._device_map[d[0]] = inst
+                if device_id:
+                    self._device_key_by_instance[id(inst)] = device_id
+                else:
+                    self._device_key_by_instance[id(inst)] = d[0].replace(" ", "_")
 
             # assign device-only step indices matching timeline block order
             device_idx = 0
@@ -173,8 +223,8 @@ class _RunnerThread(QtCore.QThread):
                 while self._paused and not self._abort:
                     time.sleep(0.1)
 
-            success = not self._abort
-            msg = "Completed" if success else "Aborted"
+            success = not self._abort and not self._failed
+            msg = "Completed" if success else ("Aborted" if self._abort else "Failed")
             self.experiment_finished.emit(success, msg)
             print(f"[Runner] Experiment {msg}")
 
@@ -184,13 +234,12 @@ class _RunnerThread(QtCore.QThread):
 
         finally:
             for d in self._devices:
-                if isinstance(d, (list, tuple)) and len(d) >= 5:
-                    inst = d[4]
-                    if inst is not None and hasattr(inst, 'close'):
-                        try:
-                            inst.close()
-                        except Exception as e:
-                            print(f"[Runner] Error closing device {d[0]}: {e}")
+                inst = self._instance_of(d)
+                if inst is not None and hasattr(inst, 'close'):
+                    try:
+                        inst.close()
+                    except Exception as e:
+                        print(f"[Runner] Error closing device {d[0]}: {e}")
 
     def _group_by_start(self):
         groups = []
@@ -206,7 +255,9 @@ class _RunnerThread(QtCore.QThread):
 
     @staticmethod
     def _action_of(step):
-        return step.action if hasattr(step, 'action') else step.get('action', '')
+        if hasattr(step, "operation_id"):
+            return step.operation_id or step.action
+        return step.get("operation_id") or step.get("action", "")
 
     @staticmethod
     def _name_of(step):
@@ -224,7 +275,7 @@ class _RunnerThread(QtCore.QThread):
         duration = params.get('duration_s', 2.0)
         block_label = params.get('block_label', '')
         self.step_started.emit(step_idx, device_name, action, duration, block_label)
-        print(f"[Runner] Group start: {device_name} → {action} ({duration}s) label={block_label}")
+        print(f"[Runner] Group start: {device_name} -> {action} ({duration}s) label={block_label}")
 
     def _emit_group_complete(self, step):
         action = self._action_of(step)
@@ -239,17 +290,20 @@ class _RunnerThread(QtCore.QThread):
         step_idx = getattr(step, '_device_step_idx', -1)
         is_system = step_idx < 0
 
-        device = self._device_map.get(device_name)
+        device = self._device_for_step(step)
         duration = params.get('duration_s', 2.0)
 
         if emit_signals and not is_system:
             block_label = params.get('block_label', '')
             self.step_started.emit(step_idx, device_name, action, duration, block_label)
-        print(f"[Runner] Step {step_idx + 1 if not is_system else '?'}: {device_name} → {action} ({duration}s)")
+        print(f"[Runner] Step {step_idx + 1 if not is_system else '?'}: {device_name} -> {action} ({duration}s)")
         append_telemetry_line(f"step_start | {step_idx} | {device_name} | {action} | duration={duration}")
 
         if device is None and not is_system:
-            self.error_occurred.emit(device_name or "__system__", f"Device '{device_name}' not found or not connected")
+            self._report_error(
+                device_name or "__system__",
+                f"Device ID {self._device_id_of_step(step)!r} not found or not connected",
+            )
             time.sleep(0.5)
             if emit_signals:
                 self.step_completed.emit(step_idx, device_name, action)
@@ -260,7 +314,7 @@ class _RunnerThread(QtCore.QThread):
                 self._run_stream(step_idx, device, device_name, params, duration)
             elif action in ("force_current",):
                 self._run_force_current(step_idx, device, device_name, params)
-            elif action == "Configure":
+            elif action in ("Configure", "configure"):
                 device.configure(**params)
                 time.sleep(0.1)
             elif action == "Write":
@@ -276,7 +330,7 @@ class _RunnerThread(QtCore.QThread):
                 self._run_stimulus(step_idx, device, device_name, params, duration)
             elif action == "force_voltage":
                 self._run_force_voltage(device, params)
-            elif action == "Measure":
+            elif action in ("Measure", "measure"):
                 if hasattr(device, 'read_data'):
                     data = device.read_data()
                     print(f"[Runner] {device_name} Measure: got {data.shape if data is not None else 'None'}")
@@ -296,20 +350,23 @@ class _RunnerThread(QtCore.QThread):
             elif action in ("start_recording", "stop_recording"):
                 print(f"[Runner] Recording op {action} (handled by Stream)")
             else:
-                print(f"[Runner] Unknown action '{action}', skipping")
+                self._report_error(device_name or "__system__", f"Unknown action {action!r}")
 
         except Exception as e:
-            self.error_occurred.emit(device_name, str(e))
+            self._report_error(device_name or "__system__", str(e))
             append_telemetry_line(f"step_error | {step_idx} | {device_name} | {action} | {e}")
             print(f"[Runner] Error in step {step_idx}: {e}")
 
         if emit_signals and not is_system:
             self.step_completed.emit(step_idx, device_name, action)
-        append_telemetry_line(f"step_end | {step_idx} | {device_name} | {action} | ok")
+        append_telemetry_line(
+            f"step_end | {step_idx} | {device_name} | {action} | "
+            f"{'failed' if self._failed else 'ok'}"
+        )
 
     def _run_stream(self, step_idx, device, device_name, params, duration):
         if not getattr(device, 'connected', False):
-            self.error_occurred.emit(device_name, "Device not connected")
+            self._report_error(device_name, "Device not connected")
             return
 
         device.configure(**{k: v for k, v in params.items() if k not in ('duration_s', 'block_label')})
@@ -319,7 +376,7 @@ class _RunnerThread(QtCore.QThread):
         num_ch = len(ch_labels) or 1
         self.device_configured.emit(device_name, num_ch, ch_labels, sr)
 
-        dev_raw_dir = self._run_path / "raw" / (device_name.replace(" ", "_"))
+        dev_raw_dir = self._run_path / "raw" / self._raw_device_key(device, device_name)
         dev_raw_dir.mkdir(parents=True, exist_ok=True)
 
         sink = ChunkWriter(
@@ -330,9 +387,10 @@ class _RunnerThread(QtCore.QThread):
             buffer_bytes=CSV_FILE_BUFFER_BYTES,
             flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
         )
-        label = params.get("block_label", "Stream")
+        label = str(params.get("block_label", "Stream") or "Stream")
+        file_label = re.sub(r"[^A-Za-z0-9._-]+", "_", label).strip("._") or "Stream"
         sink.raw_chunks_dir = dev_raw_dir
-        sink.filename_prefix = label
+        sink.filename_prefix = f"{step_idx + 1:06d}_{file_label}"
         sink._open_new_chunk_locked()
 
         device.start_acquisition()
@@ -376,12 +434,14 @@ class _RunnerThread(QtCore.QThread):
             if time.perf_counter() - last_data_time > 5.0 and deadline - time.perf_counter() > 5.0:
                 stalled = True
                 msg = f"Data stall: no data from {device_name} for 5 s while streaming (Intan TCP output stalled)"
-                self.error_occurred.emit(device_name, msg)
+                self._report_error(device_name, msg)
                 append_telemetry_line(f"acq_stall | {step_idx} | {device_name} | Stream | no data for 5s")
                 print(f"[Runner] {msg}")
             remaining = deadline - time.perf_counter()
             time.sleep(min(0.1, max(0, remaining)) if remaining > 0 else 0.01)
 
+        if not self._abort and not stalled and not getattr(device, "connected", True):
+            self._report_error(device_name, "Device disconnected during stream")
         sink.close()
         append_telemetry_line(
             f"acq_end | {step_idx} | {device_name} | Stream | samples_in_chunk={sink._chunk_samples_written}"
@@ -412,7 +472,7 @@ class _RunnerThread(QtCore.QThread):
         device_name = self._name_of(step)
         params = self._params_of(step)
         step_idx = getattr(step, '_device_step_idx', -1)
-        device = self._device_map.get(device_name)
+        device = self._device_for_step(step)
         if device is None:
             return
         try:
@@ -423,13 +483,13 @@ class _RunnerThread(QtCore.QThread):
                 append_telemetry_line(f"stim_programmed | {step_idx} | {device_name} | {action} | ok")
             # Stream config is applied in _run_stream (still before run mode).
         except Exception as e:
-            self.error_occurred.emit(device_name, str(e))
+            self._report_error(device_name, str(e))
             append_telemetry_line(f"step_error | {step_idx} | {device_name} | {action} | prepare: {e}")
             print(f"[Runner] Error preparing step {step_idx} ({action}): {e}")
 
     def _run_stimulus(self, step_idx, device, device_name, params, duration):
         if not getattr(device, 'connected', False):
-            self.error_occurred.emit(device_name, "Device not connected")
+            self._report_error(device_name, "Device not connected")
             return
         label = params.get("block_label", "Stimulus")
         stim_params = {k: v for k, v in params.items() if k not in ('duration_s', 'block_label', '_start')}
@@ -463,7 +523,7 @@ class _RunnerThread(QtCore.QThread):
         if getattr(device, 'wait_for_run_mode', None) is not None:
             if not device.wait_for_run_mode(timeout=10.0):
                 msg = "Stimulus aborted: Intan board did not reach run mode before block start"
-                self.error_occurred.emit(device_name, msg)
+                self._report_error(device_name, msg)
                 append_telemetry_line(f"stim_error | {step_idx} | {device_name} | Stimulus | {msg}")
                 print(f"[Runner] {msg}")
                 return
@@ -514,7 +574,7 @@ class _RunnerThread(QtCore.QThread):
         ch_labels = [c.name for c in getattr(device, 'channels', [])]
         num_ch = len(ch_labels) or 2
 
-        dev_raw_dir = self._run_path / "raw" / (device_name.replace(" ", "_"))
+        dev_raw_dir = self._run_path / "raw" / self._raw_device_key(device, device_name)
         dev_raw_dir.mkdir(parents=True, exist_ok=True)
 
         sink = ChunkWriter(
@@ -525,8 +585,9 @@ class _RunnerThread(QtCore.QThread):
             buffer_bytes=CSV_FILE_BUFFER_BYTES,
             flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
         )
+        file_label = re.sub(r"[^A-Za-z0-9._-]+", "_", str(label)).strip("._") or "ForceCurrent"
         sink.raw_chunks_dir = dev_raw_dir
-        sink.filename_prefix = label
+        sink.filename_prefix = f"{step_idx + 1:06d}_{file_label}"
         sink._open_new_chunk_locked()
 
         device.start_acquisition()
