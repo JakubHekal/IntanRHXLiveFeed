@@ -1,3 +1,4 @@
+import threading
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -119,6 +120,7 @@ class ExperimentDialog(QtWidgets.QDialog):
 
 class _DeviceConnectionFrame(QtWidgets.QFrame):
     status_changed = QtCore.pyqtSignal()
+    _connect_done = QtCore.pyqtSignal(object, str)
 
     def __init__(self, device_group: dict, parent=None):
         super().__init__(parent)
@@ -157,6 +159,8 @@ class _DeviceConnectionFrame(QtWidgets.QFrame):
         self._status_label = QtWidgets.QLabel("\u26A0 Disconnected")
         status_row.addWidget(self._status_label)
         layout.addLayout(status_row)
+        # Queued automatically: worker thread emits, GUI thread handles.
+        self._connect_done.connect(self._on_connect_done)
 
     def _read_params(self):
         from ..device.widget_builder import gather_params
@@ -174,33 +178,51 @@ class _DeviceConnectionFrame(QtWidgets.QFrame):
             return
 
         params = self._read_params()
+        # Connect off the GUI thread: RHX autolaunch polls up to 30 s and
+        # would freeze the window otherwise.
+        threading.Thread(target=self._connect_worker, args=(cls, params),
+                         daemon=True).start()
+
+    def _connect_worker(self, cls, params):
         device = None
         try:
             device = cls(**params)
-            if not device.connect():
-                failed_device = device
-                device = None
-                failed_device.close()
-                self._status_label.setText("\u2717 Connection failed")
-                self._connect_button.setEnabled(True)
-                self.status_changed.emit()
+            if device.connect():
+                self._emit_done(device, "")
                 return
-            self._device_instance = device
-            device = None
-            self._status_label.setText("\u2713 Connected")
-            self._connect_button.setText("Connected")
-            self._connect_button.setEnabled(False)
+            err = str(getattr(device, "_last_connect_error", "") or
+                      "Connection failed")
+            try:
+                device.close()
+            except Exception:
+                pass
+            self._emit_done(None, err)
         except Exception as e:
             if device is not None:
                 try:
                     device.close()
                 except Exception:
                     pass
-            self._status_label.setText(f"\u2717 Failed: {e}")
-            tb = traceback.format_exc()
-            print(f"[RunDialog] Connection failed for {self._dg['name']}: {tb}")
-            self._connect_button.setEnabled(True)
+            print(f"[RunDialog] Connection failed for {self._dg['name']}: "
+                  f"{traceback.format_exc()}")
+            self._emit_done(None, str(e))
 
+    def _emit_done(self, device, error):
+        try:
+            self._connect_done.emit(device, error)
+        except RuntimeError:
+            pass  # frame deleted while connect in flight
+
+    @QtCore.pyqtSlot(object, str)
+    def _on_connect_done(self, device, error):
+        if device is not None:
+            self._device_instance = device
+            self._status_label.setText("\u2713 Connected")
+            self._connect_button.setText("Connected")
+            self._connect_button.setEnabled(False)
+        else:
+            self._status_label.setText(f"\u2717 {error}")
+            self._connect_button.setEnabled(True)
         self.status_changed.emit()
 
     def is_connected(self) -> bool:

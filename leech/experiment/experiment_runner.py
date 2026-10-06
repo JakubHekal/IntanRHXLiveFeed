@@ -379,24 +379,36 @@ class _RunnerThread(QtCore.QThread):
         dev_raw_dir = self._run_path / "raw" / self._raw_device_key(device, device_name)
         dev_raw_dir.mkdir(parents=True, exist_ok=True)
 
-        sink = ChunkWriter(
-            sample_rate=sr,
-            num_channels=num_ch,
-            channel_names=ch_labels,
-            chunk_max_sec=RAW_CHUNK_SEC,
-            buffer_bytes=CSV_FILE_BUFFER_BYTES,
-            flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
-        )
         label = str(params.get("block_label", "Stream") or "Stream")
         file_label = re.sub(r"[^A-Za-z0-9._-]+", "_", label).strip("._") or "Stream"
-        sink.raw_chunks_dir = dev_raw_dir
-        sink.filename_prefix = f"{step_idx + 1:06d}_{file_label}"
-        sink._open_new_chunk_locked()
+        file_prefix = f"{step_idx + 1:06d}_{file_label}"
+
+        use_rhs = (getattr(device, "storage_mode", "csv") == "rhs"
+                   and hasattr(device, "start_recording_session"))
+        sink = None
+        rhs_folder = None
+        if use_rhs:
+            # RHX writes the raw .rhs itself (Traditional format), one folder
+            # per stage, named like the CSV chunk prefix.
+            rhs_folder = device.start_recording_session(dev_raw_dir, file_prefix)
+        else:
+            sink = ChunkWriter(
+                sample_rate=sr,
+                num_channels=num_ch,
+                channel_names=ch_labels,
+                chunk_max_sec=RAW_CHUNK_SEC,
+                buffer_bytes=CSV_FILE_BUFFER_BYTES,
+                flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
+            )
+            sink.raw_chunks_dir = dev_raw_dir
+            sink.filename_prefix = file_prefix
+            sink._open_new_chunk_locked()
 
         device.start_acquisition()
         append_telemetry_line(
             f"acq_start | {step_idx} | {device_name} | Stream | "
             f"ch={num_ch} sr={sr} label={label}"
+            + (f" rhs={rhs_folder}" if rhs_folder else "")
         )
         first_chunk = True
         stalled = False
@@ -418,14 +430,15 @@ class _RunnerThread(QtCore.QThread):
             if data is not None:
                 arr = np.asarray(data)
                 if arr.ndim == 2 and arr.shape[1] > 0:
-                    marker_info = (
-                        {0: {"id": step_idx + 1, "name": label}}
-                        if first_chunk
-                        else None
-                    )
-                    sink.append_data(arr, marker_info=marker_info)
+                    if sink is not None:
+                        marker_info = (
+                            {0: {"id": step_idx + 1, "name": label}}
+                            if first_chunk
+                            else None
+                        )
+                        sink.append_data(arr, marker_info=marker_info)
+                        first_chunk = False
                     self.data_received.emit(device_name, arr)
-                    first_chunk = False
                 last_data_time = time.perf_counter()
             # ponytail: watchdog — if the Intan TCP output stalls (buffer
             # overflow / controller wedged) and the connection silently stops
@@ -442,10 +455,15 @@ class _RunnerThread(QtCore.QThread):
 
         if not self._abort and not stalled and not getattr(device, "connected", True):
             self._report_error(device_name, "Device disconnected during stream")
-        sink.close()
-        append_telemetry_line(
-            f"acq_end | {step_idx} | {device_name} | Stream | samples_in_chunk={sink._chunk_samples_written}"
-        )
+        if sink is not None:
+            sink.close()
+            append_telemetry_line(
+                f"acq_end | {step_idx} | {device_name} | Stream | samples_in_chunk={sink._chunk_samples_written}"
+            )
+        else:
+            append_telemetry_line(
+                f"acq_end | {step_idx} | {device_name} | Stream | rhs={rhs_folder}"
+            )
         try:
             device.stop_acquisition()
         except Exception:
