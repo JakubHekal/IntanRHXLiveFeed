@@ -28,7 +28,7 @@ from leech.experiment.migrations import migrate_device_config
 from leech.telemetry_logger import append_telemetry_line, set_telemetry_file
 from leech import __version__
 from leech.updater import UpdateCheckThread, UpdateInfo
-from leech.experiment.experiment_runner import ExperimentRunner
+from leech.experiment.experiment_runner import ExperimentRunner, sanitize_raw_key
 from leech.screens._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
 from leech.screens.timeline import ExperimentTimeline
 from leech.screens.stage import FluentExpander, LeftSidebar, RightSidebar, MainStage
@@ -821,10 +821,14 @@ class MainWindow(QMainWindow):
         sample_rate = config.get("sample_rate", 20000.0)
         num_channels = config.get("num_channels", 1)
         raw_root = Path(run_path) / "raw"
-        device_dir = raw_root / device_id if device_id else None
-        if device_dir is None or not device_dir.exists():
-            legacy_dir = raw_root / str(device_name).replace(" ", "_")
-            device_dir = legacy_dir if legacy_dir.exists() else device_dir
+        # New format first (name_id), then id-only and name-only legacy layouts.
+        candidates = []
+        if device_id:
+            candidates.append(raw_root / sanitize_raw_key(f"{device_name}_{device_id}"))
+            candidates.append(raw_root / sanitize_raw_key(device_id))
+        if device_name:
+            candidates.append(raw_root / sanitize_raw_key(str(device_name)))
+        device_dir = next((c for c in candidates if c.exists()), None)
         if device_dir is None or not device_dir.exists():
             QMessageBox.warning(self, "Replay", f"No raw data found for {device_name or device_type}")
             return

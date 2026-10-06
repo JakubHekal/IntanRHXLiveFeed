@@ -136,6 +136,29 @@ class FailFastLaunchTest(unittest.TestCase):
         popen.assert_called_once()
 
 
+class RawDeviceKeyTest(unittest.TestCase):
+    def test_folder_key_contains_name_and_id(self):
+        class _Dev:
+            device_id = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+            instance = None
+
+            def __getitem__(self, i):
+                return "Intan A"
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        dev = _Dev()
+        inst = object()
+        dev.instance = inst
+        t = _RunnerThread(devices=[dev], sequence=[], run_path=tmp.name)
+        t.run()
+        key = t._device_key_by_instance[id(inst)]
+        self.assertEqual(key, f"Intan A_{dev.device_id}")
+        self.assertEqual(
+            t._raw_device_key(inst, "fallback"),
+            f"Intan_A_{dev.device_id}")
+
+
 class _FakeRhsDevice:
     storage_mode = "rhs"
     connected = True

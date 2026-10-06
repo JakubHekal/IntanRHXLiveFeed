@@ -17,6 +17,13 @@ from leech.device.intan_rhx.stim import MAX_PULSES_PER_TRAIN
 _SYSTEM_ACTIONS = frozenset(("wait_input", "log_event", "pause", "start_recording", "stop_recording"))
 
 
+def sanitize_raw_key(key):
+    key = re.sub(r"[^A-Za-z0-9._-]+", "_", key).strip("._")
+    if not key:
+        raise ValueError("Device raw-data key is empty")
+    return key
+
+
 class ExperimentRunner(QtCore.QObject):
     step_started = QtCore.pyqtSignal(int, str, str, float, str)  # step_index, device_name, action, duration, block_label
     step_completed = QtCore.pyqtSignal(int, str, str)
@@ -120,11 +127,8 @@ class _RunnerThread(QtCore.QThread):
         return self._device_map.get(self._name_of(step))
 
     def _raw_device_key(self, device, fallback):
-        key = str(self._device_key_by_instance.get(id(device), fallback))
-        key = re.sub(r"[^A-Za-z0-9._-]+", "_", key).strip("._")
-        if not key:
-            raise ValueError("Device raw-data key is empty")
-        return key
+        return sanitize_raw_key(
+            str(self._device_key_by_instance.get(id(device), fallback)))
 
     def _report_error(self, device_name, message):
         self._failed = True
@@ -161,7 +165,7 @@ class _RunnerThread(QtCore.QThread):
                 if name_counts.get(d[0]) == 1:
                     self._device_map[d[0]] = inst
                 if device_id:
-                    self._device_key_by_instance[id(inst)] = device_id
+                    self._device_key_by_instance[id(inst)] = f"{d[0]}_{device_id}"
                 else:
                     self._device_key_by_instance[id(inst)] = d[0].replace(" ", "_")
 
