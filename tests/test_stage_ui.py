@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import QApplication, QLabel, QSplitter
 from leech import __version__
 from leech.plot_settings import _SETTINGS, load_list, save_list
 from leech.screens.stage import FluentExpander, MainStage
-from leech.screens.plot_screen import PlotScreen
+from leech.gui.tabs.host import TabHost
 from leech.screens.timeline import ExperimentTimeline
 
 
@@ -43,7 +43,7 @@ class StageLayoutTest(unittest.TestCase):
         stage = MainStage()
         v = stage._v_splitter
         self.assertEqual(v.count(), 2)
-        self.assertIsInstance(v.widget(0), PlotScreen)
+        self.assertIsInstance(v.widget(0), TabHost)
         self.assertIsInstance(v.widget(1), ExperimentTimeline)
         for i in range(2):
             self.assertFalse(v.isCollapsible(i))

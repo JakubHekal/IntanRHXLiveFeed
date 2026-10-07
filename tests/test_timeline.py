@@ -41,7 +41,7 @@ class TimelineSmokeTest(unittest.TestCase):
                 _current_experiment_path = str(root)
                 main_stage = SimpleNamespace(
                     timeline=ExperimentTimeline(),
-                    plot_screen=SimpleNamespace(clear_all=lambda: None),
+                    tab_host=SimpleNamespace(clear_all=lambda: None),
                 )
 
                 def _set_edit_mode(self, enabled):

@@ -4,7 +4,6 @@ import threading
 from typing import Optional, List, Union
 
 from ..base import Device, ChannelInfo
-from .tab import SimpleDeviceTab
 
 
 class SimulatedRecordingDevice(Device):
@@ -116,6 +115,7 @@ class SimulatedRecordingDevice(Device):
 
     @classmethod
     def get_tab_class(cls):
+        from .tab import SimpleDeviceTab
         return SimpleDeviceTab
 
 
@@ -193,6 +193,7 @@ class SimulatedActorDevice(Device):
 
     @classmethod
     def get_tab_class(cls):
+        from .tab import SimpleDeviceTab
         return SimpleDeviceTab
 
 
@@ -281,4 +282,5 @@ class SimulatedCombinedDevice(Device):
 
     @classmethod
     def get_tab_class(cls):
+        from .tab import SimpleDeviceTab
         return SimpleDeviceTab

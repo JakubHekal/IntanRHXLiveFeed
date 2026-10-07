@@ -11,11 +11,12 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from ._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
-from leech.device.widget_builder import build_param_widget, read_param_widget
+from leech.device.registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
+from leech.gui.widget_builder import build_param_widget, read_param_widget
 from leech.plot_settings import load_list, save_list
+from leech.experiment.migrations import SYSTEM_DEVICE_TYPE
 from .timeline import ExperimentTimeline
-from .plot_screen import PlotScreen
+from leech.gui.tabs.host import TabHost
 
 
 BG_HEADER = "#2D2D2D"
@@ -310,15 +311,15 @@ class RightSidebar(QFrame):
         self._update_visibility()
 
     def _populate_dynamic_form(self, form_layout, param_defs, current_values, store):
-        from leech.device.widget_builder import populate_form_from_params
+        from leech.gui.widget_builder import populate_form_from_params
         populate_form_from_params(form_layout, param_defs, current_values, store)
 
     def _connect_param_signals(self, store, slot):
-        from leech.device.widget_builder import connect_param_signals
+        from leech.gui.widget_builder import connect_param_signals
         connect_param_signals(store, slot)
 
     def _gather_params(self, store):
-        from leech.device.widget_builder import gather_params
+        from leech.gui.widget_builder import gather_params
         return gather_params(store)
 
     def _emit_block_params(self):
@@ -382,7 +383,7 @@ class RightSidebar(QFrame):
 
         param_defs = []
         if op_name and device_type:
-            ops = _SYSTEM_OPERATIONS if device_type == "__system__" else []
+            ops = _SYSTEM_OPERATIONS if device_type == SYSTEM_DEVICE_TYPE else []
             if not ops:
                 cls = _DEVICE_CLASSES.get(device_type)
                 ops = cls.get_operations() if cls else []
@@ -445,7 +446,7 @@ class MainStage(QWidget):
         center_layout.setContentsMargins(4, 4, 4, 4)
         center_layout.setSpacing(4)
 
-        self.plot_screen = PlotScreen()
+        self.tab_host = TabHost()
 
         timeline_bar = QHBoxLayout()
         timeline_bar.setContentsMargins(4, 4, 4, 4)
@@ -472,7 +473,7 @@ class MainStage(QWidget):
 
         vsplit = QSplitter(Qt.Vertical)
         vsplit.setHandleWidth(4)
-        vsplit.addWidget(self.plot_screen)
+        vsplit.addWidget(self.tab_host)
         vsplit.addWidget(self.timeline)
         center_layout.addWidget(vsplit)
 
@@ -507,7 +508,7 @@ class MainStage(QWidget):
 
     def _on_timeline_data_changed(self):
         if self.timeline._edit_mode:
-            self.plot_screen.clear_all()
+            self.tab_host.clear_all()
 
     def set_edit_mode(self, enabled):
         self.timeline.set_edit_mode(enabled)

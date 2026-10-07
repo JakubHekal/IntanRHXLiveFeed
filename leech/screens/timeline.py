@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import QWidget, QMenu, QInputDialog, QMessageBox, QPushButt
 
 from leech.experiment.migrations import SYSTEM_DEVICE_ID, SYSTEM_DEVICE_TYPE, new_device_id
 
-from ._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
+from leech.device.registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
 
 
 class DeviceRow(list):
@@ -108,7 +108,7 @@ class ExperimentTimeline(QWidget):
         return lanes, len(lane_ends)
 
     def _row_height(self, dev_idx):
-        if self._devices[dev_idx][2] == "__system__":
+        if self._devices[dev_idx][2] == SYSTEM_DEVICE_TYPE:
             return self.FLAG_HEIGHT + self.ROW_HEIGHT
         _, lanes = self._row_lanes(self._devices[dev_idx][1])
         return self.FLAG_HEIGHT + max(self.ROW_HEIGHT, 33 + self.LANE_OFF * (lanes - 1))
@@ -134,7 +134,7 @@ class ExperimentTimeline(QWidget):
             self._device_counter += 1
             name = f"Device {self._device_counter}"
         if device_type is None:
-            device_type = "rhx"
+            device_type = next(iter(_DEVICE_CLASSES))
         cls = _DEVICE_CLASSES.get(device_type)
         if config is None:
             config = {}
@@ -175,13 +175,13 @@ class ExperimentTimeline(QWidget):
         if not ok:
             return
         name = name.strip() or cls.name
-        if any(d[0] == name and d[2] != "__system__" for d in self._devices):
+        if any(d[0] == name and d[2] != SYSTEM_DEVICE_TYPE for d in self._devices):
             QMessageBox.warning(self, "Device Exists", f"Device '{name}' is already in this plan.")
             return
         self.add_device(name, device_type)
 
     def _operations_for_device(self, device_type):
-        if device_type == "__system__":
+        if device_type == SYSTEM_DEVICE_TYPE:
             return _SYSTEM_OPERATIONS
         cls = _DEVICE_CLASSES.get(device_type)
         return cls.get_operations() if cls else []
@@ -205,7 +205,7 @@ class ExperimentTimeline(QWidget):
     def remove_device(self, dev_idx):
         if dev_idx < 0 or dev_idx >= len(self._devices):
             return
-        if self._devices[dev_idx][2] == "__system__":
+        if self._devices[dev_idx][2] == SYSTEM_DEVICE_TYPE:
             return
         del self._devices[dev_idx]
         if self._sel_dev == dev_idx:
@@ -240,7 +240,7 @@ class ExperimentTimeline(QWidget):
 
     def set_active_block(self, device_name, block_label):
         for i, row in enumerate(self._devices):
-            if row[2] == "__system__":
+            if row[2] == SYSTEM_DEVICE_TYPE:
                 continue
             if row[0] != device_name:
                 continue
@@ -266,7 +266,7 @@ class ExperimentTimeline(QWidget):
     def set_active_step(self, step_index):
         count = 0
         for i, row in enumerate(self._devices):
-            if row[2] == "__system__":
+            if row[2] == SYSTEM_DEVICE_TYPE:
                 continue
             blocks = row[1]
             if step_index < count + len(blocks):
@@ -383,7 +383,7 @@ class ExperimentTimeline(QWidget):
         dev_idx, block_idx, _ = self._block_at(mx, my)
         row_idx = self._row_at(my)
         name_idx = self._device_name_at(mx, my)
-        is_system_row = row_idx is not None and self._devices[row_idx][2] == "__system__"
+        is_system_row = row_idx is not None and self._devices[row_idx][2] == SYSTEM_DEVICE_TYPE
 
         if block_idx is not None:
             a_dup = menu.addAction(f"Duplicate  «{self._devices[dev_idx][1][block_idx][0]}»")
@@ -454,7 +454,7 @@ class ExperimentTimeline(QWidget):
         # would map to wrong positions when sorted.
         count = 0
         for row in self._devices:
-            if row[2] == "__system__":
+            if row[2] == SYSTEM_DEVICE_TYPE:
                 continue
             for block in row[1]:
                 if count == step_index:
@@ -691,7 +691,7 @@ class ExperimentTimeline(QWidget):
         rows_top = self.HEADER_HEIGHT + 6
         origins = self._row_origins()
         rows_height = sum(self._row_height(i) for i in range(len(self._devices)))
-        empty_plan = not any(d[2] != "__system__" or d[1] for d in self._devices)
+        empty_plan = not any(d[2] != SYSTEM_DEVICE_TYPE or d[1] for d in self._devices)
         if empty_plan:
             fnt = self.font()
             fnt.setPointSize(11)
@@ -707,7 +707,7 @@ class ExperimentTimeline(QWidget):
         # Phase 2: Draw non-system device rows
         for i, row in enumerate(self._devices):
             name, blocks, device_type = row[0], row[1], row[2]
-            if device_type == "__system__":
+            if device_type == SYSTEM_DEVICE_TYPE:
                 continue
             flag_y = origins[i]
             row_y = flag_y + self.FLAG_HEIGHT
@@ -789,7 +789,7 @@ class ExperimentTimeline(QWidget):
 
         # Phase 3: System block full-height bands (overlay across all rows)
         for row in self._devices:
-            if row[2] != "__system__":
+            if row[2] != SYSTEM_DEVICE_TYPE:
                 continue
             for block in row[1]:
                 _, start, dur, color_str = block[0], block[1], block[2], block[3]
@@ -808,7 +808,7 @@ class ExperimentTimeline(QWidget):
         # Phase 4: System row (on top of bands)
         for i, row in enumerate(self._devices):
             name, blocks, device_type = row[0], row[1], row[2]
-            if device_type != "__system__":
+            if device_type != SYSTEM_DEVICE_TYPE:
                 continue
             display_name = "System actions"
             flag_y = origins[i]
