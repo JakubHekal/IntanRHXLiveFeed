@@ -1,0 +1,11 @@
+"""Intan-specific plot tuning. Consumed only by the Intan tab and canvas."""
+
+DEFAULT_SAMPLING_RATE = 20000
+
+PSD_RENDER_HZ = 30
+SPIKE_RENDER_HZ = 30
+WAVEFORM_YLIM_ABS_UV = 100
+SPIKE_SCROLL_WINDOW_MIN = 10.0
+
+PSD_PLOT_UPDATE_EVERY_N = 20
+SPIKE_PLOT_UPDATE_EVERY_N = 20
