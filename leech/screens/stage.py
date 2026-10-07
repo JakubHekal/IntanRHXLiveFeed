@@ -7,12 +7,13 @@ from PyQt5.QtGui import QColor, QFont, QFontMetrics
 from PyQt5.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QHBoxLayout,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
-    QPushButton, QScrollArea, QSpinBox, QStyle, QToolButton, QVBoxLayout,
-    QWidget,
+    QPushButton, QScrollArea, QSpinBox, QSplitter, QStyle, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from ._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
 from leech.device.widget_builder import build_param_widget, read_param_widget
+from leech.plot_settings import load_list, save_list
 from .timeline import ExperimentTimeline
 from .plot_screen import PlotScreen
 
@@ -74,36 +75,23 @@ class FluentExpander(QFrame):
         self._animate_content(self._expanded)
 
     def _animate_content(self, show: bool):
-        target_height = self._content_frame.sizeHint().height() if show else 0
         if self._animation:
             self._animation.stop()
+            self._animation.finished.disconnect()
+        if show:
+            self._content_frame.setVisible(True)
+            self._content_frame.setMaximumHeight(0)
         self._animation = QPropertyAnimation(self._content_frame, b"maximumHeight")
         self._animation.setDuration(150)
-        self._animation.setStartValue(self._content_frame.maximumHeight() if self._content_frame.isVisible() else 0)
-        self._animation.setEndValue(target_height)
+        self._animation.setStartValue(0 if show else self._content_frame.height())
+        self._animation.setEndValue(self._content_frame.sizeHint().height() if show else 0)
         self._animation.setEasingCurve(QEasingCurve.OutCubic)
         if show:
-            self._content_frame.setVisible(True)
-            self._content_frame.setMaximumHeight(0)
-        self._animation.finished.connect(lambda: self._content_frame.setMaximumHeight(target_height) if not show else None)
-        self._animation.start()
-        if not show:
-            self._animation.finished.connect(lambda: self._content_frame.setVisible(False))
-        try:
-            self._animation.finished.disconnect()
-        except TypeError:
-            pass
-        if show:
-            self._content_frame.setVisible(True)
-            self._content_frame.setMaximumHeight(0)
-            self._animation.setStartValue(0)
-            self._animation.setEndValue(target_height)
+            self._animation.finished.connect(
+                lambda: self._content_frame.setMaximumHeight(16777215))
         else:
-            self._animation.setStartValue(self._content_frame.height())
-            self._animation.setEndValue(0)
-            self._animation.finished.connect(lambda: self._content_frame.setVisible(False))
-
-        self._content_frame.setMaximumHeight(target_height)
+            self._animation.finished.connect(self._content_frame.hide)
+        self._animation.start()
 
 
 class LeftSidebar(QFrame):
@@ -442,9 +430,12 @@ class RightSidebar(QFrame):
 class MainStage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setHandleWidth(4)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        layout.setSpacing(0)
+        layout.addWidget(splitter)
 
         self.left_sidebar = LeftSidebar()
         self.right_sidebar = RightSidebar()
@@ -474,13 +465,16 @@ class MainStage(QWidget):
         timeline_bar.addWidget(self.btn_pause)
         timeline_bar.addWidget(self.btn_stop)
 
-        center_layout.addWidget(self.plot_screen, 1)
-
         self.timeline = ExperimentTimeline()
         self.btn_add_device = self.timeline.add_device_button
         self.btn_add_device.setStyleSheet(btn_style)
         self.btn_add_device.setToolTip("Add hardware to this experiment plan")
-        center_layout.addWidget(self.timeline)
+
+        vsplit = QSplitter(Qt.Vertical)
+        vsplit.setHandleWidth(4)
+        vsplit.addWidget(self.plot_screen)
+        vsplit.addWidget(self.timeline)
+        center_layout.addWidget(vsplit)
 
         self.timeline.block_selected.connect(self.right_sidebar.set_block_info)
         self.right_sidebar.block_change_requested.connect(self.timeline.update_block)
@@ -490,9 +484,26 @@ class MainStage(QWidget):
 
         center_layout.addLayout(timeline_bar)
 
-        layout.addWidget(self.left_sidebar, 1)
-        layout.addWidget(center_widget, 4)
-        layout.addWidget(self.right_sidebar, 1)
+        splitter.addWidget(self.left_sidebar)
+        splitter.addWidget(center_widget)
+        splitter.addWidget(self.right_sidebar)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 4)
+        splitter.setStretchFactor(2, 1)
+        splitter.setSizes(load_list("layout/sizes_h", [260, 1040, 260]))
+        for i in range(3):
+            splitter.setCollapsible(i, False)
+        splitter.splitterMoved.connect(
+            lambda *_: save_list("layout/sizes_h", splitter.sizes()))
+        self._h_splitter = splitter
+
+        vsplit.setSizes(load_list("layout/sizes_v", [300, 300]))
+        vsplit.setStretchFactor(0, 1)
+        for i in range(2):
+            vsplit.setCollapsible(i, False)
+        vsplit.splitterMoved.connect(
+            lambda *_: save_list("layout/sizes_v", vsplit.sizes()))
+        self._v_splitter = vsplit
 
     def _on_timeline_data_changed(self):
         if self.timeline._edit_mode:

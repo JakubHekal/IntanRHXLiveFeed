@@ -24,3 +24,25 @@ def save_recent_experiment(path: str):
 
 def load_recent_experiment() -> str:
     return _SETTINGS.value(_RECENT_EXPERIMENT_KEY, "", type=str)
+
+
+def load_list(key: str, default: list) -> list:
+    raw = _SETTINGS.value(key, "")
+    if not raw:
+        return list(default)
+    try:
+        return [int(x) for x in str(raw).split(",")]
+    except (ValueError, TypeError):
+        return list(default)
+
+
+def save_list(key: str, values: list):
+    _SETTINGS.setValue(key, ",".join(str(v) for v in values))
+
+
+def load_geometry() -> bytes:
+    return _SETTINGS.value("layout/geometry")
+
+
+def save_geometry(data: bytes):
+    _SETTINGS.setValue("layout/geometry", data)

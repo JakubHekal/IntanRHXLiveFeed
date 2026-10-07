@@ -32,7 +32,7 @@ from leech.experiment.experiment_runner import ExperimentRunner, sanitize_raw_ke
 from leech.screens._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
 from leech.screens.timeline import ExperimentTimeline
 from leech.screens.stage import FluentExpander, LeftSidebar, RightSidebar, MainStage
-from leech.plot_settings import save_recent_experiment, load_recent_experiment
+from leech.plot_settings import save_recent_experiment, load_recent_experiment, load_geometry, save_geometry
 
 BG_DARK = "#1E1E1E"
 BG_SURFACE = "#252526"
@@ -66,6 +66,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("LEECH")
         self.resize(1700, 980)
+        geo = load_geometry()
+        if geo:
+            try:
+                self.restoreGeometry(geo)
+            except TypeError:
+                pass
 
         if getattr(sys, 'frozen', False):
             _icon_path = Path(sys._MEIPASS) / "icon.png"
@@ -168,6 +174,7 @@ class MainWindow(QMainWindow):
             self.main_stage.plot_screen.set_planning_state()
 
     def closeEvent(self, event):
+        save_geometry(bytes(self.saveGeometry()))
         if getattr(self, '_experiment_runner', None) is not None and self._experiment_runner.is_running():
             self._experiment_runner.stop()
         self._close_devices()
