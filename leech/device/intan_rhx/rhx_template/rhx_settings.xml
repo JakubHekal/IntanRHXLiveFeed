@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- LEECH-managed RHX settings template. Rendered at launch with the ports
+     configured in device properties. Carries ONLY Remote TCP Control socket
+     config so RHX opens all three TCP servers automatically on startup
+     (Status=Pending) and re-listens after client disconnect
+     (StatusOnClientDisconnect=Pending). No root attributes on purpose:
+     omitting Type/SampleRateHertz/Version avoids mismatch-cancel on load.
+     Host/Port MUST precede Status per RHX parser document order. -->
+<IntanRHX>
+    <GeneralConfig
+        TCPCommandSocket.Host="{host}"
+        TCPCommandSocket.Port="{command_port}"
+        TCPCommandSocket.Status="Pending"
+        TCPCommandSocket.StatusOnClientDisconnect="Pending"
+        TCPWaveformDataSocket.Host="{host}"
+        TCPWaveformDataSocket.Port="{data_port}"
+        TCPWaveformDataSocket.Status="Pending"
+        TCPWaveformDataSocket.StatusOnClientDisconnect="Pending"
+        TCPSpikeDataSocket.Host="{host}"
+        TCPSpikeDataSocket.Port="5002"
+        TCPSpikeDataSocket.Status="Pending"
+        TCPSpikeDataSocket.StatusOnClientDisconnect="Pending"/>
+</IntanRHX>

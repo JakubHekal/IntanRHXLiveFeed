@@ -7,9 +7,16 @@ Intan RHD/RHS recording controllers over TCP/IP.
 
 import time
 import socket
+import glob
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import numpy as np
 import threading
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Optional, List, Union
 
 from ..base import Device, ChannelInfo
@@ -37,13 +44,23 @@ class IntanRHXDevice(Device):
                  num_channels=128,
                  buffer_duration_sec=5,
                  auto_start=False,
-                 verbose=False):
+                 verbose=False,
+                 storage_mode="rhs",
+                 autolaunch=True,
+                 rhx_exe_path="",
+                 rhx_device_serial="",
+                 rhx_sample_rate_hz=0):
         self.host = host
         self.command_port = command_port
         self.data_port = data_port
         self.num_channels = num_channels
         self._sample_rate = None
         self.verbose = verbose
+        self.storage_mode = storage_mode
+        self.autolaunch = bool(autolaunch)
+        self.rhx_exe_path = rhx_exe_path or ""
+        self.rhx_device_serial = rhx_device_serial or ""
+        self.rhx_sample_rate_hz = int(rhx_sample_rate_hz or 0)
         self._connected = False
         self.command_socket = None
         self.data_socket = None
@@ -225,7 +242,9 @@ class IntanRHXDevice(Device):
         deadline = time.perf_counter() + timeout
         while time.perf_counter() < deadline:
             try:
-                if self.get_run_mode() == 'run':
+                # 'record' also means running: an RHS recording session in
+                # progress clocks the chip exactly like 'run'.
+                if self.get_run_mode() in ('run', 'record'):
                     return True
             except Exception:
                 pass
@@ -250,12 +269,174 @@ class IntanRHXDevice(Device):
     def set_blocks_per_write(self, num_blocks):
         self.set_parameter("TCPNumberDataBlocksPerWrite", num_blocks)
 
-    def connect(self):
+    # ── RHX autolaunch ──
+
+    _TEMPLATE_DIR = Path(__file__).parent / "rhx_template"
+
+    def _connect_command_socket(self, timeout=0.3):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((self.host, self.command_port))
+        return s
+
+    def _ensure_rhx_running(self):
+        """Return a CONNECTED command socket, launching RHX headless if needed.
+
+        Never probes: RHX accepts exactly one client per socket (it closes its
+        listen server after accept), so a connect-then-close check would steal
+        the slot. The first successful connect IS the session; a refusal
+        (nothing listening) is the only trigger to launch."""
         try:
-            self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.command_socket.connect((self.host, self.command_port))
+            return self._connect_command_socket()
+        except OSError:
+            pass
+        local = str(self.host) in ("127.0.0.1", "localhost", "::1")
+        if not local:
+            raise ConnectionError(
+                f"Cannot connect to RHX command port {self.host}:{self.command_port} "
+                "and autolaunch only works for a local RHX.")
+        if self._rhx_process_running():
+            raise ConnectionError(
+                "IntanRHX is already running but its command port is closed — "
+                "usually stuck at the startup/device-selection dialog because no "
+                "controller was detected. Close IntanRHX (or connect the "
+                "controller) and retry.")
+        exe = self._find_rhx_exe(self.rhx_exe_path)
+        if not exe:
+            raise ConnectionError(
+                "IntanRHX.exe not found and not running. Set 'IntanRHX Path' in "
+                "device properties (searched: explicit path, registry App Paths, "
+                "uninstall entries, PATH, Program Files).")
+        ini = self._render_rhx_templates()
+        proc = subprocess.Popen([exe, f"--settings={ini}"], cwd=str(Path(exe).parent))
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise ConnectionError(
+                    f"IntanRHX exited (code {proc.returncode}) before opening "
+                    "the command port — likely no controller detected.")
+            try:
+                return self._connect_command_socket(timeout=0.5)
+            except OSError:
+                time.sleep(0.5)
+        raise ConnectionError(
+            "IntanRHX launched but the command port did not open within 30 s. "
+            "Most likely RHX is waiting at the device-selection dialog (no "
+            "controller detected). Connect the controller and retry.")
+
+    @staticmethod
+    def _rhx_process_running():
+        """True if IntanRHX.exe process exists (Windows only)."""
+        if sys.platform != "win32":
+            return False  # ponytail: win-only, use pgrep for mac/linux if needed
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq IntanRHX.exe"],
+                capture_output=True, text=True, timeout=5).stdout
+            return "IntanRHX.exe" in out
+        except Exception:
+            return False
+
+    def _render_rhx_templates(self):
+        """Write startup.ini + rhx_settings.xml (from our templates) to %TEMP%\\leech_rhx."""
+        out = Path(tempfile.gettempdir()) / "leech_rhx"
+        out.mkdir(parents=True, exist_ok=True)
+        xml = (self._TEMPLATE_DIR / "rhx_settings.xml").read_text(encoding="utf-8")
+        xml = xml.format(host=self.host or "127.0.0.1",
+                         command_port=int(self.command_port),
+                         data_port=int(self.data_port))
+        xml_path = out / "rhx_settings.xml"
+        xml_path.write_text(xml, encoding="utf-8")
+        keys = []
+        if self.rhx_device_serial:
+            keys.append(f"device_serial={self.rhx_device_serial}\n")
+        if self.rhx_sample_rate_hz:
+            keys.append(f"sample_rate_hz={self.rhx_sample_rate_hz}\n")
+        ini = (self._TEMPLATE_DIR / "startup.ini").read_text(encoding="utf-8")
+        ini = ini.format(keys="".join(keys), settings_xml=xml_path.as_posix())
+        ini_path = out / "startup.ini"
+        ini_path.write_text(ini, encoding="utf-8")
+        return ini_path
+
+    @staticmethod
+    def _find_rhx_exe(explicit=""):
+        """explicit path, then App Paths/uninstall registry, PATH, Program Files."""
+        if explicit:
+            return explicit if Path(explicit).is_file() else None
+        if sys.platform == "win32":
+            import winreg
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\IntanRHX.exe") as k:
+                    val = winreg.QueryValueEx(k, "")[0]
+                    if val and Path(val).is_file():
+                        return str(val)
+            except OSError:
+                pass
+            for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+                    try:
+                        uninstall = winreg.OpenKey(
+                            root, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                            0, winreg.KEY_READ | view)
+                    except OSError:
+                        continue
+                    with uninstall:
+                        i = 0
+                        while True:
+                            try:
+                                subname = winreg.EnumKey(uninstall, i)
+                            except OSError:
+                                break
+                            i += 1
+                            try:
+                                with winreg.OpenKey(uninstall, subname) as sk:
+                                    disp = str(winreg.QueryValueEx(sk, "DisplayName")[0] or "")
+                                    loc = str(winreg.QueryValueEx(sk, "InstallLocation")[0] or "")
+                            except OSError:
+                                continue
+                            if "rhx" in disp.lower() and loc:
+                                exe = Path(loc) / "IntanRHX.exe"
+                                if exe.is_file():
+                                    return str(exe)
+        found = shutil.which("IntanRHX")
+        if found:
+            return found
+        for base in dict.fromkeys(filter(None, (
+                os.environ.get("ProgramFiles"),
+                os.environ.get("ProgramFiles(x86)"),
+                r"C:\Program Files", r"C:\Program Files (x86)"))):
+            for pattern in (r"*\IntanRhx.exe", r"*\*\IntanRHX.exe", r"*\*\*\IntanRHX.exe"):
+                hits = glob.glob(os.path.join(base, pattern))
+                if hits:
+                    return hits[0]
+        return None
+
+    def _enable_tcp_keepalive_session(self):
+        # Server stays listening after we disconnect (reconnect without GUI).
+        for sock in (self.command_socket, self.data_socket):
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            except OSError:
+                pass
+        for sub in ("tcpcommandsocket", "tcpwaveformdatasocket", "tcpspikedatasocket"):
+            try:
+                self._send(f"set {sub}.statusonclientdisconnect pending")
+            except Exception:
+                pass
+
+    def connect(self):
+        if self.autolaunch:
+            # Raises ConnectionError with details (surfaced by the connect
+            # dialog); returns an already-connected command socket.
+            self.command_socket = self._ensure_rhx_running()
+        try:
+            if self.command_socket is None:
+                self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.command_socket.connect((self.host, self.command_port))
             self.command_socket.settimeout(2.0)
             self.data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.data_socket.settimeout(2.0)
             self.data_socket.connect((self.host, self.data_port))
             self.data_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
             try:
@@ -264,6 +445,7 @@ class IntanRHXDevice(Device):
                 pass
             self.data_socket.settimeout(0.005)
             self._connected = True
+            self._enable_tcp_keepalive_session()
             # ponytail: force a known-stopped controller before streaming; a board
             # left running by a previous failed close() desyncs blocksPerWrite,
             # runmode, and the TCP output geometry on the next session.
@@ -411,7 +593,15 @@ class IntanRHXDevice(Device):
 
     def _streaming_worker(self):
         rolling_buffer = bytearray()
-        self.set_run_mode("run")
+        # Skip 'set runmode run' when a recording session already runs the
+        # board — RHX rejects mode changes while running (harmless error, but
+        # this keeps the reply stream clean).
+        try:
+            already_running = self.get_run_mode() != 'stop'
+        except Exception:
+            already_running = False
+        if not already_running:
+            self.set_run_mode("run")
         # ponytail: bounded drain of stale TCP data (<=200 ms) so the parser
         # doesn't misalign on leftover bytes from a previous stream geometry.
         # Never unbounded — it would eat live data forever when the controller
@@ -602,6 +792,36 @@ class IntanRHXDevice(Device):
         self._connected = False
         self.streaming = False
 
+    def start_recording_session(self, path, prefix):
+        """Begin an RHX-native recording session (storage_mode='rhs').
+
+        Sets filename target, enters runmode 'record' (board runs + writes the
+        raw .rhs), and returns the recording folder RHX created:
+        <path>/<prefix>_<YYMMDD_HHMMSS>/  — finalized by stop_acquisition().
+        """
+        p = Path(path)
+        p.mkdir(parents=True, exist_ok=True)
+        self.set_parameter("createnewdirectory", "true")
+        self.set_parameter("fileformat", "Traditional")
+        self.set_parameter("filename.path", str(p))
+        self.set_parameter("filename.basefilename", str(prefix))
+        self.set_parameter("runmode", "record")
+        if self.get_run_mode() != 'record':
+            raise RuntimeError(
+                f"RHX refused runmode=record for {p / prefix} (mode={self.get_run_mode()!r}) — "
+                "is the board stopped and not already recording?")
+        # RHX appends _<YYMMDD_HHMMSS> to the base filename for the folder.
+        folder = None
+        deadline = time.perf_counter() + 2.0
+        while time.perf_counter() < deadline and folder is None:
+            hits = sorted((d for d in p.glob(f"{prefix}_*") if d.is_dir()),
+                          key=lambda d: d.stat().st_mtime)
+            if hits:
+                folder = hits[-1]
+            else:
+                time.sleep(0.1)
+        return str(folder if folder is not None else p)
+
     def record_to_file(self, path, duration_sec=10):
         emg = self.record(duration_sec)
         np.savez(path, emg=emg, sample_rate=self.sample_rate)
@@ -699,6 +919,13 @@ class IntanRHXDevice(Device):
             ParamDef("data_port", "Data Port", "int", default=5001, min_val=1024, max_val=65535),
             ParamDef("num_channels", "Num Channels", "int", default=128, min_val=1, max_val=512),
             ParamDef("buffer_duration_sec", "Buffer Duration (s)", "float", default=5.0, min_val=1.0, max_val=60.0),
+            ParamDef("storage_mode", "Experiment Storage", "choice", default="rhs",
+                     choices=["rhs", "csv"]),
+            ParamDef("autolaunch", "Auto-launch IntanRHX", "bool", default=True),
+            ParamDef("rhx_exe_path", "IntanRHX Path (blank = autodiscover)", "str", default=""),
+            ParamDef("rhx_device_serial", "RHX Device Serial (blank = first detected)", "str", default=""),
+            ParamDef("rhx_sample_rate_hz", "RHX Sample Rate Hz (0 = RHX default)", "int",
+                     default=0, min_val=0, max_val=30000),
         ]
 
     @classmethod
