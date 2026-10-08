@@ -59,6 +59,31 @@ class StartRecordingSessionTest(unittest.TestCase):
                 dev.start_recording_session(tmp.name, "000001_x")
 
 
+class EnabledChannelSyncTest(unittest.TestCase):
+    def _capture(self, dev, indices):
+        calls = []
+        with patch.object(dev, "clear_all_data_outputs"), \
+                patch.object(dev, "get_run_mode", return_value="stop"), \
+                patch.object(dev, "set_parameter",
+                             side_effect=lambda p, v, delay=None: calls.append((p, v))):
+            dev._set_enabled_channels(indices)
+        return [(p, v) for p, v in calls if p.endswith(".enabled")]
+
+    def test_first_sync_enables_selected_disables_rest(self):
+        dev = _fake_connected_device()
+        enabled = dict(self._capture(dev, [0, 1]))
+        self.assertEqual(enabled.get("a-000.enabled"), "true")
+        self.assertEqual(enabled.get("a-001.enabled"), "true")
+        self.assertEqual(enabled.get("a-002.enabled"), "false")
+        self.assertEqual(enabled.get("b-000.enabled"), "false")
+        self.assertEqual(enabled.get("a-aux1.enabled"), "false")
+
+    def test_second_sync_sends_only_delta(self):
+        dev = _fake_connected_device()
+        self._capture(dev, [0, 1])
+        self.assertEqual(self._capture(dev, [0]), [("a-001.enabled", "false")])
+
+
 class TemplateRenderTest(unittest.TestCase):
     def test_render_defaults(self):
         tmp = tempfile.TemporaryDirectory()

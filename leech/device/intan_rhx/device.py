@@ -78,6 +78,7 @@ class IntanRHXDevice(Device):
         self.streaming = False
 
         self._enabled_channel_indices = list(range(num_channels))
+        self._enabled_param_cache = None
         self.bytes_per_frame = 4 + 2 * self.num_channels
         self.bytes_per_block = 4 + FRAMES_PER_BLOCK * self.bytes_per_frame
         self.blocks_per_write = 1
@@ -130,8 +131,8 @@ class IntanRHXDevice(Device):
         finally:
             self.command_socket.settimeout(2.0)
 
-    def set_parameter(self, param, value):
-        self._send(f"set {param} {value}\n")
+    def set_parameter(self, param, value, delay=None):
+        self._send(f"set {param} {value}\n", delay=delay)
 
     def get_parameter(self, param):
         with self._cmd_lock:
@@ -509,6 +510,40 @@ class IntanRHXDevice(Device):
         return indices
 
     _PORTS = ['a', 'b', 'c', 'd']
+    _AUX_SUFFIXES = ("aux1", "aux2", "aux3", "vdd1")
+
+    def _all_channel_param_names(self):
+        """Every amplifier + aux/supply channel RHX can save to a native file."""
+        names = [f"{p}-{i:03d}" for p in self._PORTS for i in range(32)]
+        names += [f"{p}-{a}" for p in self._PORTS for a in self._AUX_SUFFIXES]
+        return names
+
+    def _sync_enabled_channels(self, indices: list[int]):
+        """Mirror the Stream block's channel selection onto RHX's amplifier
+        `Enabled` flags. RHX writes every enabled channel to the native
+        .rhd/.rhs regardless of tcpdataoutputenabled, so leaving the rest on
+        wastes disk. Only channels that changed since the last block are sent.
+        """
+        try:
+            if self.get_run_mode() != 'stop':
+                append_telemetry_line("intanrhx | warn | channel enable sync skipped: board running")
+                return
+        except Exception:
+            pass
+        desired = {f"{self._PORTS[i // 32]}-{i % 32:03d}" for i in indices if i // 32 < 4}
+        if self._enabled_param_cache is None:
+            to_on = desired
+            to_off = set(self._all_channel_param_names()) - desired
+        else:
+            to_on = desired - self._enabled_param_cache
+            to_off = self._enabled_param_cache - desired
+        for name in sorted(to_on):
+            self.set_parameter(f"{name}.enabled", "true", delay=0.0)
+        for name in sorted(to_off):
+            self.set_parameter(f"{name}.enabled", "false", delay=0.0)
+        if to_on or to_off:
+            time.sleep(self.send_delay)
+        self._enabled_param_cache = desired
 
     def _set_enabled_channels(self, indices: list[int]):
         indices = sorted(set(indices))
@@ -522,6 +557,7 @@ class IntanRHXDevice(Device):
         self.num_channels = len(indices)
         self._update_read_size()
         self.init_circular_buffer()
+        self._sync_enabled_channels(indices)
 
     def init_circular_buffer(self):
         buffer_length = int(self.sample_rate * self.buffer_duration_sec)
