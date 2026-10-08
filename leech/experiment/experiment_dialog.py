@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PyQt5 import QtWidgets, QtCore
 
-from ..device.widget_builder import build_param_widget, read_param_widget
+from ..gui.widget_builder import build_param_widget, read_param_widget
 from .experiment import ExperimentManager
 
 
@@ -163,7 +163,7 @@ class _DeviceConnectionFrame(QtWidgets.QFrame):
         self._connect_done.connect(self._on_connect_done)
 
     def _read_params(self):
-        from ..device.widget_builder import gather_params
+        from ..gui.widget_builder import gather_params
         return gather_params(self._param_widgets)
 
     def _on_connect(self):

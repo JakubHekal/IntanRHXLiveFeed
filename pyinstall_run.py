@@ -13,9 +13,10 @@ except Exception:
     hidden_imports = [
         'leech', 'leech.ui',
         'leech.telemetry_logger', 'leech.plot_settings', 'leech.updater',
-        'leech.device.base', 'leech.device.ring_buffer',
-        'leech.device.background_worker', 'leech.device.widget_builder',
-        'leech.device.tabs.base',
+        'leech.device.base', 'leech.device.registry',
+        'leech.device.background_worker',
+        'leech.gui', 'leech.gui.widgets', 'leech.gui.plot_helpers',
+        'leech.gui.ring_buffer', 'leech.gui.widget_builder', 'leech.gui.tabs.base', 'leech.gui.tabs.host',
         'leech.device.intan_rhx.device', 'leech.device.intan_rhx.tab',
         'leech.device.intan_rhx.canvas', 'leech.device.intan_rhx._processing_tasks',
         'leech.device.intan_rhx.processing.psd',
@@ -25,9 +26,9 @@ except Exception:
         'leech.device.minismu.canvas',
         'leech.device.simulated.device', 'leech.device.simulated.tab',
         'leech.screens.stage', 'leech.screens.timeline',
-        'leech.screens.plot_screen', 'leech.screens.plot_helpers',
-        'leech.screens.marker_dialog', 'leech.screens.channel_selector',
-        'leech.screens._registry',
+        
+        
+        
         'leech.workers.chunk_writer', 'leech.workers.replay_worker',
         'leech.experiment.experiment', 'leech.experiment.experiment_dialog',
         'leech.experiment.experiment_runner',

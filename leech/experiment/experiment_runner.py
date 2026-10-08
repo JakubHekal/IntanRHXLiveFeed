@@ -11,9 +11,7 @@ CSV_FILE_BUFFER_BYTES = 1024 * 1024
 CSV_FLUSH_INTERVAL_SEC = 1.0
 from leech.workers.chunk_writer import ChunkWriter
 from leech.telemetry_logger import append_telemetry_line
-from leech.experiment.migrations import SYSTEM_DEVICE_ID
-from leech.device.intan_rhx.stim import MAX_PULSES_PER_TRAIN
-
+from leech.experiment.migrations import SYSTEM_DEVICE_ID, SYSTEM_DEVICE_TYPE
 _SYSTEM_ACTIONS = frozenset(("wait_input", "log_event", "pause", "start_recording", "stop_recording"))
 
 
@@ -305,7 +303,7 @@ class _RunnerThread(QtCore.QThread):
 
         if device is None and not is_system:
             self._report_error(
-                device_name or "__system__",
+                device_name or SYSTEM_DEVICE_TYPE,
                 f"Device ID {self._device_id_of_step(step)!r} not found or not connected",
             )
             time.sleep(0.5)
@@ -354,10 +352,10 @@ class _RunnerThread(QtCore.QThread):
             elif action in ("start_recording", "stop_recording"):
                 print(f"[Runner] Recording op {action} (handled by Stream)")
             else:
-                self._report_error(device_name or "__system__", f"Unknown action {action!r}")
+                self._report_error(device_name or SYSTEM_DEVICE_TYPE, f"Unknown action {action!r}")
 
         except Exception as e:
-            self._report_error(device_name or "__system__", str(e))
+            self._report_error(device_name or SYSTEM_DEVICE_TYPE, str(e))
             append_telemetry_line(f"step_error | {step_idx} | {device_name} | {action} | {e}")
             print(f"[Runner] Error in step {step_idx}: {e}")
 
@@ -450,7 +448,7 @@ class _RunnerThread(QtCore.QThread):
             # rest of the duration.
             if time.perf_counter() - last_data_time > 5.0 and deadline - time.perf_counter() > 5.0:
                 stalled = True
-                msg = f"Data stall: no data from {device_name} for 5 s while streaming (Intan TCP output stalled)"
+                msg = f"Data stall: no data from {device_name} for 5 s while streaming (device data output stalled)"
                 self._report_error(device_name, msg)
                 append_telemetry_line(f"acq_stall | {step_idx} | {device_name} | Stream | no data for 5s")
                 print(f"[Runner] {msg}")
@@ -523,7 +521,7 @@ class _RunnerThread(QtCore.QThread):
         period_us = float(params.get("pulse_period_us", 200.0) or 200.0)
         train_dur = getattr(device, '_stim_train_duration_s', None)
         if train_dur is None:
-            ppt = getattr(device, '_stim_pulses_per_train', MAX_PULSES_PER_TRAIN)
+            ppt = getattr(device, '_stim_pulses_per_train', 0)
             train_dur = ppt * period_us * 1e-6
         interval = float(params.get("train_interval_s", 0.0) or 0.0)
         if interval > 0:
@@ -544,7 +542,7 @@ class _RunnerThread(QtCore.QThread):
         # board to actually run before firing the first train.
         if getattr(device, 'wait_for_run_mode', None) is not None:
             if not device.wait_for_run_mode(timeout=10.0):
-                msg = "Stimulus aborted: Intan board did not reach run mode before block start"
+                msg = "Stimulus aborted: device did not reach run mode before block start"
                 self._report_error(device_name, msg)
                 append_telemetry_line(f"stim_error | {step_idx} | {device_name} | Stimulus | {msg}")
                 print(f"[Runner] {msg}")
@@ -576,7 +574,7 @@ class _RunnerThread(QtCore.QThread):
                 device.stop_stimulation()
             except Exception:
                 pass
-        ppt = getattr(device, '_stim_pulses_per_train', MAX_PULSES_PER_TRAIN)
+        ppt = getattr(device, '_stim_pulses_per_train', 0)
         pulses = trains * ppt
         append_telemetry_line(
             f"stim_end | {step_idx} | {device_name} | Stimulus | {pulses} pulses ({trains} trains x {ppt})"

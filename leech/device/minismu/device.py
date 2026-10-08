@@ -2,7 +2,6 @@ import numpy as np
 from typing import Optional, List, Union
 
 from ..base import Device, ChannelInfo
-from .tab import SmuDeviceTab
 from leech.telemetry_logger import append_telemetry_line
 
 from minismu_py import SMU as MiniSMU, ConnectionType, SMUException
@@ -194,4 +193,5 @@ class MiniSMUDevice(Device):
 
     @classmethod
     def get_tab_class(cls):
+        from .tab import SmuDeviceTab
         return SmuDeviceTab

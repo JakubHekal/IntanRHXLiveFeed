@@ -6,29 +6,35 @@ import pyqtgraph as pg
 from PyQt5 import QtWidgets, QtCore
 import numpy as np
 
-from leech.plot_settings import load_plot_setting, save_plot_setting, DEFAULT_PSDS, DEFAULT_WAVEFORM, DEFAULT_SPIKE_BIN
+from leech.plot_settings import load_plot_setting, save_plot_setting
+from leech.gui.tabs.base import DataTab
+from leech.gui.ring_buffer import RingBuffer
+from leech.gui.widgets import MarkerDialog
+from leech.gui.plot_helpers import (
+    _minmax_downsample,
+    DISPLAY_WINDOW_SEC,
+    MAX_DISPLAY_POINTS, PLOT_UPDATE_FREQ_HZ, RAW_RENDER_HZ,
+    RAW_HISTORY_TARGET_HZ, RAW_HISTORY_HIGH_TARGET_HZ,
+    RAW_ADAPTIVE_HIGH_RES_MAX_SPAN_SEC, RAW_FULL_RES_MAX_SPAN_SEC,
+    RAW_MANUAL_VIEW_MARGIN_SEC, MAX_RAW_HISTORY_PLOT_POINTS,
+)
+from .plot_constants import (
+    DEFAULT_SAMPLING_RATE, PSD_RENDER_HZ, SPIKE_RENDER_HZ,
+    WAVEFORM_YLIM_ABS_UV, SPIKE_SCROLL_WINDOW_MIN,
+    PSD_PLOT_UPDATE_EVERY_N, SPIKE_PLOT_UPDATE_EVERY_N,
+)
 from leech.device.background_worker import BackgroundWorker
 from . import processing as _proc_cfg
 from ._processing_tasks import _run_spike_rebin, _run_all_channels
 from .processing import PSD_YLIM_MIN, PSD_YLIM_MAX, SPIKE_INCREMENTAL_MIN_SAMPLES, SPIKE_OVERLAP_SAMPLES, configure_processing_windows
-from leech.screens.plot_helpers import (
-    _minmax_downsample,
-    DISPLAY_WINDOW_SEC, DEFAULT_SAMPLING_RATE,
-    MAX_DISPLAY_POINTS, PLOT_UPDATE_FREQ_HZ, RAW_RENDER_HZ, PSD_RENDER_HZ, SPIKE_RENDER_HZ,
-    WAVEFORM_YLIM_ABS_UV, SPIKE_SCROLL_WINDOW_MIN,
-    RAW_HISTORY_TARGET_HZ, RAW_HISTORY_HIGH_TARGET_HZ,
-    RAW_ADAPTIVE_HIGH_RES_MAX_SPAN_SEC, RAW_FULL_RES_MAX_SPAN_SEC,
-    RAW_MANUAL_VIEW_MARGIN_SEC, MAX_RAW_HISTORY_PLOT_POINTS,
-    PSD_PLOT_UPDATE_EVERY_N, SPIKE_PLOT_UPDATE_EVERY_N,
-)
-from leech.telemetry_logger import append_telemetry_line
-from leech.device.tabs.base import DeviceTab
-from leech.device.ring_buffer import RingBuffer
-from leech.screens.marker_dialog import MarkerDialog
 from .canvas import PgCanvas
 
+DEFAULT_PSDS = _proc_cfg.PSD_BUFFER_SEC
+DEFAULT_WAVEFORM = _proc_cfg.WAVEFORM_BUFFER_SEC
+DEFAULT_SPIKE_BIN = _proc_cfg.SPIKE_BIN_SEC
 
-class IntanDeviceTab(DeviceTab):
+
+class IntanDeviceTab(DataTab):
     def __init__(self, sample_rate=float(DEFAULT_SAMPLING_RATE), num_channels=1, channel_labels=None, parent=None, **kwargs):
         super().__init__(parent, **kwargs)
         self.sampling_rate = sample_rate

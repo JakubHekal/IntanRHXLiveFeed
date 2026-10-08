@@ -20,8 +20,7 @@ from pathlib import Path
 from typing import Optional, List, Union
 
 from ..base import Device, ChannelInfo
-from .stim import build_stim_params, _fmt
-from .tab import IntanDeviceTab
+from .stim import build_stim_params, _fmt, MAX_PULSES_PER_TRAIN
 from leech.telemetry_logger import append_telemetry_line
 
 FRAMES_PER_BLOCK = 128
@@ -36,6 +35,9 @@ class IntanRHXDevice(Device):
     name = "Intan RHX"
     device_type = "rhx"
     _enabled_ports = []
+    # Fallback for pre-programming state; program_stimulation() sets the
+    # instance value from the actual pulse-train parameters.
+    _stim_pulses_per_train = MAX_PULSES_PER_TRAIN
 
     def __init__(self,
                  host="127.0.0.1",
@@ -930,4 +932,5 @@ class IntanRHXDevice(Device):
 
     @classmethod
     def get_tab_class(cls):
+        from .tab import IntanDeviceTab
         return IntanDeviceTab

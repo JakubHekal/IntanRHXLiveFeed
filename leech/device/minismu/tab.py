@@ -3,9 +3,9 @@ import time
 from PyQt5 import QtWidgets
 import numpy as np
 
-from leech.device.tabs.base import DeviceTab
-from leech.device.ring_buffer import RingBuffer
-from leech.screens.plot_helpers import MAX_DISPLAY_POINTS, _minmax_downsample
+from leech.gui.tabs.base import DataTab
+from leech.gui.ring_buffer import RingBuffer
+from leech.gui.plot_helpers import MAX_DISPLAY_POINTS, _minmax_downsample
 from leech.telemetry_logger import append_telemetry_line
 from .canvas import SmuCanvas
 
@@ -23,7 +23,7 @@ def _si_scale(abs_peak):
     return 1.0, ''
 
 
-class SmuDeviceTab(DeviceTab):
+class SmuDeviceTab(DataTab):
     def __init__(self, sample_rate=1000.0, parent=None, **kwargs):
         super().__init__(parent, **kwargs)
         self.sampling_rate = sample_rate

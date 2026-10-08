@@ -29,7 +29,7 @@ from leech.telemetry_logger import append_telemetry_line, set_telemetry_file
 from leech import __version__
 from leech.updater import UpdateCheckThread, UpdateInfo
 from leech.experiment.experiment_runner import ExperimentRunner, sanitize_raw_key
-from leech.screens._registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
+from leech.device.registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
 from leech.screens.timeline import ExperimentTimeline
 from leech.screens.stage import FluentExpander, LeftSidebar, RightSidebar, MainStage
 from leech.plot_settings import save_recent_experiment, load_recent_experiment, load_geometry, save_geometry
@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
         self._wire_behavior()
         self._prompt_recent_experiment()
         self._setup_status_bar()
-        self.main_stage.plot_screen.fps_updated.connect(self._fps_status_label.setText)
+        self.main_stage.tab_host.fps_updated.connect(self._fps_status_label.setText)
 
     def _read_experiment(self, path):
         try:
@@ -167,18 +167,35 @@ class MainWindow(QMainWindow):
         self._run_device_instances = []
         self._run_device_instance_map = {}
 
+    def _open_tab(self, key, device_type, sample_rate=None, num_channels=None):
+        tab_host = self.main_stage.tab_host
+        if tab_host.has_tab(key):
+            return
+        cls = _DEVICE_CLASSES.get(device_type)
+        if cls is None:
+            return
+        if not sample_rate:
+            params = {p.name: p.default for p in cls.get_config_params()}
+            sample_rate = params.get("sample_rate") or 20000.0
+        tab_host.add_tab(
+            key,
+            cls.get_tab_class(),
+            sample_rate=sample_rate,
+            num_channels=1 if num_channels is None else num_channels,
+        )
+
     def _set_edit_mode(self, enabled):
         self.main_stage.set_edit_mode(enabled)
         if enabled:
-            self.main_stage.plot_screen.clear_all()
-            self.main_stage.plot_screen.set_planning_state()
+            self.main_stage.tab_host.clear_all()
+            self.main_stage.tab_host.set_planning_state()
 
     def closeEvent(self, event):
         save_geometry(bytes(self.saveGeometry()))
         if getattr(self, '_experiment_runner', None) is not None and self._experiment_runner.is_running():
             self._experiment_runner.stop()
         self._close_devices()
-        self.main_stage.plot_screen.shutdown_workers()
+        self.main_stage.tab_host.shutdown_workers()
         super().closeEvent(event)
 
     def _create_text_toolbar(self, parent_layout):
@@ -299,7 +316,7 @@ class MainWindow(QMainWindow):
         timeline = self.main_stage.timeline
         self._set_edit_mode(True)
         timeline.clear_all()
-        self.main_stage.plot_screen.clear_all()
+        self.main_stage.tab_host.clear_all()
         for device in devices:
             timeline.add_device(
                 name=device.get("name", "Device"),
@@ -583,7 +600,7 @@ class MainWindow(QMainWindow):
         sequence = []
         step_id = 1
         for dev in devs:
-            if dev[2] == "__system__":
+            if dev[2] == SYSTEM_DEVICE_TYPE:
                 for block in dev[1]:
                     op_name = block[4] if len(block) >= 5 else block[0]
                     params = block[5] if len(block) >= 6 else {}
@@ -710,17 +727,16 @@ class MainWindow(QMainWindow):
             if device[2] == SYSTEM_DEVICE_TYPE:
                 continue
             name, device_type = device[0], device[2]
-            if name not in self.main_stage.plot_screen._tabs:
-                instance = getattr(device, "instance", None)
-                config_data = device[3] if len(device) >= 4 else {}
-                sample_rate = instance.sample_rate if instance and instance.sample_rate else (10.0 if device_type == "smu" else 20000.0)
-                self.main_stage.plot_screen.add_device(
-                    name,
-                    device_type,
-                    sample_rate=sample_rate,
-                    num_channels=config_data.get("num_channels"),
-                )
-        self.main_stage.plot_screen.set_receiving_state(True)
+            instance = getattr(device, "instance", None)
+            config_data = device[3] if len(device) >= 4 else {}
+            sample_rate = instance.sample_rate if instance and instance.sample_rate else None
+            self._open_tab(
+                name,
+                device_type,
+                sample_rate=sample_rate,
+                num_channels=config_data.get("num_channels"),
+            )
+        self.main_stage.tab_host.set_receiving_state(True)
 
         self._experiment_runner = ExperimentRunner(
             devices=timeline_devs,
@@ -732,8 +748,8 @@ class MainWindow(QMainWindow):
         self._experiment_runner.step_completed.connect(self._on_exp_step_completed)
         self._experiment_runner.experiment_finished.connect(self._on_exp_finished)
         self._experiment_runner.error_occurred.connect(self._on_exp_error)
-        self._experiment_runner.data_received.connect(self.main_stage.plot_screen.on_data)
-        self._experiment_runner.device_configured.connect(self.main_stage.plot_screen.on_device_configured)
+        self._experiment_runner.data_received.connect(self.main_stage.tab_host.on_data)
+        self._experiment_runner.device_configured.connect(self.main_stage.tab_host.on_device_configured)
         self._experiment_runner.user_input_requested.connect(self._on_user_input_requested)
         self._experiment_runner.start()
 
@@ -782,8 +798,8 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.main_stage.timeline.set_running(False)
         self.main_stage.timeline.clear_active_step()
-        self.main_stage.plot_screen.set_receiving_state(False)
-        self.main_stage.plot_screen.clear_all()
+        self.main_stage.tab_host.set_receiving_state(False)
+        self.main_stage.tab_host.clear_all()
         self._set_edit_mode(True)
         status = "success" if success else "failed"
         try:
@@ -840,7 +856,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Replay", f"No raw data found for {device_name or device_type}")
             return
         replay_name = f"Replay: {Path(run_path).name} — {device_name}"
-        self.main_stage.plot_screen.add_device(
+        self._open_tab(
             replay_name,
             device_type,
             sample_rate=sample_rate,
@@ -854,7 +870,7 @@ class MainWindow(QMainWindow):
             device_id=device_id,
             source_device_name=device_name,
         )
-        worker.data_received.connect(self.main_stage.plot_screen.on_data)
+        worker.data_received.connect(self.main_stage.tab_host.on_data)
         worker.error.connect(lambda msg: self.statusBar().showMessage(f"Replay error: {msg}"))
         worker.finished.connect(lambda: self.statusBar().showMessage("Replay finished"))
         worker.start()
@@ -938,7 +954,7 @@ class MainWindow(QMainWindow):
 
         timeline = self.main_stage.timeline
         timeline.clear_all()
-        self.main_stage.plot_screen.clear_all()
+        self.main_stage.tab_host.clear_all()
         self._set_edit_mode(True)
         for device in prepared_devices:
             timeline.add_device(

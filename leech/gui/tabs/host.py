@@ -3,9 +3,8 @@ import time
 import pyqtgraph as pg
 from PyQt5 import QtWidgets, QtCore
 
-from leech.screens.plot_helpers import PLOT_UPDATE_FREQ_HZ
-from leech.screens._registry import _DEVICE_CLASSES
-from leech.device.ring_buffer import RingBuffer
+from leech.gui.plot_helpers import PLOT_UPDATE_FREQ_HZ
+from leech.gui.ring_buffer import RingBuffer
 
 
 PLANNING_EMPTY_MESSAGE = (
@@ -15,7 +14,7 @@ PLANNING_EMPTY_MESSAGE = (
 )
 
 
-class PlotScreen(QtWidgets.QWidget):
+class TabHost(QtWidgets.QWidget):
 
     toggle_receiving_request_signal = QtCore.pyqtSignal(bool)
     save_disconnect_request_signal  = QtCore.pyqtSignal()
@@ -27,8 +26,9 @@ class PlotScreen(QtWidgets.QWidget):
         super().__init__(parent)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
 
-        # ponytail: multi-device tab container, stores DeviceTab instances keyed by name
-        self._tabs = {}  # name -> DeviceTab
+        # ponytail: multi-tab container, stores DataTab instances keyed by name
+        self._tabs = {}   # tab key -> DataTab
+        self._route = {}  # source (device) name -> [DataTab, ...]
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -70,25 +70,19 @@ class PlotScreen(QtWidgets.QWidget):
         self._empty_label.show()
         self.tab_widget.hide()
 
-    def add_device(self, name, device_type, sample_rate=20000.0, num_channels=None, channel_labels=None):
-        if name in self._tabs:
+    def has_tab(self, key):
+        return key in self._tabs
+
+    def add_tab(self, key, tab_cls, sample_rate, num_channels=1, channel_labels=None, sources=None):
+        if key in self._tabs or tab_cls is None:
             return
-        if num_channels is None:
-            cls = _DEVICE_CLASSES.get(device_type)
-            if cls:
-                for p in cls.get_config_params():
-                    if p.name == "num_channels":
-                        num_channels = p.default
-                        break
-            if num_channels is None:
-                num_channels = 1
-        cls = _DEVICE_CLASSES.get(device_type)
-        tab_cls = cls.get_tab_class() if cls else None
-        if tab_cls is None:
-            return
-        tab = tab_cls(sample_rate=sample_rate, num_channels=num_channels, channel_labels=channel_labels, parent=self)
-        self._tabs[name] = tab
-        self.tab_widget.addTab(tab, name)
+        tab = tab_cls(sample_rate=sample_rate, num_channels=num_channels,
+                      channel_labels=channel_labels, parent=self)
+        tab.sources = list(sources) if sources else [key]
+        self._tabs[key] = tab
+        for source in tab.sources:
+            self._route.setdefault(source, []).append(tab)
+        self.tab_widget.addTab(tab, key)
         self._empty_label.hide()
         self.tab_widget.show()
         self._update_tab_bar_visibility()
@@ -97,6 +91,12 @@ class PlotScreen(QtWidgets.QWidget):
         tab = self._tabs.pop(name, None)
         if tab is None:
             return
+        for source in tab.sources:
+            tabs = self._route.get(source, [])
+            if tab in tabs:
+                tabs.remove(tab)
+            if not tabs:
+                self._route.pop(source, None)
         idx = self.tab_widget.indexOf(tab)
         if idx >= 0:
             self.tab_widget.removeTab(idx)
@@ -106,17 +106,15 @@ class PlotScreen(QtWidgets.QWidget):
         if not self._tabs:
             self.set_planning_state()
 
-    def on_device_configured(self, device_name: str, num_channels: int, channel_labels: list[str], sample_rate: float = 0.0):
-        tab = self._tabs.get(device_name)
-        if tab is None:
-            return
-        if hasattr(tab, 'clear'):
-            tab.clear()
-        if hasattr(tab, '_resize'):
-            tab._resize(num_channels, channel_labels)
-        if sample_rate > 0 and hasattr(tab, 'sampling_rate'):
-            tab.sampling_rate = float(sample_rate)
-            tab._ring = RingBuffer(tab.sampling_rate, tab._ring.num_channels, duration_sec=300)
+    def on_device_configured(self, source: str, num_channels: int, channel_labels: list[str], sample_rate: float = 0.0):
+        for tab in self._route.get(source, ()):
+            if hasattr(tab, 'clear'):
+                tab.clear()
+            if hasattr(tab, '_resize'):
+                tab._resize(num_channels, channel_labels)
+            if sample_rate > 0 and hasattr(tab, 'sampling_rate'):
+                tab.sampling_rate = float(sample_rate)
+                tab._ring = RingBuffer(tab.sampling_rate, tab._ring.num_channels, duration_sec=300)
 
     def clear_all(self):
         for name in list(self._tabs):
@@ -130,9 +128,8 @@ class PlotScreen(QtWidgets.QWidget):
             return next(iter(self._tabs.values()))
         return widget
 
-    def on_data(self, device_name, chunk):
-        tab = self._tabs.get(device_name)
-        if tab is not None:
+    def on_data(self, source, chunk):
+        for tab in self._route.get(source, ()):
             tab.on_data(chunk)
 
     # ── Render ─────────────────────────────────────────────────────────────
@@ -188,18 +185,6 @@ class PlotScreen(QtWidgets.QWidget):
 
     # ── Snapshots ──────────────────────────────────────────────────────────
 
-    def take_psd_snapshot(self) -> bool:
-        tab = self._active_tab()
-        if tab is not None and hasattr(tab, 'take_psd_snapshot'):
-            return tab.take_psd_snapshot()
-        return False
-
-    def take_waveform_snapshot(self) -> bool:
-        tab = self._active_tab()
-        if tab is not None and hasattr(tab, 'take_waveform_snapshot'):
-            return tab.take_waveform_snapshot()
-        return False
-
     def clear_snapshots(self):
         for tab in self._tabs.values():
             if hasattr(tab, 'clear_snapshots'):
@@ -219,8 +204,6 @@ class PlotScreen(QtWidgets.QWidget):
                 tab.set_auto_follow(enabled)
 
     def changeEvent(self, event):
-        if event.type() in (13, QtCore.QEvent.WindowStateChange):
+        if event.type() == QtCore.QEvent.WindowStateChange:
             self.tab_widget.update()
         super().changeEvent(event)
-
-

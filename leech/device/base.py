@@ -114,8 +114,8 @@ class Device(ABC):
 
     @classmethod
     def get_tab_class(cls):
-        from leech.device.tabs.base import DeviceTab
-        return DeviceTab
+        from leech.gui.tabs.base import DataTab
+        return DataTab
 
 
 class OutputSink(Protocol):

@@ -5,7 +5,7 @@ from leech.device.intan_rhx.processing import (
     PSD_BUFFER_SEC, SPIKE_BIN_SEC, WAVEFORM_BUFFER_SEC,
     PSD_YLIM_MIN, PSD_YLIM_MAX,
 )
-from leech.screens.plot_helpers import WAVEFORM_YLIM_ABS_UV
+from .plot_constants import WAVEFORM_YLIM_ABS_UV
 
 
 class PgCanvas(QtWidgets.QWidget):

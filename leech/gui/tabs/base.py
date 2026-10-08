@@ -5,9 +5,10 @@ from PyQt5 import QtWidgets
 from leech.telemetry_logger import append_telemetry_line
 
 
-class DeviceTab(QtWidgets.QWidget):
+class DataTab(QtWidgets.QWidget):
     def __init__(self, parent=None, **kwargs):
         super().__init__(parent)
+        self.sources = []
         self._clear_requested = False
         self._render_requested = False
         self._tel_last_emit = time.perf_counter()
