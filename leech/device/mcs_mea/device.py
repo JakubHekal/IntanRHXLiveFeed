@@ -19,7 +19,7 @@ import numpy as np
 
 from leech.device.base import ChannelInfo, Device, DeviceOperation, ParamDef
 
-from .layout import channel_names
+from .layout import electrode_positions
 
 
 _ASSET_DIR = Path(__file__).resolve().parents[3] / "assets" / "mcs" / "x64"
@@ -176,9 +176,7 @@ class McsMEA2100Device(Device):
 
     @property
     def channels(self) -> List[ChannelInfo]:
-        names = channel_names(self._num_channels) if self._num_channels in (60, 120) else [
-            f"CH{i + 1:03d}" for i in range(self._num_channels)
-        ]
+        names = [f"CH{i + 1:03d}" for i in range(self._num_channels)]
         return [
             ChannelInfo(i, label, "input", "uV", -5000.0, 5000.0)
             for i, label in enumerate(names)

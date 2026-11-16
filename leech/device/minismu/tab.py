@@ -5,7 +5,7 @@ import numpy as np
 
 from leech.gui.tabs.base import DataTab
 from leech.gui.ring_buffer import RingBuffer
-from leech.gui.plot_helpers import MAX_DISPLAY_POINTS, _minmax_downsample
+from leech.gui.plot_helpers import MAX_DISPLAY_POINTS, _minmax_downsample, DISPLAY_BUFFER_SEC
 from leech.telemetry_logger import append_telemetry_line
 from .canvas import SmuCanvas
 
@@ -31,7 +31,7 @@ class SmuDeviceTab(DataTab):
         self.is_receiving = False
         self._render_dur_ms = 0.0
         self._last_render_t = 0.0
-        self._ring = RingBuffer(sample_rate, 2, duration_sec=300)
+        self._ring = RingBuffer(sample_rate, 2, duration_sec=DISPLAY_BUFFER_SEC)
         self._fps_frame_count = 0
         self._fps_last_t = time.perf_counter()
 
@@ -90,6 +90,7 @@ class SmuDeviceTab(DataTab):
             y = np.array([[voltage], [current]], dtype=np.float64)
             self._ring.write(np.array([t], dtype=np.float64), y)
             self.sample_counter += 1
+            self.request_render()
         elif arr.ndim == 2:
             n = arr.shape[1]
             if arr.shape[0] >= 2:
@@ -111,6 +112,7 @@ class SmuDeviceTab(DataTab):
                     f"i=[{float(current[0]):.9f}..{float(current[-1]):.9f}] "
                     f"total={self._ring.total}"
                 )
+        self.request_render()
 
     def render(self):
         now = time.perf_counter()

@@ -26,7 +26,7 @@ from .plot_constants import (
 from leech.device.background_worker import BackgroundWorker
 from . import processing as _proc_cfg
 from ._processing_tasks import _run_spike_rebin, _run_all_channels
-from .processing import PSD_YLIM_MIN, PSD_YLIM_MAX, SPIKE_INCREMENTAL_MIN_SAMPLES, SPIKE_OVERLAP_SAMPLES, configure_processing_windows
+from .processing import PSD_YLIM_MIN, PSD_YLIM_MAX, SPIKE_INCREMENTAL_MIN_SAMPLES, SPIKE_OVERLAP_SAMPLES
 from .canvas import PgCanvas
 
 DEFAULT_PSDS = _proc_cfg.PSD_BUFFER_SEC
@@ -136,7 +136,12 @@ class IntanDeviceTab(DataTab):
 
         layout.addLayout(tool_row)
 
-        self.canvas = PgCanvas(self)
+        self.canvas = PgCanvas(
+            self,
+            psd_buffer_sec=self._psd_buffer_sec,
+            waveform_buffer_sec=self._waveform_buffer_sec,
+            spike_bin_sec=self._spike_bin_sec,
+        )
         layout.addWidget(self.canvas, 1)
 
         self._proc_worker = BackgroundWorker(self)
@@ -251,11 +256,6 @@ class IntanDeviceTab(DataTab):
                '_waveform_buffer_sec': 'waveform_buffer_sec',
                '_spike_bin_sec': 'spike_bin_sec'}[setting_attr]
         save_plot_setting(key, sec)
-        configure_processing_windows(
-            psd_buffer_sec=self._psd_buffer_sec,
-            waveform_buffer_sec=self._waveform_buffer_sec,
-            spike_bin_sec=self._spike_bin_sec,
-        )
         plot_key = {'_psd_buffer_sec': 'psd',
                     '_waveform_buffer_sec': 'wf',
                     '_spike_bin_sec': 'spike'}[setting_attr]
@@ -294,6 +294,7 @@ class IntanDeviceTab(DataTab):
         self.sample_counter += n_samples
         self._tel_chunks += 1
         self._tel_samples += int(n_samples)
+        self.request_render()
 
         self.psd_update_counter += 1
         self.spike_plot_frame_counter += 1
@@ -341,6 +342,9 @@ class IntanDeviceTab(DataTab):
                 bool(should_run_psd), bool(should_run_spike),
                 dict(self._hist_states),
                 abs_start,
+                psd_buffer_sec=self._psd_buffer_sec,
+                waveform_buffer_sec=self._waveform_buffer_sec,
+                spike_bin_sec=self._spike_bin_sec,
             )
 
         self._tel_ingest_ms_total += (time.perf_counter() - ingest_t0) * 1000.0

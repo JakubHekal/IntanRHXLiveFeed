@@ -4,7 +4,6 @@ from scipy.signal import butter, sosfilt
 from .processing import psd as _psd
 from .processing import spike_count as _spike_count
 from .processing import spike_plot as _spike_plot
-from . import processing as _proc_cfg
 from .processing import SPIKE_INCREMENTAL_MIN_SAMPLES, SPIKE_OVERLAP_SAMPLES
 
 _SOS_CACHE = {}
@@ -39,8 +38,8 @@ class _ProcessingResult:
             setattr(self, s, None)
 
 
-def _update_histogram_state(spike_times, last_time_s, state):
-    bin_sec = float(_proc_cfg.SPIKE_BIN_SEC)
+def _update_histogram_state(spike_times, last_time_s, state, bin_sec):
+    bin_sec = float(bin_sec)
     total_bins = max(1, int(np.floor(float(last_time_s) / bin_sec)) + 1)
     cur_count = len(spike_times)
 
@@ -88,7 +87,8 @@ def _update_histogram_state(spike_times, last_time_s, state):
 
 
 def _run_all_channels(signal_matrix, t, fs, selected_ch, all_spike_caches,
-                      last_scans, do_psd, do_spike, hist_states, abs_start=0):
+                      last_scans, do_psd, do_spike, hist_states, abs_start=0,
+                      psd_buffer_sec=10, waveform_buffer_sec=10, spike_bin_sec=5):
     """Vectorized matrix pipeline: spike detection + histogram for all channels."""
     result = _ProcessingResult()
     result.selected_ch = selected_ch
@@ -158,6 +158,7 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, all_spike_caches,
             state = new_hist_states.get(ch, {})
             minute_idx, counts, new_state = _update_histogram_state(
                 new_cache, float(t[-1]) if t.size else 0.0, state,
+                spike_bin_sec,
             )
             new_hist_states[ch] = new_state
 
@@ -169,7 +170,7 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, all_spike_caches,
             if ch == selected_ch and new_cache:
                 spike_arr = np.asarray(new_cache, dtype=float)
                 current_time = float(t[-1]) if t.size else 0.0
-                wf_spike_arr = spike_arr[spike_arr >= current_time - _proc_cfg.WAVEFORM_BUFFER_SEC]
+                wf_spike_arr = spike_arr[spike_arr >= current_time - waveform_buffer_sec]
                 if wf_spike_arr.size >= 1 and t.size:
                     pk_indices = np.searchsorted(t, wf_spike_arr, side='left').astype(int)
                     if pk_indices.size:
@@ -208,7 +209,7 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, all_spike_caches,
 
     if do_psd and selected_ch < n_ch:
         try:
-            psd_samples = max(8, int(round(fs * _proc_cfg.PSD_BUFFER_SEC)))
+            psd_samples = max(8, int(round(fs * psd_buffer_sec)))
             psd_sig = signal_matrix[selected_ch, -psd_samples:]
             target_nperseg = max(64, int(round(_psd.TARGET_NPERSEG_SEC * fs)))
             nperseg = min(target_nperseg, psd_sig.size)

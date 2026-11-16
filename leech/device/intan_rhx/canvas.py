@@ -9,7 +9,8 @@ from .plot_constants import WAVEFORM_YLIM_ABS_UV
 
 
 class PgCanvas(QtWidgets.QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, psd_buffer_sec=PSD_BUFFER_SEC,
+                 waveform_buffer_sec=WAVEFORM_BUFFER_SEC, spike_bin_sec=SPIKE_BIN_SEC):
         super().__init__(parent)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -30,7 +31,7 @@ class PgCanvas(QtWidgets.QWidget):
         self.raw_plot.setMouseEnabled(x=True, y=True)
 
         self.psd_plot = self.glw.addPlot(row=1, col=0)
-        self.psd_plot.setTitle(f"Power spectrum (last {PSD_BUFFER_SEC}s)")
+        self.psd_plot.setTitle(f"Power spectrum (last {psd_buffer_sec}s)")
         self.psd_plot.setLabel('left',   'P [dB]')
         self.psd_plot.setLabel('bottom', 'f [Hz]')
         self.psd_plot.showGrid(x=True, y=True, alpha=0.3)
@@ -38,14 +39,14 @@ class PgCanvas(QtWidgets.QWidget):
         self.psd_plot.setYRange(PSD_YLIM_MIN, PSD_YLIM_MAX, padding=0)
 
         self.spike_plot = self.glw.addPlot(row=1, col=1)
-        self.spike_plot.setTitle(f"Spike counts ({SPIKE_BIN_SEC}s bins)")
+        self.spike_plot.setTitle(f"Spike counts ({spike_bin_sec}s bins)")
         self.spike_plot.setLabel('left',   'Count')
         self.spike_plot.setLabel('bottom', 't [min]')
         self.spike_plot.showGrid(x=True, y=True, alpha=0.3)
         self.spike_plot.setMouseEnabled(x=True, y=True)
 
         self.wf_plot = self.glw.addPlot(row=1, col=2)
-        self.wf_plot.setTitle(f"Averaged spike waveform (last {WAVEFORM_BUFFER_SEC}s)")
+        self.wf_plot.setTitle(f"Averaged spike waveform (last {waveform_buffer_sec}s)")
         self.wf_plot.setLabel('left',   'U [uV]')
         self.wf_plot.setLabel('bottom', 't [ms]')
         self.wf_plot.showGrid(x=True, y=True, alpha=0.3)

@@ -1,7 +1,7 @@
 """leech.device - Hardware device abstraction layer (model + drivers + device views)."""
 
 from .base import Device, ChannelInfo, OutputSink, DeviceOperation, ParamDef
-from .registry import _PLUGIN_REGISTRY, _DEVICE_CLASSES, _SYSTEM_OPERATIONS, MiniSMUDevice
+from .registry import DEVICE_CLASSES, _SYSTEM_OPERATIONS, MiniSMUDevice
 from .intan_rhx import IntanRHXDevice, GetSampleRateFailure
 from .mcs_mea import McsMEA2100Device, McsMeaTab
 from .simulated import SimulatedRecordingDevice, SimulatedActorDevice, SimulatedCombinedDevice

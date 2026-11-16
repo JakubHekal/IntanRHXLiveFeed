@@ -6,7 +6,7 @@ import numpy as np
 
 from leech.gui.tabs.base import DataTab
 from leech.gui.ring_buffer import RingBuffer
-from leech.gui.plot_helpers import MAX_DISPLAY_POINTS, _minmax_downsample
+from leech.gui.plot_helpers import MAX_DISPLAY_POINTS, _minmax_downsample, DISPLAY_BUFFER_SEC
 
 
 class SimpleDeviceTab(DataTab):
@@ -17,7 +17,7 @@ class SimpleDeviceTab(DataTab):
         self.is_receiving = False
         self._render_dur_ms = 0.0
         self._last_render_t = 0.0
-        self._ring = RingBuffer(sample_rate, 1, duration_sec=300)
+        self._ring = RingBuffer(sample_rate, 1, duration_sec=DISPLAY_BUFFER_SEC)
         self._fps_frame_count = 0
         self._fps_last_t = time.perf_counter()
 
@@ -52,6 +52,7 @@ class SimpleDeviceTab(DataTab):
             t = (self.sample_counter + np.arange(n, dtype=np.float64)) / self.sampling_rate
             self._ring.write(t, ch0[np.newaxis, :])
             self.sample_counter += n
+        self.request_render()
 
     def render(self):
         now = time.perf_counter()

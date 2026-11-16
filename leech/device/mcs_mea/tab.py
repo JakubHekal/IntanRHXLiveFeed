@@ -14,7 +14,7 @@ from leech.device.background_worker import BackgroundWorker
 from leech.gui.tabs.base import DataTab
 
 from .canvas import McsMeaCanvas
-from .layout import channel_names, electrode_positions
+from .layout import electrode_positions
 from .processing import StreamingSpikeDetector
 
 
@@ -87,9 +87,7 @@ class McsMeaTab(DataTab):
         self._num_channels = count
         labels = list(channel_labels or [])
         if len(labels) != count:
-            labels = channel_names(count) if count in (60, 120) else [
-                f"CH{i + 1:03d}" for i in range(count)
-            ]
+            labels = [f"CH{i + 1:03d}" for i in range(count)]
         self._channel_labels = labels
         self._selected = min(self._selected, count - 1)
         self._session_id += 1
@@ -147,6 +145,7 @@ class McsMeaTab(DataTab):
         self._tel_chunks += 1
         self._tel_samples += arr.shape[1]
         self._tel_ingest_ms_total += (time.perf_counter() - t0) * 1000.0
+        self.request_render()
 
     def _drain_pending(self):
         detector = self._detector
