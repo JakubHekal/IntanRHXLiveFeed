@@ -19,6 +19,7 @@ from .migrations import (
     UnsupportedSchemaError,
     is_system_device_name,
     migrate_config_data,
+    migrate_device_config,
     migrate_run_data,
     new_device_id,
 )
@@ -63,7 +64,6 @@ class ExperimentMetadata:
 
 @dataclass
 class ExecutionControl:
-    is_locked: bool = False
     required_devices: List[str] = field(default_factory=list)
     extra: dict = field(default_factory=dict, repr=False, compare=False)
 
@@ -113,39 +113,15 @@ def _merge_fields(extra, known_fields):
     return result
 
 
-def migrate_system_device_names(config):
-    changed = False
-    for step in config.sequence:
-        if step.device_id == SYSTEM_DEVICE_ID or (
-            not step.device_id and is_system_device_name(step.device_name)
-        ):
-            step.device_name = ""
-            step.device_id = SYSTEM_DEVICE_ID
-            changed = True
-        if not step.operation_id:
-            step.operation_id = step.action
-    return changed
-
-
 def _default_config(name: str, author: str = "", description: str = "") -> dict:
-    return {
-        "schema_version": CONFIG_SCHEMA_VERSION,
-        "metadata": {
-            "experiment_name": name,
-            "version": "1.0.0",
-            "author": author,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "description": description,
-            "cloned_from": None,
-        },
-        "execution_control": {
-            "is_locked": False,
-            "required_devices": [],
-        },
-        "sequence": [],
-        "post_processing": [],
-        "devices": [],
-    }
+    return _config_to_dict(ExperimentConfig(
+        metadata=ExperimentMetadata(
+            experiment_name=name,
+            author=author,
+            description=description,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        ),
+    ))
 
 
 def _config_to_dataclass(data: dict) -> ExperimentConfig:
@@ -162,7 +138,7 @@ def _config_to_dataclass(data: dict) -> ExperimentConfig:
     metadata_fields = {
         "experiment_name", "version", "author", "created_at", "description", "cloned_from"
     }
-    execution_fields = {"is_locked", "required_devices"}
+    execution_fields = {"required_devices"}
     step_fields = {"step_id", "action", "parameters", "device_name", "device_id", "operation_id"}
     post_processing_fields = {
         "script_id", "name", "environment", "script_path", "enabled_by_default"
@@ -178,7 +154,6 @@ def _config_to_dataclass(data: dict) -> ExperimentConfig:
             extra=_extra_fields(metadata, metadata_fields),
         ),
         execution_control=ExecutionControl(
-            is_locked=execution_control.get("is_locked", False),
             required_devices=list(execution_control.get("required_devices", [])),
             extra=_extra_fields(execution_control, execution_fields),
         ),
@@ -213,37 +188,43 @@ def _config_to_dataclass(data: dict) -> ExperimentConfig:
     )
 
 
+def normalize_device_record(record: dict, index: int = 0) -> dict:
+    if not isinstance(record, dict):
+        raise MigrationError(f"devices[{index}] must be an object")
+    item = deepcopy(record)
+    name = item.get("name", "")
+    device_type = item.get("device_type", "unknown")
+    if not isinstance(name, str) or not name:
+        name = f"Device {index + 1}"
+    if not isinstance(device_type, str) or not device_type:
+        device_type = "unknown"
+    device_id = item.get("device_id") or item.get("id") or new_device_id()
+    config_data = item.get("config", {})
+    if config_data is None:
+        config_data = {}
+    if not isinstance(config_data, dict):
+        raise MigrationError(f"devices[{index}].config must be an object")
+    config_version = item.get("config_version", 1)
+    if isinstance(config_version, bool) or not isinstance(config_version, int) or config_version < 0:
+        config_version = 1
+    item.update({
+        "device_id": device_id,
+        "name": name,
+        "device_type": device_type,
+        "config": deepcopy(config_data),
+        "config_version": config_version,
+    })
+    return item
+
+
 def _config_to_dict(config: ExperimentConfig) -> dict:
-    devices = []
+    devices = [
+        normalize_device_record(device, index)
+        for index, device in enumerate(config.devices)
+    ]
     name_ids = {}
-    for index, device in enumerate(config.devices):
-        if not isinstance(device, dict):
-            raise MigrationError(f"devices[{index}] must be an object")
-        item = deepcopy(device)
-        name = item.get("name", "")
-        device_type = item.get("device_type", "unknown")
-        if not isinstance(name, str) or not name:
-            name = f"Device {index + 1}"
-        if not isinstance(device_type, str) or not device_type:
-            device_type = "unknown"
-        device_id = item.get("device_id") or item.get("id") or new_device_id()
-        config_data = item.get("config", {})
-        if config_data is None:
-            config_data = {}
-        if not isinstance(config_data, dict):
-            raise MigrationError(f"devices[{index}].config must be an object")
-        config_version = item.get("config_version", 1)
-        if isinstance(config_version, bool) or not isinstance(config_version, int) or config_version < 0:
-            config_version = 1
-        item.update({
-            "device_id": device_id,
-            "name": name,
-            "device_type": device_type,
-            "config": deepcopy(config_data),
-            "config_version": config_version,
-        })
-        devices.append(item)
-        name_ids.setdefault(name, []).append(device_id)
+    for device in devices:
+        name_ids.setdefault(device["name"], []).append(device["device_id"])
 
     sequence = []
     for step in config.sequence:
@@ -275,7 +256,6 @@ def _config_to_dict(config: ExperimentConfig) -> dict:
         "cloned_from": config.metadata.cloned_from,
     })
     execution_control = _merge_fields(config.execution_control.extra, {
-        "is_locked": config.execution_control.is_locked,
         "required_devices": list(config.execution_control.required_devices),
     })
     post_processing = [
@@ -298,6 +278,15 @@ def _config_to_dict(config: ExperimentConfig) -> dict:
     })
 
 
+def _storage_format(devices) -> str:
+    for device in devices:
+        config = device.get("config") if isinstance(device, dict) else None
+        mode = config.get("storage_mode") if isinstance(config, dict) else None
+        if isinstance(mode, str) and mode:
+            return mode
+    return "csv"
+
+
 class ExperimentManager:
 
     @staticmethod
@@ -310,9 +299,11 @@ class ExperimentManager:
         experiments_dir = Path(experiments_dir).resolve()
         experiments_dir.mkdir(parents=True, exist_ok=True)
         experiment_path = experiments_dir / name
+        config_path = experiment_path / "config.json"
+        if config_path.exists():
+            raise FileExistsError(f"Experiment already exists: {experiment_path}")
         experiment_path.mkdir(parents=True, exist_ok=True)
         config_data = _default_config(name, author, description)
-        config_path = experiment_path / "config.json"
         _atomic_write_json(config_path, config_data)
         return experiment_path
 
@@ -323,7 +314,19 @@ class ExperimentManager:
             data = json.load(f)
         migrated, report = migrate_config_data(data)
         config = _config_to_dataclass(migrated)
-        config.migration_changed = report.changed
+        changed = report.changed
+        from leech.device.registry import DEVICE_CLASSES
+        for record in config.devices:
+            device_class = DEVICE_CLASSES.get(record.get("device_type"))
+            if device_class is None:
+                continue
+            record["config"], record["config_version"], device_changed = migrate_device_config(
+                device_class,
+                record.get("config", {}),
+                record.get("config_version", 1),
+            )
+            changed = changed or device_changed
+        config.migration_changed = changed
         config.migration_warnings = list(report.warnings)
         return config
 
@@ -359,6 +362,8 @@ class ExperimentManager:
         runs_dir.mkdir(parents=True, exist_ok=True)
         run_path = runs_dir / run_name
         run_path.mkdir(parents=True, exist_ok=True)
+        if any(run_path.iterdir()):
+            raise FileExistsError(f"Run directory is not empty: {run_path}")
         return run_path
 
     @staticmethod
@@ -382,6 +387,10 @@ class ExperimentManager:
             },
             "devices": devices,
             "sequence": sequence,
+            "storage": {
+                "format": _storage_format(devices),
+                "data_dir": "raw",
+            },
         }
         migrated, _ = migrate_run_data(run_json)
         path = run_path / "run.json"
@@ -407,7 +416,8 @@ class ExperimentManager:
             run = data["run"]
         else:
             run = data
-        run["end_time"] = datetime.now(timezone.utc).isoformat()
+        if status != "running":
+            run["end_time"] = datetime.now(timezone.utc).isoformat()
         run["status"] = status
         if error_count:
             run["error_count"] = error_count
@@ -447,15 +457,15 @@ class ExperimentManager:
         dst = src.parent / new_name
         if dst.exists():
             raise FileExistsError(f"Run '{new_name}' already exists")
-        src.rename(dst)
-        meta_file = ExperimentManager._run_metadata_path(dst)
+        meta_file = ExperimentManager._run_metadata_path(src)
         data = json.loads(meta_file.read_text(encoding="utf-8"))
         data, _ = migrate_run_data(data)
         if isinstance(data.get("run"), dict) and "name" in data["run"]:
             data["run"]["name"] = new_name
         elif "name" in data:
             data["name"] = new_name
-        _atomic_write_json(meta_file, data)
+        src.rename(dst)
+        _atomic_write_json(dst / meta_file.name, data)
         return dst
 
     @staticmethod

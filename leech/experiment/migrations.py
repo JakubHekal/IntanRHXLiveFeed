@@ -2,8 +2,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-CONFIG_SCHEMA_VERSION = 2
-RUN_SCHEMA_VERSION = 2
+CONFIG_SCHEMA_VERSION = 3
+RUN_SCHEMA_VERSION = 3
 SYSTEM_DEVICE_ID = "system"
 SYSTEM_DEVICE_TYPE = "__system__"
 _SYSTEM_DEVICE_NAMES = frozenset(("__System__", "System actions", SYSTEM_DEVICE_TYPE))
@@ -133,11 +133,12 @@ def _device_action(step):
 def _is_legacy_system_step(step):
     if step.get("device_id") == SYSTEM_DEVICE_ID:
         return True
+    if step.get("device_id"):
+        return False
     name = step.get("device_name", "")
-    action = _device_action(step)
-    return action in _SYSTEM_OPERATION_IDS or (
-        not step.get("device_id") and is_system_device_name(name)
-    )
+    if name:
+        return is_system_device_name(name)
+    return _device_action(step) in _SYSTEM_OPERATION_IDS
 
 
 def _normalize_system_names(data):
@@ -181,11 +182,12 @@ def _validate_current(data, kind):
             raise MigrationError(f"{kind} devices[{index}].device_type is reserved")
         if not isinstance(record.get("config"), dict):
             raise MigrationError(f"{kind} devices[{index}].config must be an object")
-        version = record.get("config_version")
+        version = record.get("config_version", 1)
         if isinstance(version, bool) or not isinstance(version, int) or version < 0:
             raise MigrationError(f"{kind} devices[{index}].config_version is invalid")
+        record["config_version"] = version
         if kind == "run":
-            blocks = record.get("blocks")
+            blocks = record.setdefault("blocks", [])
             if not isinstance(blocks, list):
                 raise MigrationError(f"run devices[{index}].blocks must be a list")
             for block_index, block in enumerate(blocks):
@@ -227,6 +229,15 @@ def _validate_current(data, kind):
         required = execution_control.get("required_devices")
         if not isinstance(required, list) or any(not isinstance(item, str) for item in required):
             raise MigrationError("config execution_control.required_devices must be a list of text")
+        post_processing = data.get("post_processing", [])
+        if post_processing is None:
+            post_processing = []
+            data["post_processing"] = post_processing
+        if (
+            not isinstance(post_processing, list)
+            or any(not isinstance(script, dict) for script in post_processing)
+        ):
+            raise MigrationError("config post_processing must be a list of objects")
 
 
 def _config_0_to_1(data):
@@ -252,12 +263,18 @@ def _config_1_to_2(data):
     if not isinstance(required_devices, list):
         warnings.append("execution_control.required_devices was not a list")
         required_devices = []
+    else:
+        cleaned = []
+        for device_type in required_devices:
+            if isinstance(device_type, str) and device_type:
+                cleaned.append(device_type)
+            else:
+                warnings.append("Ignored invalid required device entry")
+        required_devices = cleaned
 
     result["execution_control"] = execution_control
+    execution_control["required_devices"] = list(required_devices)
     for device_type in required_devices:
-        if not isinstance(device_type, str) or not device_type:
-            warnings.append("Ignored invalid required device entry")
-            continue
         if not any(
             isinstance(device, dict) and device.get("device_type") == device_type
             for device in records
@@ -299,6 +316,7 @@ def _config_1_to_2(data):
             device_type = "unknown"
             warnings.append(f"devices[{index}].device_type set to unknown")
         if device_type == SYSTEM_DEVICE_TYPE:
+            warnings.append(f"Dropped reserved system device record {name!r}")
             continue
         migrated["name"] = name
         migrated["device_type"] = device_type
@@ -306,11 +324,18 @@ def _config_1_to_2(data):
         device_id = migrated.get("device_id") or migrated.get("id")
         if device_id is None:
             device_id = _migrated_device_id("config", index, name, device_type)
-        normalized_id = _validate_device_id(device_id, "config", index)
+        try:
+            normalized_id = _validate_device_id(device_id, "config", index)
+        except MigrationError:
+            if migrated.get("device_id"):
+                raise
+            warnings.append(f"devices[{index}].id is not a UUID; generated a new device_id")
+            device_id = _migrated_device_id("config", index, name, device_type)
+            normalized_id = _validate_device_id(device_id, "config", index)
         if normalized_id in seen_ids:
             raise MigrationError(f"Duplicate device_id cannot be migrated safely: {device_id!r}")
         seen_ids.add(normalized_id)
-        migrated["device_id"] = device_id
+        migrated["device_id"] = normalized_id
 
         config = migrated.get("config")
         if config is None:
@@ -325,8 +350,8 @@ def _config_1_to_2(data):
             warnings.append(f"devices[{index}].config_version reset to 1")
         migrated["config_version"] = config_version
         migrated_records.append(migrated)
-        name_map[name] = device_id
-        id_to_name[device_id.casefold()] = name
+        name_map[name] = normalized_id
+        id_to_name[normalized_id] = name
 
     known_ids = set(id_to_name)
     for index, step in enumerate(sequence):
@@ -342,10 +367,7 @@ def _config_1_to_2(data):
             step["device_id"] = SYSTEM_DEVICE_ID
             step["device_name"] = ""
         elif existing_id:
-            try:
-                normalized_id = _validate_device_id(existing_id, "config", index)
-            except MigrationError:
-                raise
+            normalized_id = _validate_device_id(existing_id, "config", index)
             if normalized_id not in known_ids:
                 raise MigrationError(
                     f"sequence[{index}] references unknown device_id {existing_id!r}"
@@ -372,11 +394,32 @@ def _config_1_to_2(data):
     return result, warnings
 
 
+def _config_2_to_3(data):
+    result = deepcopy(data)
+    warnings = []
+    execution_control = result.get("execution_control")
+    if not isinstance(execution_control, dict):
+        execution_control = {}
+        warnings.append("execution_control reset to an object")
+    execution_control.pop("is_locked", None)
+    required = execution_control.get("required_devices", [])
+    if not isinstance(required, list):
+        warnings.append("execution_control.required_devices was not a list")
+        required = []
+    cleaned = [item for item in required if isinstance(item, str) and item]
+    if len(cleaned) != len(required):
+        warnings.append("Ignored invalid required device entries")
+    execution_control["required_devices"] = cleaned
+    result["execution_control"] = execution_control
+    result["schema_version"] = 3
+    return result, warnings
+
+
 def migrate_config_data(data):
     return _run_chain(
         data,
         CONFIG_SCHEMA_VERSION,
-        {0: _config_0_to_1, 1: _config_1_to_2},
+        {0: _config_0_to_1, 1: _config_1_to_2, 2: _config_2_to_3},
         "config",
     )
 
@@ -421,17 +464,25 @@ def _run_1_to_2(data):
         if not isinstance(device_type, str) or not device_type:
             device_type = "unknown"
         if device_type == SYSTEM_DEVICE_TYPE:
+            warnings.append(f"Dropped reserved system device record {name!r}")
             continue
         device_id = migrated.get("device_id") or migrated.get("id")
         if device_id is None:
             device_id = _migrated_device_id("run", index, name, device_type)
-        normalized_id = _validate_device_id(device_id, "run", index)
+        try:
+            normalized_id = _validate_device_id(device_id, "run", index)
+        except MigrationError:
+            if migrated.get("device_id"):
+                raise
+            warnings.append(f"run devices[{index}].id is not a UUID; generated a new device_id")
+            device_id = _migrated_device_id("run", index, name, device_type)
+            normalized_id = _validate_device_id(device_id, "run", index)
         if normalized_id in seen_ids:
             raise MigrationError(f"Duplicate run device_id cannot be migrated safely: {device_id!r}")
         seen_ids.add(normalized_id)
         migrated["name"] = name
         migrated["device_type"] = device_type
-        migrated["device_id"] = device_id
+        migrated["device_id"] = normalized_id
         config = migrated.get("config", {})
         if config is None:
             config = {}
@@ -461,8 +512,8 @@ def _run_1_to_2(data):
                     )
                 block["operation_id"] = action
         migrated_records.append(migrated)
-        name_map[name] = device_id
-        id_to_name[device_id.casefold()] = name
+        name_map[name] = normalized_id
+        id_to_name[normalized_id] = name
 
     known_ids = set(id_to_name)
     sequence = result.get("sequence", [])
@@ -508,10 +559,33 @@ def _run_1_to_2(data):
     return result, warnings
 
 
+def _run_2_to_3(data):
+    result = deepcopy(data)
+    warnings = []
+    storage = result.get("storage")
+    if not isinstance(storage, dict):
+        storage = {}
+    if not isinstance(storage.get("format"), str) or not storage["format"]:
+        fmt = "csv"
+        devices = result.get("devices", [])
+        for device in devices if isinstance(devices, list) else []:
+            config = device.get("config") if isinstance(device, dict) else None
+            mode = config.get("storage_mode") if isinstance(config, dict) else None
+            if isinstance(mode, str) and mode:
+                fmt = mode
+                break
+        storage["format"] = fmt
+    if not isinstance(storage.get("data_dir"), str) or not storage["data_dir"]:
+        storage["data_dir"] = "raw"
+    result["storage"] = storage
+    result["schema_version"] = 3
+    return result, warnings
+
+
 def migrate_run_data(data):
     return _run_chain(
         data,
         RUN_SCHEMA_VERSION,
-        {0: _run_0_to_1, 1: _run_1_to_2},
+        {0: _run_0_to_1, 1: _run_1_to_2, 2: _run_2_to_3},
         "run",
     )
