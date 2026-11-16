@@ -23,6 +23,38 @@ def sanitize_raw_key(key):
     return key
 
 
+def create_output_sink(
+    device,
+    sample_rate,
+    channel_names,
+    raw_dir,
+    file_prefix,
+    flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
+):
+    num_channels = len(channel_names) or 1
+    if getattr(device, "storage_mode", "csv") == "hdf5":
+        sink = Hdf5ChunkWriter(
+            sample_rate=sample_rate,
+            num_channels=num_channels,
+            channel_names=channel_names,
+            chunk_max_sec=RAW_CHUNK_SEC,
+            flush_interval_sec=flush_interval_sec,
+        )
+    else:
+        sink = ChunkWriter(
+            sample_rate=sample_rate,
+            num_channels=num_channels,
+            channel_names=channel_names,
+            chunk_max_sec=RAW_CHUNK_SEC,
+            buffer_bytes=CSV_FILE_BUFFER_BYTES,
+            flush_interval_sec=flush_interval_sec,
+        )
+    sink.raw_chunks_dir = raw_dir
+    sink.filename_prefix = file_prefix
+    sink._open_new_chunk_locked()
+    return sink
+
+
 class ExperimentRunner(QtCore.QObject):
     step_started = QtCore.pyqtSignal(int, str, str, float, str)  # step_index, device_name, action, duration, block_label
     step_completed = QtCore.pyqtSignal(int, str, str)
@@ -136,15 +168,6 @@ class _RunnerThread(QtCore.QThread):
     def abort(self):
         self._abort = True
         self.requestInterruption()
-
-    def _find_device(self, device_key: str):
-        return self._device_map.get(device_key)
-
-    def _find_device_type(self, device_key: str):
-        for d in self._devices:
-            if device_key in (self._device_id_of(d), d[0]):
-                return d[2] if len(d) >= 3 else ""
-        return ""
 
     def run(self):
         try:
@@ -270,6 +293,18 @@ class _RunnerThread(QtCore.QThread):
     def _params_of(step):
         return dict(step.parameters) if hasattr(step, 'parameters') else dict(step.get('parameters', {}))
 
+    @staticmethod
+    def _operation_for_device(device, action):
+        if device is None:
+            from leech.device.registry import _SYSTEM_OPERATIONS
+            operations = _SYSTEM_OPERATIONS
+        else:
+            operations = device.get_operations()
+        for operation in operations:
+            if action in (operation.operation_id, operation.name):
+                return operation
+        return None
+
     def _emit_group_start(self, step):
         action = self._action_of(step)
         device_name = self._name_of(step)
@@ -313,7 +348,11 @@ class _RunnerThread(QtCore.QThread):
             return
 
         try:
-            if action == "Stream":
+            operation = self._operation_for_device(device, action)
+            handler = operation.handler if operation is not None else None
+            if handler is not None:
+                handler(self, step_idx, device, device_name, params, duration)
+            elif action == "Stream":
                 self._run_stream(step_idx, device, device_name, params, duration)
             elif action in ("force_current",):
                 self._run_force_current(step_idx, device, device_name, params)
@@ -388,36 +427,21 @@ class _RunnerThread(QtCore.QThread):
 
         use_rhs = (getattr(device, "storage_mode", "csv") == "rhs"
                    and hasattr(device, "start_recording_session"))
-        storage_mode = getattr(device, "storage_mode", "csv")
-        sink = None
         rhs_folder = None
         if use_rhs:
             # RHX writes the raw .rhs itself (Traditional format), one folder
             # per stage, named like the CSV chunk prefix.
             rhs_folder = device.start_recording_session(dev_raw_dir, file_prefix)
-        elif storage_mode == "hdf5":
-            sink = Hdf5ChunkWriter(
-                sample_rate=sr,
-                num_channels=num_ch,
-                channel_names=ch_labels,
-                chunk_max_sec=RAW_CHUNK_SEC,
-                flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
-            )
-            sink.raw_chunks_dir = dev_raw_dir
-            sink.filename_prefix = file_prefix
-            sink._open_new_chunk_locked()
+            sink = None
         else:
-            sink = ChunkWriter(
+            sink = create_output_sink(
+                device,
                 sample_rate=sr,
-                num_channels=num_ch,
                 channel_names=ch_labels,
-                chunk_max_sec=RAW_CHUNK_SEC,
-                buffer_bytes=CSV_FILE_BUFFER_BYTES,
+                raw_dir=dev_raw_dir,
+                file_prefix=file_prefix,
                 flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
             )
-            sink.raw_chunks_dir = dev_raw_dir
-            sink.filename_prefix = file_prefix
-            sink._open_new_chunk_locked()
 
         device.start_acquisition()
         append_telemetry_line(
@@ -610,18 +634,14 @@ class _RunnerThread(QtCore.QThread):
         dev_raw_dir = self._run_path / "raw" / self._raw_device_key(device, device_name)
         dev_raw_dir.mkdir(parents=True, exist_ok=True)
 
-        sink = ChunkWriter(
-            sample_rate=sr,
-            num_channels=num_ch,
-            channel_names=ch_labels,
-            chunk_max_sec=RAW_CHUNK_SEC,
-            buffer_bytes=CSV_FILE_BUFFER_BYTES,
-            flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
-        )
         file_label = re.sub(r"[^A-Za-z0-9._-]+", "_", str(label)).strip("._") or "ForceCurrent"
-        sink.raw_chunks_dir = dev_raw_dir
-        sink.filename_prefix = f"{step_idx + 1:06d}_{file_label}"
-        sink._open_new_chunk_locked()
+        sink = create_output_sink(
+            device,
+            sample_rate=sr,
+            channel_names=ch_labels,
+            raw_dir=dev_raw_dir,
+            file_prefix=f"{step_idx + 1:06d}_{file_label}",
+        )
 
         device.start_acquisition()
         append_telemetry_line(

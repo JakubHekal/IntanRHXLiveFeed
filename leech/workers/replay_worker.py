@@ -33,9 +33,22 @@ class ReplayWorker(QtCore.QObject):
         self._chunk_idx = 0
 
     def start(self):
+        metadata = self._metadata()
+        storage = metadata.get("storage") if isinstance(metadata.get("storage"), dict) else {}
+        fmt = storage.get("format") or "csv"
+        if fmt != "csv":
+            self.error.emit(f"Replay supports CSV only (run storage format: {fmt})")
+            return
         chunks_dir = self._device_dir
         if chunks_dir is None:
-            chunks_dir = self._run_path / "raw"
+            data_dir = storage.get("data_dir")
+            if isinstance(data_dir, str) and data_dir:
+                chunks_dir = self._run_path / data_dir
+            else:
+                chunks_dir = self._run_path / "raw"
+            # Legacy runs without a recorded location may use raw_chunks/.
+            if not chunks_dir.exists() and chunks_dir.name == "raw":
+                chunks_dir = self._run_path / "raw_chunks"
         if not chunks_dir.exists():
             self.error.emit(f"No raw/ dir in {chunks_dir}")
             return
@@ -104,6 +117,8 @@ class ReplayWorker(QtCore.QObject):
 
     @staticmethod
     def _read_chunk(path):
+        if path.stat().st_size == 0:
+            return None
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             header = next(csv.reader(handle), [])
         excluded = {"time_s", "marker_id", "marker_name"}
@@ -121,19 +136,21 @@ class ReplayWorker(QtCore.QObject):
             ndmin=2,
         )
         if data.size == 0:
-            raise ValueError(f"No samples in {path.name}")
+            return None
         return data.T
 
     def _emit_next_chunk(self):
-        if self._chunk_idx >= len(self._chunk_files):
-            self._timer.stop()
-            self.finished.emit()
-            return
-
-        csv_path = self._chunk_files[self._chunk_idx]
-        self._chunk_idx += 1
-        try:
-            data = self._read_chunk(csv_path)
+        while self._chunk_idx < len(self._chunk_files):
+            csv_path = self._chunk_files[self._chunk_idx]
+            self._chunk_idx += 1
+            try:
+                data = self._read_chunk(csv_path)
+            except Exception as exc:
+                self.error.emit(f"Could not replay {csv_path.name}: {exc}")
+                continue
+            if data is None:
+                continue
             self.data_received.emit(self._device_name, data)
-        except Exception as exc:
-            self.error.emit(f"Could not replay {csv_path.name}: {exc}")
+            return
+        self._timer.stop()
+        self.finished.emit()

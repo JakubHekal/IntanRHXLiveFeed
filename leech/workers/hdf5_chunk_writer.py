@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 import numpy as np
 
@@ -24,7 +23,6 @@ class Hdf5ChunkWriter:
         num_channels: int = 1,
         channel_names: Optional[List[str]] = None,
         chunk_max_sec: float = 300.0,
-        buffer_bytes: int = 0,
         flush_interval_sec: float = 1.0,
     ) -> None:
         self.sample_rate = float(sample_rate)
@@ -48,24 +46,6 @@ class Hdf5ChunkWriter:
         self._markers_id: Any = None
         self._markers_name: Any = None
         self._last_flush = 0.0
-
-    @property
-    def sample_index(self) -> int:
-        return self._total_samples
-
-    def start_session(self, project_name: str, project_path: Any = None) -> tuple:
-        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(project_name)).strip("._") or "session"
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        root = Path(project_path) if project_path is not None else Path.cwd()
-        run_dir = root / f"{safe}_{stamp}"
-        self.raw_chunks_dir = run_dir / "raw_chunks"
-        self.raw_chunks_dir.mkdir(parents=True, exist_ok=True)
-        self._chunk_index = 0
-        self._total_samples = 0
-        self._raw_chunk_paths = []
-        self._close_file()
-        self._open_new_chunk_locked()
-        return run_dir, self.raw_chunks_dir
 
     def append_data(self, arr: np.ndarray, marker_info: Any = None, force_flush: bool = False) -> None:
         data = np.asarray(arr)
@@ -98,13 +78,6 @@ class Hdf5ChunkWriter:
     def close(self) -> None:
         self._flush_locked()
         self._close_file()
-
-    def get_paths(self) -> Dict[str, Any]:
-        return {
-            "raw_chunks_dir": str(self.raw_chunks_dir) if self.raw_chunks_dir else None,
-            "current_chunk": str(self._current_chunk_path) if self._current_chunk_path else None,
-            "chunks": [str(p) for p in self._raw_chunk_paths],
-        }
 
     def _open_new_chunk_locked(self) -> None:
         import h5py

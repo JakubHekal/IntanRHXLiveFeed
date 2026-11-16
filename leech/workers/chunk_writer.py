@@ -2,12 +2,10 @@
 ChunkWriter: Manages CSV chunk file I/O, rotation, and persistence.
 
 Encapsulates all CSV writing, chunk rotation, and file buffering logic
-to reduce RHXWorker complexity.
+to keep the experiment runner simple.
 """
 import csv
 import time
-import re
-from pathlib import Path
 from PyQt5 import QtCore
 import numpy as np
 
@@ -37,49 +35,6 @@ class ChunkWriter:
         self.filename_prefix = None
         self._io_mutex = QtCore.QMutex()
 
-    @property
-    def sample_index(self) -> int:
-        return getattr(self, "csv_sample_counter", 0)
-    
-    def start_session(self, project_name, project_path):
-        """
-        Create project directories and initialize CSV writer.
-        
-        Args:
-            project_name: Name of the project (for directory naming).
-            project_path: Base directory path for recordings.
-        
-        Returns:
-            Tuple of (project_run_dir, raw_chunks_dir).
-        """
-        with QtCore.QMutexLocker(self._io_mutex):
-            safe_project = re.sub(r"[^A-Za-z0-9._-]+", "_", str(project_name).strip()) or "project"
-            timestamp = time.time()
-            from datetime import datetime
-            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
-            base_dir = Path(project_path).expanduser() if project_path else (Path.cwd() / "recordings")
-            base_dir.mkdir(parents=True, exist_ok=True)
-            
-            project_run_dir = base_dir / f"{safe_project}_{timestamp_str}"
-            raw_chunks_dir = project_run_dir / "raw_chunks"
-            project_run_dir.mkdir(parents=True, exist_ok=True)
-            raw_chunks_dir.mkdir(parents=True, exist_ok=True)
-            
-            self.raw_chunks_dir = raw_chunks_dir
-            self.project_run_dir = project_run_dir
-            self._chunk_index = 0
-            self._chunk_samples_written = 0
-            self._raw_chunk_paths = []
-            self._current_chunk_path = None
-            self.csv_sample_counter = 0
-            self._chunks_since_flush = 0
-            self._last_csv_flush_t = time.perf_counter()
-            
-            self._open_new_chunk_locked()
-            
-            return project_run_dir, raw_chunks_dir
-    
     def append_data(self, arr: np.ndarray, marker_info: dict = None, force_flush: bool = False):
         if arr.ndim != 2 or arr.shape[0] < 1 or arr.shape[1] < 1:
             return
@@ -109,26 +64,21 @@ class ChunkWriter:
                 seg = arr[:, offset:offset + take].astype(np.float64, copy=False)
                 times = (seg_start + np.arange(take, dtype=np.float64)) * inv_fs
 
-                if not has_marker:
-                    buf = []
-                    for i in range(take):
-                        ch_vals = ",".join(f"{seg[ch, i]:.4f}" for ch in range(num_ch))
-                        buf.append(f"{times[i]:.6f},{ch_vals},0,\n")
-                    self.csv_file_handle.writelines(buf)
-                else:
-                    marker_ids = np.zeros(take, dtype=np.int64)
-                    marker_names = [""] * take
+                marker_ids = np.zeros(take, dtype=np.int64) if has_marker else None
+                marker_names = [""] * take
+                if has_marker:
                     for sample_idx, marker_rec in marker_info.items():
                         if sample_idx < seg_start or sample_idx >= seg_start + take:
                             continue
                         local = sample_idx - seg_start
                         marker_ids[local] = int(marker_rec.get("id", 0))
                         marker_names[local] = str(marker_rec.get("name", ""))
-                    rows = []
-                    for i in range(take):
-                        ch_vals = [f"{seg[ch, i]:.4f}" for ch in range(num_ch)]
-                        rows.append([f"{times[i]:.6f}"] + ch_vals + [int(marker_ids[i]), marker_names[i]])
-                    self.csv_writer.writerows(rows)
+                rows = []
+                for i in range(take):
+                    ch_vals = [f"{seg[ch, i]:.4f}" for ch in range(num_ch)]
+                    marker_id = int(marker_ids[i]) if has_marker else 0
+                    rows.append([f"{times[i]:.6f}"] + ch_vals + [marker_id, marker_names[i]])
+                self.csv_writer.writerows(rows)
 
                 self._chunk_samples_written += take
                 offset += take
@@ -160,9 +110,10 @@ class ChunkWriter:
         )
         self.csv_writer = csv.writer(self.csv_file_handle)
         if self.channel_names and len(self.channel_names) == self.num_channels:
-            header = ["time_s"] + [f"{n}_uV" for n in self.channel_names] + ["marker_id", "marker_name"]
+            channel_columns = [f"{n}_uV" for n in self.channel_names]
         else:
-            header = ["time_s"] + [f"ch_{i}_uV" for i in range(self.num_channels)] + ["marker_id", "marker_name"]
+            channel_columns = [f"ch_{i}_uV" for i in range(self.num_channels)]
+        header = ["time_s"] + channel_columns + ["marker_id", "marker_name"]
         self.csv_writer.writerow(header)
         self._chunk_samples_written = 0
         self._current_chunk_path = path
@@ -195,12 +146,3 @@ class ChunkWriter:
             self.csv_file_handle = None
             self.csv_writer = None
             self._current_chunk_path = None
-    
-    def get_paths(self):
-        """Return current project paths (thread-safe snapshot)."""
-        with QtCore.QMutexLocker(self._io_mutex):
-            return {
-                "raw_chunks_dir": str(self.raw_chunks_dir) if self.raw_chunks_dir else "",
-                "current_chunk": str(self._current_chunk_path) if self._current_chunk_path else "",
-                "chunks": list(self._raw_chunk_paths),
-            }

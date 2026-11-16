@@ -23,6 +23,7 @@ class DeviceOperation:
     instantaneous: bool = False
     params: List[ParamDef] = field(default_factory=list)
     color: str = "#0078D4"
+    handler: Optional[Any] = None
 
     @property
     def operation_id(self):
@@ -119,10 +120,5 @@ class Device(ABC):
 
 
 class OutputSink(Protocol):
-    @property
-    def sample_index(self) -> int: ...
-
-    def start_session(self, name: str, project_path: str = None) -> dict: ...
     def append_data(self, arr: np.ndarray, marker_info: dict = None) -> None: ...
     def close(self) -> None: ...
-    def get_paths(self) -> dict: ...
