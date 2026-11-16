@@ -128,7 +128,7 @@ class RegressionTest(unittest.TestCase):
         dialog.reject()
         self.assertEqual(cancelled_device.close_count, 1)
 
-    def test_run_init_and_status_update_keep_schema_v2(self):
+    def test_run_init_and_status_update_keep_schema_v3(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_path = Path(tmp) / "run"
             device_a = "00000000-0000-0000-0000-000000000001"
@@ -152,12 +152,49 @@ class RegressionTest(unittest.TestCase):
                 sequence,
             )
             loaded = ExperimentManager.load_run(run_path)
-            self.assertEqual(loaded["schema_version"], 2)
+            self.assertEqual(loaded["schema_version"], 3)
+            self.assertEqual(loaded["storage"], {"format": "csv", "data_dir": "raw"})
             self.assertEqual(loaded["sequence"][0]["device_id"], device_b)
             ExperimentManager.update_run(run_path, "failed", error_count=2)
             updated = ExperimentManager.load_run(run_path)
             self.assertEqual(updated["run"]["status"], "failed")
             self.assertEqual(updated["run"]["error_count"], 2)
+
+    def test_hdf5_run_is_refused_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_path = Path(tmp)
+            (run_path / "run.json").write_text(json.dumps({
+                "schema_version": 3,
+                "devices": [],
+                "sequence": [],
+                "storage": {"format": "hdf5", "data_dir": "raw"},
+            }), encoding="utf-8")
+            errors = []
+            worker = ReplayWorker(run_path, "A")
+            worker.error.connect(errors.append)
+            worker.start()
+            self.assertEqual(len(errors), 1)
+            self.assertIn("CSV only", errors[0])
+
+    def test_rerun_into_non_empty_dir_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exp_path = Path(tmp) / "exp"
+            run_path = exp_path / "runs" / "run1"
+            run_path.mkdir(parents=True)
+            (run_path / "keep.txt").write_text("old", encoding="utf-8")
+            with self.assertRaises(FileExistsError):
+                ExperimentManager.start_run(exp_path, "run1")
+
+    def test_rename_corrupt_metadata_leaves_original_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exp_path = Path(tmp)
+            src = exp_path / "old"
+            src.mkdir()
+            (src / "run.json").write_text("{not json", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                ExperimentManager.rename_run(src, "new")
+            self.assertTrue(src.exists())
+            self.assertFalse((exp_path / "new").exists())
 
 
 if __name__ == "__main__":

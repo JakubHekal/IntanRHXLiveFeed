@@ -5,6 +5,9 @@ from pathlib import Path
 
 from leech.experiment.experiment import ExperimentManager
 from leech.experiment.migrations import (
+    CONFIG_SCHEMA_VERSION,
+    RUN_SCHEMA_VERSION,
+    MigrationError,
     UnsupportedSchemaError,
     migrate_config_data,
     migrate_device_config,
@@ -48,7 +51,7 @@ class MigrationTest(unittest.TestCase):
             ExperimentManager.save(root, config, backup=True)
             self.assertTrue((root / "config.json.bak").exists())
             saved = json.loads((root / "config.json").read_text(encoding="utf-8"))
-            self.assertEqual(saved["schema_version"], 2)
+            self.assertEqual(saved["schema_version"], 3)
             self.assertEqual(saved["devices"][0]["config"]["custom"], 7)
             self.assertEqual(saved["sequence"][0]["device_id"], config.devices[0]["device_id"])
             self.assertEqual(saved["sequence"][1]["device_id"], "system")
@@ -153,13 +156,120 @@ class MigrationTest(unittest.TestCase):
             ],
         }
         migrated, _ = migrate_run_data(data)
-        self.assertEqual(migrated["schema_version"], 2)
+        self.assertEqual(migrated["schema_version"], 3)
         self.assertNotEqual(
             migrated["devices"][0]["device_id"],
             migrated["devices"][1]["device_id"],
         )
         self.assertEqual(migrated["sequence"][0]["device_id"], migrated["devices"][0]["device_id"])
         self.assertEqual(migrated["sequence"][1]["device_id"], migrated["devices"][1]["device_id"])
+
+    def test_flat_legacy_metadata_loads_and_updates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_path = Path(tmp)
+            (run_path / "metadata.json").write_text(
+                json.dumps({"name": "Old", "status": "running"}), encoding="utf-8"
+            )
+            loaded = ExperimentManager.load_run(run_path)
+            self.assertEqual(loaded["schema_version"], RUN_SCHEMA_VERSION)
+            self.assertEqual(loaded["storage"]["data_dir"], "raw")
+
+            ExperimentManager.update_run(run_path, "completed")
+            updated = json.loads(
+                (run_path / "metadata.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(updated["status"], "completed")
+            self.assertTrue(updated["end_time"])
+
+    def test_schema_2_run_without_blocks_is_accepted(self):
+        device_id = "00000000-0000-0000-0000-00000000000a"
+        migrated, _ = migrate_run_data({
+            "schema_version": 2,
+            "devices": [{
+                "device_id": device_id,
+                "name": "A",
+                "device_type": "rhx",
+                "config": {},
+            }],
+            "sequence": [],
+        })
+        self.assertEqual(migrated["devices"][0]["blocks"], [])
+
+    def test_non_dict_post_processing_raises(self):
+        with self.assertRaises(MigrationError):
+            migrate_config_data({
+                "schema_version": CONFIG_SCHEMA_VERSION,
+                "devices": [],
+                "sequence": [],
+                "execution_control": {"required_devices": []},
+                "post_processing": ["not-a-dict"],
+            })
+
+    def test_device_step_with_action_keeps_device_id(self):
+        device_id = "00000000-0000-0000-0000-00000000000b"
+        migrated, _ = migrate_config_data({
+            "schema_version": 1,
+            "devices": [{
+                "device_id": device_id,
+                "name": "Rig",
+                "device_type": "rhx",
+                "config": {},
+            }],
+            "sequence": [{
+                "step_id": 1,
+                "action": "pause",
+                "parameters": {},
+                "device_id": device_id,
+                "device_name": "Rig",
+            }],
+        })
+        self.assertEqual(migrated["sequence"][0]["device_id"], device_id)
+        self.assertEqual(migrated["sequence"][0]["device_name"], "Rig")
+
+    def test_config_v2_to_v3_drops_is_locked(self):
+        migrated, report = migrate_config_data({
+            "schema_version": 2,
+            "execution_control": {"is_locked": True, "required_devices": []},
+            "devices": [],
+            "sequence": [],
+            "post_processing": [],
+        })
+        self.assertEqual(migrated["schema_version"], 3)
+        self.assertNotIn("is_locked", migrated["execution_control"])
+        self.assertTrue(report.changed)
+
+    def test_run_v2_to_v3_stamps_storage_data_dir(self):
+        migrated, _ = migrate_run_data({
+            "schema_version": 2,
+            "devices": [],
+            "sequence": [],
+        })
+        self.assertEqual(migrated["schema_version"], 3)
+        self.assertEqual(migrated["storage"], {"format": "csv", "data_dir": "raw"})
+
+    def test_every_declared_schema_version_has_a_migration_step(self):
+        for version in range(CONFIG_SCHEMA_VERSION):
+            migrated, _ = migrate_config_data({
+                "schema_version": version,
+                "devices": [],
+                "sequence": [],
+                "execution_control": {"required_devices": []},
+                "post_processing": [],
+            })
+            self.assertEqual(
+                migrated["schema_version"], CONFIG_SCHEMA_VERSION,
+                f"config chain missing step from version {version}",
+            )
+        for version in range(RUN_SCHEMA_VERSION):
+            migrated, _ = migrate_run_data({
+                "schema_version": version,
+                "devices": [],
+                "sequence": [],
+            })
+            self.assertEqual(
+                migrated["schema_version"], RUN_SCHEMA_VERSION,
+                f"run chain missing step from version {version}",
+            )
 
 
 if __name__ == "__main__":
