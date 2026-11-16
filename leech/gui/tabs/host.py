@@ -3,7 +3,7 @@ import time
 import pyqtgraph as pg
 from PyQt5 import QtWidgets, QtCore
 
-from leech.gui.plot_helpers import PLOT_UPDATE_FREQ_HZ
+from leech.gui.plot_helpers import PLOT_UPDATE_FREQ_HZ, DISPLAY_BUFFER_SEC
 from leech.gui.ring_buffer import RingBuffer
 
 
@@ -16,10 +16,6 @@ PLANNING_EMPTY_MESSAGE = (
 
 class TabHost(QtWidgets.QWidget):
 
-    toggle_receiving_request_signal = QtCore.pyqtSignal(bool)
-    save_disconnect_request_signal  = QtCore.pyqtSignal()
-    marker_request_signal           = QtCore.pyqtSignal()
-    auto_follow_changed_signal      = QtCore.pyqtSignal(bool)
     fps_updated = QtCore.pyqtSignal(str)
 
     def __init__(self, parent=None):
@@ -115,7 +111,7 @@ class TabHost(QtWidgets.QWidget):
             if sample_rate > 0 and hasattr(tab, 'sampling_rate'):
                 tab.sampling_rate = float(sample_rate)
                 if not getattr(tab, "owns_ring", False):
-                    tab._ring = RingBuffer(tab.sampling_rate, tab._ring.num_channels, duration_sec=300)
+                    tab._ring = RingBuffer(tab.sampling_rate, tab._ring.num_channels, duration_sec=DISPLAY_BUFFER_SEC)
 
     def clear_all(self):
         for name in list(self._tabs):
@@ -139,7 +135,10 @@ class TabHost(QtWidgets.QWidget):
         t0 = time.perf_counter()
         did_work = False
         for tab in self._tabs.values():
+            if not getattr(tab, '_render_requested', False):
+                continue
             if hasattr(tab, 'render'):
+                tab._render_requested = False
                 tab.render()
                 did_work = True
         now = time.perf_counter()
@@ -159,11 +158,6 @@ class TabHost(QtWidgets.QWidget):
                 tab.set_receiving_state(receiving)
 
     # ── Markers ────────────────────────────────────────────────────────────
-
-    def add_marker(self, marker):
-        tab = self._active_tab()
-        if tab is not None and hasattr(tab, 'add_marker'):
-            tab.add_marker(marker)
 
     def set_marker_catalog(self, markers):
         tab = self._active_tab()
@@ -192,17 +186,6 @@ class TabHost(QtWidgets.QWidget):
                 tab.clear_snapshots()
 
     # ── Auto-follow ────────────────────────────────────────────────────────
-
-    def is_auto_follow_enabled(self) -> bool:
-        tab = self._active_tab()
-        if tab is not None and hasattr(tab, 'is_auto_follow_enabled'):
-            return tab.is_auto_follow_enabled()
-        return True
-
-    def set_auto_follow(self, enabled: bool):
-        for tab in self._tabs.values():
-            if hasattr(tab, 'set_auto_follow'):
-                tab.set_auto_follow(enabled)
 
     def changeEvent(self, event):
         if event.type() == QtCore.QEvent.WindowStateChange:

@@ -14,11 +14,6 @@ RAW_MANUAL_VIEW_MARGIN_SEC = 2.0
 MAX_RAW_HISTORY_PLOT_POINTS = 200000
 
 
-def _make_display_buffer(fs: float, num_channels=1) -> np.ndarray:
-    n = max(1, int(round(fs * DISPLAY_BUFFER_SEC)))
-    return np.zeros((1 + num_channels, n), dtype=np.float64)
-
-
 def _minmax_downsample(x, y, max_points):
     n = x.size
     if n <= max_points:

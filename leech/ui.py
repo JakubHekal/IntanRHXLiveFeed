@@ -8,7 +8,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor, QIcon
+from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
     QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton, QStatusBar,
@@ -21,7 +21,7 @@ from leech.experiment import (
     ExperimentManager, ExperimentDialog, RunExperimentDialog, MigrationError,
 )
 from leech.experiment.experiment import (
-    ExperimentConfig, SequenceStep, _config_to_dict,
+    ExperimentConfig, SequenceStep, _config_to_dict, normalize_device_record,
     SYSTEM_DEVICE_ID, SYSTEM_DEVICE_TYPE,
 )
 from leech.experiment.migrations import migrate_device_config
@@ -29,7 +29,7 @@ from leech.telemetry_logger import append_telemetry_line, set_telemetry_file
 from leech import __version__
 from leech.updater import UpdateCheckThread, UpdateInfo
 from leech.experiment.experiment_runner import ExperimentRunner, sanitize_raw_key
-from leech.device.registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
+from leech.device.registry import DEVICE_CLASSES, _SYSTEM_OPERATIONS
 from leech.screens.timeline import ExperimentTimeline
 from leech.screens.stage import FluentExpander, LeftSidebar, RightSidebar, MainStage
 from leech.plot_settings import save_recent_experiment, load_recent_experiment, load_geometry, save_geometry
@@ -42,22 +42,12 @@ ACCENT_BLUE = "#0078D4"
 
 
 def _prepare_device_record(record):
-    if not isinstance(record, dict):
-        raise MigrationError("Device record must be an object")
-    item = deepcopy(record)
-    device_type = item.get("device_type", "unknown")
-    device_class = _DEVICE_CLASSES.get(device_type)
-    config_version = item.get("config_version", 1)
-    if device_class is None:
-        current_config = item.get("config", {})
-        if not isinstance(current_config, dict):
-            raise MigrationError(f"{device_type} config must be an object")
-    else:
-        current_config, config_version, _ = migrate_device_config(
-            device_class, item.get("config", {}), config_version
+    item = normalize_device_record(record)
+    device_class = DEVICE_CLASSES.get(item["device_type"])
+    if device_class is not None:
+        item["config"], item["config_version"], _ = migrate_device_config(
+            device_class, item["config"], item["config_version"]
         )
-    item["config"] = current_config
-    item["config_version"] = config_version
     return item
 
 
@@ -171,7 +161,7 @@ class MainWindow(QMainWindow):
         tab_host = self.main_stage.tab_host
         if tab_host.has_tab(key):
             return
-        cls = _DEVICE_CLASSES.get(device_type)
+        cls = DEVICE_CLASSES.get(device_type)
         if cls is None:
             return
         if not sample_rate:
@@ -219,7 +209,6 @@ class MainWindow(QMainWindow):
         self._check_update_action = help_menu.addAction("Check for Updates")
         help_menu.addSeparator()
         self._about_action = help_menu.addAction("About")
-        help_menu.addAction("Documentation")
         help_btn = self._create_menu_button("Help", help_menu)
         menubar_layout.addWidget(help_btn)
 
@@ -349,7 +338,7 @@ class MainWindow(QMainWindow):
                 if key not in ("duration_s", "_start", "start_s")
             }
             operation_id = step.get("operation_id", step.get("action", ""))
-            device_class = _DEVICE_CLASSES.get(timeline._devices[dev_idx][2])
+            device_class = DEVICE_CLASSES.get(timeline._devices[dev_idx][2])
             if device_class:
                 operation_id = device_class.canonical_operation_id(operation_id)
             timeline.add_block(
@@ -372,6 +361,9 @@ class MainWindow(QMainWindow):
             ExperimentManager.rename_run(run_path, new_name)
         except FileExistsError:
             QMessageBox.warning(self, "Rename Failed", f"Run '{new_name}' already exists.")
+            return
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Rename Failed", str(exc))
             return
         if self._current_experiment_path:
             self.main_stage.left_sidebar.reload_runs(str(Path(self._current_experiment_path) / "runs"))
@@ -513,7 +505,9 @@ class MainWindow(QMainWindow):
                 step_id += 1
         config.sequence = sequence
         try:
-            ExperimentManager.save(self._current_experiment_path, config)
+            ExperimentManager.save(
+                self._current_experiment_path, config, backup=config.migration_changed
+            )
         except (OSError, MigrationError, TypeError, ValueError) as exc:
             QMessageBox.warning(self, "Save Failed", str(exc))
             return
@@ -552,7 +546,7 @@ class MainWindow(QMainWindow):
             if d[2] == SYSTEM_DEVICE_TYPE:
                 continue
             device_type = d[2]
-            cls = _DEVICE_CLASSES.get(device_type)
+            cls = DEVICE_CLASSES.get(device_type)
             param_defs = cls.get_config_params() if cls else []
             current_config = d[3] if len(d) >= 4 else {}
             device_groups.append({
@@ -584,7 +578,7 @@ class MainWindow(QMainWindow):
                 merged_config = deepcopy(device[3]) if isinstance(device[3], dict) else {}
                 merged_config.update(deepcopy(current_config))
                 device[3] = merged_config
-                device_class = _DEVICE_CLASSES.get(device[2])
+                device_class = DEVICE_CLASSES.get(device[2])
                 if device_class:
                     device.config_version = getattr(device_class, "config_version", 1)
             self._run_device_instances, self._run_device_instance_map = dialog.take_devices()
@@ -678,7 +672,7 @@ class MainWindow(QMainWindow):
             self._close_devices()
             return
         devices_info = [
-            {
+            normalize_device_record({
                 "device_id": getattr(device, "device_id", ""),
                 "name": device[0],
                 "device_type": device[2],
@@ -694,8 +688,8 @@ class MainWindow(QMainWindow):
                     }
                     for block in device[1]
                 ],
-            }
-            for device in timeline_devs if device[2] != SYSTEM_DEVICE_TYPE
+            }, index)
+            for index, device in enumerate(timeline_devs) if device[2] != SYSTEM_DEVICE_TYPE
         ]
         sequence_info = [
             {
@@ -838,12 +832,20 @@ class MainWindow(QMainWindow):
             config = device.get("config", {})
         else:
             device_id = ""
-            device_name = metadata.get("name", Path(run_path).name)
+            device_name = metadata.get("device_name") or Path(run_path).name
             device_type = metadata.get("device_type", "unknown")
             config = metadata
         sample_rate = config.get("sample_rate", 20000.0)
         num_channels = config.get("num_channels", 1)
-        raw_root = Path(run_path) / "raw"
+        storage = metadata.get("storage") if isinstance(metadata.get("storage"), dict) else {}
+        fmt = storage.get("format") or "csv"
+        if fmt != "csv":
+            QMessageBox.warning(
+                self, "Replay", f"Replay supports CSV only (run storage format: {fmt})."
+            )
+            return
+        data_dir = storage.get("data_dir")
+        raw_root = Path(run_path) / (data_dir if isinstance(data_dir, str) and data_dir else "raw")
         # New format first (name_id), then id-only and name-only legacy layouts.
         candidates = []
         if device_id:
@@ -852,6 +854,14 @@ class MainWindow(QMainWindow):
         if device_name:
             candidates.append(raw_root / sanitize_raw_key(str(device_name)))
         device_dir = next((c for c in candidates if c.exists()), None)
+        if device_dir is None and raw_root.name == "raw":
+            raw_root = Path(run_path) / "raw_chunks"
+            candidates = [
+                raw_root / sanitize_raw_key(f"{device_name}_{device_id}") if device_id else None,
+                raw_root / sanitize_raw_key(device_id) if device_id else None,
+                raw_root / sanitize_raw_key(str(device_name)),
+            ]
+            device_dir = next((c for c in candidates if c is not None and c.exists()), None)
         if device_dir is None or not device_dir.exists():
             QMessageBox.warning(self, "Replay", f"No raw data found for {device_name or device_type}")
             return
@@ -993,7 +1003,7 @@ class MainWindow(QMainWindow):
                 if key not in ("duration_s", "_start", "start_s")
             }
             operation_id = step.operation_id or step.action
-            device_class = _DEVICE_CLASSES.get(timeline._devices[dev_idx][2])
+            device_class = DEVICE_CLASSES.get(timeline._devices[dev_idx][2])
             if device_class:
                 operation_id = device_class.canonical_operation_id(operation_id)
             timeline.add_block(

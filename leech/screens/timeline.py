@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import QWidget, QMenu, QInputDialog, QMessageBox, QPushButt
 
 from leech.experiment.migrations import SYSTEM_DEVICE_ID, SYSTEM_DEVICE_TYPE, new_device_id
 
-from leech.device.registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
+from leech.device.registry import DEVICE_CLASSES, _SYSTEM_OPERATIONS
 
 
 class DeviceRow(list):
@@ -134,8 +134,8 @@ class ExperimentTimeline(QWidget):
             self._device_counter += 1
             name = f"Device {self._device_counter}"
         if device_type is None:
-            device_type = next(iter(_DEVICE_CLASSES))
-        cls = _DEVICE_CLASSES.get(device_type)
+            device_type = next(iter(DEVICE_CLASSES))
+        cls = DEVICE_CLASSES.get(device_type)
         if config is None:
             config = {}
             if cls:
@@ -161,7 +161,7 @@ class ExperimentTimeline(QWidget):
     def add_device_dialog(self):
         if not self._edit_mode:
             return
-        choices = sorted(_DEVICE_CLASSES.items(), key=lambda item: item[1].name)
+        choices = sorted(DEVICE_CLASSES.items(), key=lambda item: item[1].name)
         labels = [f"{cls.name} ({device_type})" for device_type, cls in choices]
         label, ok = QInputDialog.getItem(self, "Add Device", "Device type:", labels, 0, False)
         if not ok or not label:
@@ -170,7 +170,7 @@ class ExperimentTimeline(QWidget):
             device_type for device_type, cls in choices
             if f"{cls.name} ({device_type})" == label
         )
-        cls = _DEVICE_CLASSES[device_type]
+        cls = DEVICE_CLASSES[device_type]
         name, ok = QInputDialog.getText(self, "Add Device", "Device name:", text=cls.name)
         if not ok:
             return
@@ -183,7 +183,7 @@ class ExperimentTimeline(QWidget):
     def _operations_for_device(self, device_type):
         if device_type == SYSTEM_DEVICE_TYPE:
             return _SYSTEM_OPERATIONS
-        cls = _DEVICE_CLASSES.get(device_type)
+        cls = DEVICE_CLASSES.get(device_type)
         return cls.get_operations() if cls else []
 
     def _device_name_at(self, mx, my):
@@ -263,32 +263,6 @@ class ExperimentTimeline(QWidget):
         self._active_block = None
         self.update()
 
-    def set_active_step(self, step_index):
-        count = 0
-        for i, row in enumerate(self._devices):
-            if row[2] == SYSTEM_DEVICE_TYPE:
-                continue
-            blocks = row[1]
-            if step_index < count + len(blocks):
-                self._active_dev = i
-                self._active_block = step_index - count
-                break
-            count += len(blocks)
-        else:
-            self._active_dev = None
-            self._active_block = None
-
-        start, dur = self._step_timeline_range(step_index)
-        if start is not None and dur is not None:
-            self._cursor_step_start = start
-            self._cursor_step_end = start + dur
-            self._cursor_wall_start = time.perf_counter()
-            self._cursor_wall_dur = dur if dur > 0 else 1.0
-            self._cursor_time = start
-            if not self._cursor_timer.isActive():
-                self._cursor_timer.start()
-        self.update()
-
     def clear_active_step(self):
         self._active_dev = None
         self._active_block = None
@@ -305,7 +279,7 @@ class ExperimentTimeline(QWidget):
         label = op_name
         color = self._BLOCK_COLORS[len(blocks) % len(self._BLOCK_COLORS)]
         device_type = self._devices[dev_idx][2]
-        device_class = _DEVICE_CLASSES.get(device_type)
+        device_class = DEVICE_CLASSES.get(device_type)
         canonical_op_name = (
             device_class.canonical_operation_id(op_name)
             if device_class and hasattr(device_class, "canonical_operation_id")
@@ -447,20 +421,6 @@ class ExperimentTimeline(QWidget):
             self._cursor_timer.stop()
             self._cursor_time = None
             self.update()
-
-    def _step_timeline_range(self, step_index):
-        # ponytail: iterate in device order matching set_active_step counting,
-        # not sorted by start time — interleaved blocks from different devices
-        # would map to wrong positions when sorted.
-        count = 0
-        for row in self._devices:
-            if row[2] == SYSTEM_DEVICE_TYPE:
-                continue
-            for block in row[1]:
-                if count == step_index:
-                    return block[1], block[2]  # start, dur
-                count += 1
-        return None, None
 
     def _on_cursor_tick(self):
         elapsed = time.perf_counter() - self._cursor_wall_start

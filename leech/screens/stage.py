@@ -2,17 +2,20 @@ import os
 import subprocess
 import sys
 
-from PyQt5.QtCore import QPropertyAnimation, QRect, QSize, Qt, QEasingCurve, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QFontMetrics
+from PyQt5.QtCore import QPropertyAnimation, QSize, Qt, QEasingCurve, pyqtSignal
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QHBoxLayout,
-    QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
-    QPushButton, QScrollArea, QSpinBox, QSplitter, QStyle, QToolButton,
+    QDoubleSpinBox, QFormLayout, QFrame, QHBoxLayout,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
+    QPushButton, QScrollArea, QSplitter,
     QVBoxLayout, QWidget,
 )
 
-from leech.device.registry import _DEVICE_CLASSES, _SYSTEM_OPERATIONS
-from leech.gui.widget_builder import build_param_widget, read_param_widget
+from leech.device.registry import DEVICE_CLASSES, _SYSTEM_OPERATIONS
+from leech.gui.widget_builder import (
+    build_param_widget, read_param_widget, populate_form_from_params,
+    connect_param_signals, gather_params,
+)
 from leech.plot_settings import load_list, save_list
 from leech.experiment.migrations import SYSTEM_DEVICE_TYPE
 from .timeline import ExperimentTimeline
@@ -310,22 +313,10 @@ class RightSidebar(QFrame):
         self._device_expander.hide()
         self._update_visibility()
 
-    def _populate_dynamic_form(self, form_layout, param_defs, current_values, store):
-        from leech.gui.widget_builder import populate_form_from_params
-        populate_form_from_params(form_layout, param_defs, current_values, store)
-
-    def _connect_param_signals(self, store, slot):
-        from leech.gui.widget_builder import connect_param_signals
-        connect_param_signals(store, slot)
-
-    def _gather_params(self, store):
-        from leech.gui.widget_builder import gather_params
-        return gather_params(store)
-
     def _emit_block_params(self):
         if self._block_dev_idx < 0 or self._block_idx < 0:
             return
-        params = self._gather_params(self._block_param_widgets)
+        params = gather_params(self._block_param_widgets)
         self.block_change_requested.emit(
             self._block_dev_idx, self._block_idx,
             self._block_name.text(),
@@ -337,7 +328,7 @@ class RightSidebar(QFrame):
     def _emit_device_params(self):
         if self._device_idx < 0:
             return
-        params = self._gather_params(self._device_param_widgets)
+        params = gather_params(self._device_param_widgets)
         self.device_config_changed.emit(self._device_idx, params)
 
     def _set_duration_visible(self, visible):
@@ -385,15 +376,15 @@ class RightSidebar(QFrame):
         if op_name and device_type:
             ops = _SYSTEM_OPERATIONS if device_type == SYSTEM_DEVICE_TYPE else []
             if not ops:
-                cls = _DEVICE_CLASSES.get(device_type)
+                cls = DEVICE_CLASSES.get(device_type)
                 ops = cls.get_operations() if cls else []
             for op in ops:
                 if op.operation_id == op_name:
                     param_defs = op.params
                     break
 
-        self._populate_dynamic_form(self._bp_dynamic_layout, param_defs, params or {}, self._block_param_widgets)
-        self._connect_param_signals(self._block_param_widgets, self._emit_block_params)
+        populate_form_from_params(self._bp_dynamic_layout, param_defs, params or {}, self._block_param_widgets)
+        connect_param_signals(self._block_param_widgets, self._emit_block_params)
 
         self._update_visibility()
         self._updating = False
@@ -412,10 +403,10 @@ class RightSidebar(QFrame):
         label = f"Device: {device_type}" if device_type else "Device Properties"
         self._device_expander._title_label.setText(label)
 
-        cls = _DEVICE_CLASSES.get(device_type)
+        cls = DEVICE_CLASSES.get(device_type)
         param_defs = cls.get_config_params() if cls else []
-        self._populate_dynamic_form(self._dp_form, param_defs, config or {}, self._device_param_widgets)
-        self._connect_param_signals(self._device_param_widgets, self._emit_device_params)
+        populate_form_from_params(self._dp_form, param_defs, config or {}, self._device_param_widgets)
+        connect_param_signals(self._device_param_widgets, self._emit_device_params)
 
         self._update_visibility()
         self._updating = False

@@ -1,8 +1,10 @@
 import numpy as np
 
+from leech.gui.plot_helpers import DISPLAY_BUFFER_SEC
+
 
 class RingBuffer:
-    def __init__(self, sample_rate: float, num_channels: int, duration_sec: float = 300):
+    def __init__(self, sample_rate: float, num_channels: int, duration_sec: float = DISPLAY_BUFFER_SEC):
         self.sample_rate = sample_rate
         self.num_channels = num_channels
         self.cap = max(100, int(round(sample_rate * duration_sec)))
