@@ -454,6 +454,9 @@ class IntanRHXDevice(Device):
             # runmode, and the TCP output geometry on the next session.
             try:
                 self.set_run_mode("stop")
+                self.set_blocks_per_write(1)
+                self.blocks_per_write = 1
+                self._update_read_size()
             except Exception:
                 pass
             if self.get_run_mode() != 'stop':
@@ -839,6 +842,11 @@ class IntanRHXDevice(Device):
         """
         p = Path(path)
         p.mkdir(parents=True, exist_ok=True)
+        # ponytail: TCPNumberDataBlocksPerWrite must be set while stopped;
+        # runmode=record below makes the board run, so start_streaming()'s set is a no-op (rhs path).
+        self.set_blocks_per_write(1)
+        self.blocks_per_write = 1
+        self._update_read_size()
         self.set_parameter("createnewdirectory", "true")
         self.set_parameter("fileformat", "Traditional")
         self.set_parameter("filename.path", str(p))
