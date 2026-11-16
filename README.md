@@ -5,6 +5,7 @@ Real-time data acquisition, visualization, and recording for electrophysiology h
 ## Supported Devices
 
 - **Intan RHX** - up to 128 channels via TCP/IP
+- **MCS MEA2100** - 60 or 120 electrode channels via USB
 - **miniSMU MS01** - source-measure unit via USB or TCP
 
 ## Features
@@ -12,6 +13,7 @@ Real-time data acquisition, visualization, and recording for electrophysiology h
 - Real-time signal streaming and visualization (raw waveforms, PSD, spike counts, averaged waveforms)
 - Experiment sequencing with drag-and-drop timeline editor
 - Marker management (add, rename, delete, embedded in CSV recordings)
+- HDF5 raw recording (default for MCS MEA2100), with CSV fallback
 - Run history with replay support
 - Dark theme
 
@@ -21,6 +23,7 @@ Real-time data acquisition, visualization, and recording for electrophysiology h
 
 - Python 3.8+
 - For Intan RHX: Intan software running with TCP server enabled
+- For MCS MEA2100: 64-bit Python, .NET Framework 4.7.2, Microsoft Visual C++ 2019 redistributable
 
 ### Install
 

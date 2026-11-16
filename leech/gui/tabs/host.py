@@ -114,7 +114,8 @@ class TabHost(QtWidgets.QWidget):
                 tab._resize(num_channels, channel_labels)
             if sample_rate > 0 and hasattr(tab, 'sampling_rate'):
                 tab.sampling_rate = float(sample_rate)
-                tab._ring = RingBuffer(tab.sampling_rate, tab._ring.num_channels, duration_sec=300)
+                if not getattr(tab, "owns_ring", False):
+                    tab._ring = RingBuffer(tab.sampling_rate, tab._ring.num_channels, duration_sec=300)
 
     def clear_all(self):
         for name in list(self._tabs):

@@ -6,6 +6,7 @@ can do. Screens and UI import from here, never the other way round.
 
 from leech.device.base import DeviceOperation, ParamDef
 from leech.device.intan_rhx import IntanRHXDevice
+from leech.device.mcs_mea import McsMEA2100Device
 from leech.device.simulated import SimulatedRecordingDevice, SimulatedActorDevice, SimulatedCombinedDevice
 
 try:
@@ -16,6 +17,7 @@ except ImportError:
 # device_type -> Device subclass
 _PLUGIN_REGISTRY = {
     IntanRHXDevice.device_type: IntanRHXDevice,
+    McsMEA2100Device.device_type: McsMEA2100Device,
     SimulatedRecordingDevice.device_type: SimulatedRecordingDevice,
     SimulatedActorDevice.device_type: SimulatedActorDevice,
     SimulatedCombinedDevice.device_type: SimulatedCombinedDevice,

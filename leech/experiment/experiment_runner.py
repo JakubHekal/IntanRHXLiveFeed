@@ -10,6 +10,7 @@ RAW_CHUNK_SEC = 300
 CSV_FILE_BUFFER_BYTES = 1024 * 1024
 CSV_FLUSH_INTERVAL_SEC = 1.0
 from leech.workers.chunk_writer import ChunkWriter
+from leech.workers.hdf5_chunk_writer import Hdf5ChunkWriter
 from leech.telemetry_logger import append_telemetry_line
 from leech.experiment.migrations import SYSTEM_DEVICE_ID, SYSTEM_DEVICE_TYPE
 _SYSTEM_ACTIONS = frozenset(("wait_input", "log_event", "pause", "start_recording", "stop_recording"))
@@ -387,12 +388,24 @@ class _RunnerThread(QtCore.QThread):
 
         use_rhs = (getattr(device, "storage_mode", "csv") == "rhs"
                    and hasattr(device, "start_recording_session"))
+        storage_mode = getattr(device, "storage_mode", "csv")
         sink = None
         rhs_folder = None
         if use_rhs:
             # RHX writes the raw .rhs itself (Traditional format), one folder
             # per stage, named like the CSV chunk prefix.
             rhs_folder = device.start_recording_session(dev_raw_dir, file_prefix)
+        elif storage_mode == "hdf5":
+            sink = Hdf5ChunkWriter(
+                sample_rate=sr,
+                num_channels=num_ch,
+                channel_names=ch_labels,
+                chunk_max_sec=RAW_CHUNK_SEC,
+                flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
+            )
+            sink.raw_chunks_dir = dev_raw_dir
+            sink.filename_prefix = file_prefix
+            sink._open_new_chunk_locked()
         else:
             sink = ChunkWriter(
                 sample_rate=sr,
