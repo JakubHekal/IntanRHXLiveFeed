@@ -88,9 +88,10 @@ def _resolve_dll(explicit: str = "") -> Path:
     for path in candidates:
         if path.is_file():
             return path
+    searched = "\n".join(f"  {path}" for path in candidates)
     raise FileNotFoundError(
         "McsUsbNet.dll not found. Set dll_path, MCS_USBNET_DLL, or place it in "
-        "assets/mcs/x64/."
+        f"assets/mcs/x64/.\nSearched:\n{searched}"
     )
 
 

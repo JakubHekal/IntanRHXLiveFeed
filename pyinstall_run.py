@@ -34,10 +34,17 @@ except Exception:
         'leech.experiment.experiment_runner',
     ]
 
+mcs_x64_dir = os.path.join(project_root, "assets", "mcs", "x64")
+mcs_dll = os.path.join(mcs_x64_dir, "McsUsbNet.dll")
+if not os.path.isfile(mcs_dll):
+    raise FileNotFoundError(f"Required MCS USBNET DLL is missing: {mcs_dll}")
+
+hidden_imports.append("h5py")
+
 # Exclusions to strip bloat from the bundle
 exclusions = [
     # AI / ML / Heavy Math
-    'torch', 'tensorflow', 'sklearn', 'numba', 'llvmlite', 'h5py', 'seaborn',
+    'torch', 'tensorflow', 'sklearn', 'numba', 'llvmlite', 'seaborn',
 
     # Unused UI / Qt frameworks (we use PyQt5)
     'PyQt6', 'PySide2', 'PySide6', 'tkinter', 'wx',
@@ -72,11 +79,13 @@ pyinstaller_args = [
     '--name', 'LEECH',
     '--icon', os.path.join(project_root, 'assets', 'icon.ico'),
     '--splash', os.path.join(project_root, 'assets', 'icon.png'),
-    '--add-data', f'{os.path.join(project_root, "assets", "icon.png")};.',
+    '--add-data', f'{os.path.join(project_root, "assets", "icon.png")}{os.pathsep}.',
+    '--add-data', f'{mcs_x64_dir}{os.pathsep}assets/mcs/x64',
     '--onefile',
     '--windowed',
     '--noconfirm',
     '--clean',
+    '--upx-exclude', 'McsUsbNet.dll',
     '--paths', project_root,
 ]
 
