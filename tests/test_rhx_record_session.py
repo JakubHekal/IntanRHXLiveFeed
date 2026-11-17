@@ -42,6 +42,7 @@ class StartRecordingSessionTest(unittest.TestCase):
             out = dev.start_recording_session(root, prefix)
         self.assertEqual(out, str(folder))
         self.assertEqual(calls, [
+            ("TCPNumberDataBlocksPerWrite", 1),
             ("createnewdirectory", "true"),
             ("fileformat", "Traditional"),
             ("filename.path", str(root)),
