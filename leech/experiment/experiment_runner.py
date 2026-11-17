@@ -39,6 +39,10 @@ def create_output_sink(
             channel_names=channel_names,
             chunk_max_sec=RAW_CHUNK_SEC,
             flush_interval_sec=flush_interval_sec,
+            adc_step_uv=float(getattr(device, "voltage_step_uv", 1.0)),
+            adc_bits=int(getattr(device, "adc_bits", 24)),
+            mea_name=getattr(device, "mea_name", None),
+            mea_layout=getattr(device, "mea_layout", None),
         )
     else:
         sink = ChunkWriter(
