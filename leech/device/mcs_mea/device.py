@@ -19,7 +19,11 @@ import numpy as np
 
 from leech.device.base import ChannelInfo, Device, DeviceOperation, ParamDef
 
-from .layout import electrode_positions
+from .layout import (
+    channel_names as layout_channel_names,
+    mea_layout as layout_mea_layout,
+    mea_name as layout_mea_name,
+)
 
 
 _ASSET_DIR = Path(__file__).resolve().parents[3] / "assets" / "mcs" / "x64"
@@ -84,9 +88,10 @@ def _resolve_dll(explicit: str = "") -> Path:
     for path in candidates:
         if path.is_file():
             return path
+    searched = "\n".join(f"  {path}" for path in candidates)
     raise FileNotFoundError(
         "McsUsbNet.dll not found. Set dll_path, MCS_USBNET_DLL, or place it in "
-        "assets/mcs/x64/."
+        f"assets/mcs/x64/.\nSearched:\n{searched}"
     )
 
 
@@ -176,11 +181,31 @@ class McsMEA2100Device(Device):
 
     @property
     def channels(self) -> List[ChannelInfo]:
-        names = [f"CH{i + 1:03d}" for i in range(self._num_channels)]
+        try:
+            names = layout_channel_names(self._num_channels)
+        except ValueError:
+            names = [f"CH{i + 1:03d}" for i in range(self._num_channels)]
         return [
             ChannelInfo(i, label, "input", "uV", -5000.0, 5000.0)
             for i, label in enumerate(names)
         ]
+
+    @property
+    def voltage_step_uv(self) -> float:
+        """ADC step in microvolts, as reported by the connected hardware."""
+        return float(self._voltage_step_uv)
+
+    @property
+    def adc_bits(self) -> int:
+        return 24
+
+    @property
+    def mea_name(self) -> str:
+        return layout_mea_name(self._num_channels)
+
+    @property
+    def mea_layout(self) -> str:
+        return layout_mea_layout(self._num_channels)
 
     def configure(self, **kwargs: Any) -> None:
         new_rate = int(kwargs.get("sample_rate", self._sample_rate))
