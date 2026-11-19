@@ -1,4 +1,4 @@
-"""Checks for RHX-native recording (storage_mode='rhs') + autolaunch plumbing."""
+"""Checks for RHX-native recording (storage_format='rhs') + autolaunch plumbing."""
 import os
 import sys
 import tempfile
@@ -186,7 +186,7 @@ class RawDeviceKeyTest(unittest.TestCase):
 
 
 class _FakeRhsDevice:
-    storage_mode = "rhs"
+    storage_format = "rhs"
     connected = True
     sample_rate = 1000.0
     channels = []
@@ -198,6 +198,9 @@ class _FakeRhsDevice:
 
     def configure(self, **kw):
         pass
+
+    def create_output_sink(self, **kw):
+        return None
 
     def start_recording_session(self, path, prefix):
         self.session = (str(path), prefix)
@@ -242,10 +245,10 @@ class RunStreamStorageModeTest(unittest.TestCase):
     def test_csv_mode_coerces_to_rhs_and_warns_once(self):
         with patch("builtins.print") as printed:
             dev = IntanRHXDevice(autolaunch=False, storage_mode="csv")
-        self.assertEqual(dev.storage_mode, "rhs")
+        self.assertEqual(dev.storage_format, "rhs")
         warnings = [
             call for call in printed.call_args_list
-            if call.args and "storage_mode" in call.args[0]
+            if call.args and "storage format" in call.args[0]
         ]
         self.assertEqual(len(warnings), 1)
 
@@ -253,7 +256,7 @@ class RunStreamStorageModeTest(unittest.TestCase):
         dev = IntanRHXDevice(autolaunch=False)
         with patch("builtins.print") as printed:
             dev.configure(storage_mode="csv")
-        self.assertEqual(dev.storage_mode, "rhs")
+        self.assertEqual(dev.storage_format, "rhs")
         self.assertEqual(len(printed.call_args_list), 1)
 
 

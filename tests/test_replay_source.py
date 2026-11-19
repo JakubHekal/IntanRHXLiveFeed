@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from leech.workers.hdf5_chunk_writer import Hdf5ChunkWriter
+from leech.device.mcs_mea.hdf5_writer import Hdf5ChunkWriter
 from leech.device.csv_source import CsvSource
 from leech.device.mcs_mea.replay import McsHdf5Source
 from leech.device.replay_paths import chunk_files

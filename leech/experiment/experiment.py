@@ -278,17 +278,51 @@ def _config_to_dict(config: ExperimentConfig) -> dict:
     })
 
 
-def _device_storage_format(device) -> str:
+def _storage_globs() -> dict:
+    """format -> file patterns, assembled from the registered device classes."""
+    from leech.device.registry import DEVICE_CLASSES
+
+    globs = {}
+    for cls in DEVICE_CLASSES.values():
+        fmt = getattr(cls, "storage_format", "csv")
+        patterns = tuple(getattr(cls, "storage_globs", ()))
+        globs[fmt] = tuple(dict.fromkeys(globs.get(fmt, ()) + patterns))
+    globs.setdefault("csv", ("chunk_*.csv",))
+    return globs
+
+
+def _class_storage_format(device):
+    """Storage format declared by the registered class, or None."""
     if not isinstance(device, dict):
-        return "csv"
+        return None
+    from leech.device.registry import DEVICE_CLASSES
+
+    cls = DEVICE_CLASSES.get(str(device.get("device_type", "")))
+    if cls is None:
+        return None
+    return getattr(cls, "storage_format", None)
+
+
+def _legacy_storage_format(device):
+    """Guessed format for device types from older builds / unregistered plugins."""
+    if not isinstance(device, dict):
+        return None
     device_type = str(device.get("device_type", "")).lower()
     if "rhx" in device_type or "intan" in device_type:
-        # Native .rhd/.rhs, no longer configurable.
         return "rhs"
     if "mcs" in device_type:
         return "hdf5"
+    return None
+
+
+def _device_storage_format(device) -> str:
+    if not isinstance(device, dict):
+        return "csv"
+    declared = _class_storage_format(device) or _legacy_storage_format(device)
+    if declared:
+        return declared
     config = device.get("config") if isinstance(device.get("config"), dict) else {}
-    mode = config.get("storage_mode")
+    mode = config.get("storage_format", config.get("storage_mode"))
     if isinstance(mode, str) and mode in ("rhs", "csv", "hdf5"):
         return mode
     return "csv"
@@ -310,14 +344,14 @@ def _storage_format(devices) -> str:
 
 
 def _probe_storage(directory: Path) -> dict:
-    """Which storage artifacts a directory tree holds (native, hdf5, csv)."""
+    """Which storage formats a directory tree holds."""
+    globs = _storage_globs()
     if not directory.is_dir():
-        return {"rhs": False, "hdf5": False, "csv": False}
-    return {
-        "rhs": any(directory.rglob("*.rhd")) or any(directory.rglob("*.rhs")),
-        "hdf5": any(directory.rglob("chunk_*.h5")),
-        "csv": any(directory.rglob("chunk_*.csv")),
-    }
+        return {fmt: False for fmt in globs}
+    found = {}
+    for fmt, patterns in globs.items():
+        found[fmt] = any(next(directory.rglob(p), None) is not None for p in patterns)
+    return found
 
 
 def resolve_storage(device_record, run_path, device_dir=None):
@@ -340,8 +374,7 @@ def resolve_storage(device_record, run_path, device_dir=None):
     run_storage = metadata.get("storage") if isinstance(metadata.get("storage"), dict) else {}
     record = device_record if isinstance(device_record, dict) else {}
     device_storage = record.get("storage") if isinstance(record.get("storage"), dict) else {}
-    device_type = str(record.get("device_type", "")).lower()
-    is_intan = "rhx" in device_type or "intan" in device_type
+    declared = _class_storage_format(record) or _legacy_storage_format(record)
 
     fmt = device_storage.get("format")
     if not isinstance(fmt, str) or not fmt:
@@ -362,7 +395,7 @@ def resolve_storage(device_record, run_path, device_dir=None):
     # First directory that actually holds files wins, so devices in a mixed
     # run don't read each other's chunks.
     chunks_dir = None
-    probe = {"rhs": False, "hdf5": False, "csv": False}
+    probe = {name: False for name in _storage_globs()}
     for candidate in candidates:
         found = _probe_storage(candidate)
         if any(found.values()):
@@ -376,13 +409,11 @@ def resolve_storage(device_record, run_path, device_dir=None):
     if len(formats) == 1:
         fmt = formats.pop()
     elif formats:
-        # Mixed set: the device type decides.
-        if is_intan:
-            fmt = "rhs"
-        elif "mcs" in device_type:
-            fmt = "hdf5"
+        # Mixed set: the device's declared format decides, else keep metadata.
+        if declared in formats:
+            fmt = declared
         elif fmt not in formats:
-            fmt = "hdf5" if probe["hdf5"] else "csv"
+            fmt = "hdf5" if probe.get("hdf5") else "csv"
     elif not fmt:
         fmt = run_storage.get("format")
     if not isinstance(fmt, str) or not fmt:

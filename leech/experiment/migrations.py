@@ -2,10 +2,10 @@ from copy import deepcopy
 from dataclasses import dataclass
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from leech.system_ids import SYSTEM_DEVICE_ID, SYSTEM_DEVICE_TYPE
+
 CONFIG_SCHEMA_VERSION = 3
 RUN_SCHEMA_VERSION = 3
-SYSTEM_DEVICE_ID = "system"
-SYSTEM_DEVICE_TYPE = "__system__"
 _SYSTEM_DEVICE_NAMES = frozenset(("__System__", "System actions", SYSTEM_DEVICE_TYPE))
 _SYSTEM_OPERATION_IDS = frozenset(("wait_input", "log_event", "pause", "start_recording", "stop_recording"))
 

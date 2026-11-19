@@ -6,7 +6,7 @@ import h5py
 import numpy as np
 
 from leech.device.mcs_mea.layout import channel_names, mea_layout, mea_name
-from leech.workers.hdf5_chunk_writer import Hdf5ChunkWriter
+from leech.device.mcs_mea.hdf5_writer import Hdf5ChunkWriter
 
 
 ADC_STEP_UV = 0.059605

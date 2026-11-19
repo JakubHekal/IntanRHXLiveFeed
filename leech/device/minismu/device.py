@@ -167,20 +167,21 @@ class MiniSMUDevice(Device):
     @classmethod
     def get_operations(cls):
         from ..base import DeviceOperation, ParamDef
+        from .operations import configure, force_current, force_voltage, measure
         return [
-            DeviceOperation("configure", "Configure", instantaneous=True, default_duration=0, color="#E74856", params=[
+            DeviceOperation("configure", "Configure", instantaneous=True, default_duration=0, color="#E74856", handler=configure, params=[
                 ParamDef("current_protection", "Current Protection (A)", "float", default=0.1, min_val=0.001, max_val=1.0),
                 ParamDef("voltage_protection", "Voltage Protection (V)", "float", default=12.0, min_val=0.1, max_val=24.0),
                 ParamDef("oversampling", "Oversampling", "int", default=16, min_val=1, max_val=256),
                 ParamDef("sample_rate", "Sample Rate (Hz)", "int", default=10, min_val=1, max_val=1000)
             ]),
-            DeviceOperation("force_voltage", "Force Voltage", default_duration=5.0, color="#F1707A", params=[
+            DeviceOperation("force_voltage", "Force Voltage", default_duration=5.0, color="#F1707A", handler=force_voltage, params=[
                 ParamDef("channel", "Channel", "int", default=1, min_val=1, max_val=2),
                 ParamDef("voltage", "Voltage (V)", "float", default=5.0, min_val=-12.0, max_val=12.0),
                 ParamDef("current_limit", "Current Limit (A)", "float", default=0.1, min_val=0.001, max_val=1.0),
             ]),
-            DeviceOperation("measure", "Measure", instantaneous=True, default_duration=0, color="#E74856"),
-            DeviceOperation("force_current", "Force Current", default_duration=60.0, color="#D13438", params=[
+            DeviceOperation("measure", "Measure", instantaneous=True, default_duration=0, color="#E74856", handler=measure),
+            DeviceOperation("force_current", "Force Current", default_duration=60.0, color="#D13438", handler=force_current, params=[
                 ParamDef("channel", "Channel", "int", default=1, min_val=1, max_val=2),
                 ParamDef("current", "Current (nA)", "float", default=-100000.0, min_val=-1000000.0, max_val=1000000.0),
                 ParamDef("voltage_limit", "Voltage Limit (V)", "float", default=12.0, min_val=0.1, max_val=24.0),

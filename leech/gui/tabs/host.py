@@ -3,8 +3,7 @@ import time
 import pyqtgraph as pg
 from PyQt5 import QtWidgets, QtCore
 
-from leech.gui.plot_helpers import PLOT_UPDATE_FREQ_HZ, DISPLAY_WINDOW_SEC
-from leech.gui.ring_buffer import RingBuffer, MinMaxModel
+from leech.gui.plot_helpers import PLOT_UPDATE_FREQ_HZ
 
 
 PLANNING_EMPTY_MESSAGE = (
@@ -104,16 +103,7 @@ class TabHost(QtWidgets.QWidget):
 
     def on_device_configured(self, source: str, num_channels: int, channel_labels: list[str], sample_rate: float = 0.0):
         for tab in self._route.get(source, ()):
-            if hasattr(tab, 'clear'):
-                tab.clear()
-            if hasattr(tab, '_resize'):
-                tab._resize(num_channels, channel_labels)
-            if sample_rate > 0 and hasattr(tab, 'sampling_rate'):
-                tab.sampling_rate = float(sample_rate)
-                if not getattr(tab, "owns_ring", False):
-                    tab._ring = RingBuffer(tab.sampling_rate, tab._ring.num_channels, duration_sec=DISPLAY_WINDOW_SEC)
-                if hasattr(tab, '_model'):
-                    tab._model = MinMaxModel(tab.sampling_rate, num_channels=tab._ring.num_channels)
+            tab.on_device_configured(num_channels, channel_labels, sample_rate)
 
     def clear_all(self):
         for name in list(self._tabs):

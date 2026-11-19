@@ -127,12 +127,16 @@ def _net_int_array_to_numpy(api: _Api, values: Any) -> np.ndarray:
 class McsMEA2100Device(Device):
     name = "MCS MEA2100"
     device_type = "mcs_mea2100"
+    config_version = 2
+    storage_format = "hdf5"
+    storage_globs = ("chunk_*.h5",)
+    replay_source_formats = frozenset(("hdf5",))
 
     @staticmethod
-    def _coerce_storage_mode(mode: Any) -> str:
+    def _coerce_storage_format(mode: Any) -> str:
         mode = str(mode or "hdf5")
         if mode != "hdf5":
-            print(f"[MCS] storage_mode {mode!r} is no longer supported; using hdf5")
+            print(f"[MCS] storage format {mode!r} is no longer supported; using hdf5")
         return "hdf5"
 
     def __init__(
@@ -140,14 +144,16 @@ class McsMEA2100Device(Device):
         sample_rate: int = 20000,
         num_channels: int = 60,
         buffer_duration_sec: float = 5.0,
-        storage_mode: str = "hdf5",
+        storage_format: Optional[str] = None,
         dll_path: str = "",
         **kwargs: Any,
     ) -> None:
         self._sample_rate = int(sample_rate)
         self._num_channels = int(num_channels)
         self._buffer_duration_sec = float(buffer_duration_sec)
-        self.storage_mode = self._coerce_storage_mode(storage_mode)
+        self.storage_format = self._coerce_storage_format(
+            storage_format if storage_format is not None else kwargs.get("storage_mode")
+        )
         self._dll_path = str(dll_path or "")
         self._connected = False
         self._last_connect_error = ""
@@ -218,8 +224,9 @@ class McsMEA2100Device(Device):
         new_rate = int(kwargs.get("sample_rate", self._sample_rate))
         new_count = int(kwargs.get("num_channels", self._num_channels))
         new_buffer = float(kwargs.get("buffer_duration_sec", self._buffer_duration_sec))
-        if "storage_mode" in kwargs:
-            self.storage_mode = self._coerce_storage_mode(kwargs["storage_mode"])
+        if "storage_format" in kwargs or "storage_mode" in kwargs:
+            self.storage_format = self._coerce_storage_format(
+                kwargs.get("storage_format", kwargs.get("storage_mode")))
         if "dll_path" in kwargs:
             self._dll_path = str(kwargs["dll_path"] or "")
 
@@ -342,7 +349,7 @@ class McsMEA2100Device(Device):
             ParamDef("sample_rate", "Sample rate (Hz)", "int", default=20000, min_val=1000, max_val=100000),
             ParamDef("num_channels", "Electrode channels", "choice", default="60", choices=["60", "120"]),
             ParamDef("buffer_duration_sec", "Device buffer (s)", "float", default=5.0, min_val=1.0, max_val=60.0),
-            ParamDef("storage_mode", "Storage format", "choice", default="hdf5", choices=["hdf5"]),
+            ParamDef("storage_format", "Storage format", "choice", default="hdf5", choices=["hdf5"]),
             ParamDef("dll_path", "McsUsbNet.dll override", "str", default=""),
         ]
 
@@ -367,6 +374,35 @@ class McsMEA2100Device(Device):
         from .tab import McsMeaTab
 
         return McsMeaTab
+
+    @classmethod
+    def migrate_config(cls, config, from_version):
+        from ..base import migrate_storage_key
+
+        return migrate_storage_key(config)
+
+    def create_output_sink(self, sample_rate, channel_names, raw_dir, file_prefix,
+                           flush_interval_sec=1.0):
+        from .hdf5_writer import Hdf5ChunkWriter
+
+        sink = Hdf5ChunkWriter(
+            sample_rate=sample_rate,
+            num_channels=len(channel_names) or 1,
+            channel_names=channel_names,
+            chunk_max_sec=300.0,
+            flush_interval_sec=flush_interval_sec,
+            adc_step_uv=self._voltage_step_uv,
+            adc_bits=self.adc_bits,
+            mea_name=self.mea_name,
+            mea_layout=self.mea_layout,
+        )
+        return self._open_sink(sink, raw_dir, file_prefix)
+
+    @classmethod
+    def replay_source(cls, chunks_dir, fmt, **kwargs):
+        from .replay import McsHdf5Source
+
+        return McsHdf5Source(chunks_dir, label_order=kwargs.get("label_order"))
 
     # ── Hardware setup ─────────────────────────────────────────────────
     def _configure_hardware(self) -> None:

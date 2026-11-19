@@ -58,14 +58,15 @@ class MigrationCompatTest(unittest.TestCase):
                 (exp / "config.json").write_text(
                     json.dumps(_old_config(version)), encoding="utf-8")
                 config = ExperimentManager.load(exp)
-                self.assertEqual(config.devices[0]["config"]["storage_mode"], "csv")
+                self.assertEqual(config.devices[0]["config"]["storage_format"], "csv")
+                self.assertEqual(config.devices[0]["config_version"], 2)
                 with patch("builtins.print") as printed:
                     device = IntanRHXDevice(
                         autolaunch=False, **config.devices[0]["config"])
-                self.assertEqual(device.storage_mode, "rhs")
+                self.assertEqual(device.storage_format, "rhs")
                 warnings = [
                     call for call in printed.call_args_list
-                    if call.args and "storage_mode" in call.args[0]
+                    if call.args and "storage format" in call.args[0]
                 ]
                 self.assertEqual(len(warnings), 1)
 
@@ -105,6 +106,14 @@ class MigrationCompatTest(unittest.TestCase):
                 encoding="utf-8")
             loaded = ExperimentManager.load_run(root)
             self.assertEqual(resolve_storage(loaded["devices"][0], root)[0], "csv")
+
+    def test_device_config_v1_renames_storage_key(self):
+        from leech.experiment.migrations import migrate_device_config
+        config, version, changed = migrate_device_config(
+            IntanRHXDevice, {"storage_mode": "csv"}, 1)
+        self.assertEqual(config, {"storage_format": "csv"})
+        self.assertEqual(version, 2)
+        self.assertTrue(changed)
 
     def test_init_run_writes_schema_3_and_storage(self):
         with tempfile.TemporaryDirectory() as tmp:

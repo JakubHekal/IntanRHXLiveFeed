@@ -32,19 +32,17 @@ def make_source(
     device_type=None,
 ):
     fmt = str(fmt or "").lower()
-    if fmt in ("rhs", "rhd", "native", "intan"):
-        from leech.device.intan_rhx.replay import IntanNativeSource
+    from leech.device.registry import REPLAY_SOURCE_CLASSES
 
-        return IntanNativeSource(
+    source_cls = REPLAY_SOURCE_CLASSES.get(fmt)
+    if source_cls is not None:
+        return source_cls.replay_source(
             chunks_dir,
+            fmt,
             sample_rate=sample_rate,
             label_order=label_order,
             device_type=device_type,
         )
-    if fmt == "hdf5":
-        from leech.device.mcs_mea.replay import McsHdf5Source
-
-        return McsHdf5Source(chunks_dir, label_order=label_order)
     if fmt == "csv":
         from leech.device.csv_source import CsvSource
 
@@ -52,21 +50,4 @@ def make_source(
     raise ValueError(f"Unsupported replay format: {fmt}")
 
 
-def __getattr__(name):
-    """Keep old imports working without eagerly loading device modules."""
-    if name == "CsvSource":
-        from leech.device.csv_source import CsvSource
-
-        return CsvSource
-    if name in ("Hdf5Source", "McsHdf5Source"):
-        from leech.device.mcs_mea.replay import McsHdf5Source
-
-        return McsHdf5Source
-    if name == "chunk_files":
-        from leech.device.replay_paths import chunk_files
-
-        return chunk_files
-    raise AttributeError(name)
-
-
-__all__ = ["make_source", "CsvSource", "Hdf5Source", "McsHdf5Source", "chunk_files"]
+__all__ = ["make_source"]

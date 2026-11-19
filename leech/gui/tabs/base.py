@@ -34,6 +34,28 @@ class DataTab(QtWidgets.QWidget):
     def set_receiving_state(self, receiving: bool):
         pass
 
+    def on_device_configured(self, num_channels, channel_labels, sample_rate=0.0):
+        """Rebuild the tab for a (re)configured device; subclasses override."""
+        from leech.gui.plot_helpers import DISPLAY_WINDOW_SEC
+        from leech.gui.ring_buffer import MinMaxModel, RingBuffer
+
+        self.clear()
+        resize = getattr(self, "_resize", None)
+        if callable(resize):
+            resize(num_channels, channel_labels)
+        if sample_rate > 0 and hasattr(self, "sampling_rate"):
+            self.sampling_rate = float(sample_rate)
+            if not getattr(self, "owns_ring", False):
+                self._ring = RingBuffer(
+                    self.sampling_rate,
+                    self._ring.num_channels,
+                    duration_sec=DISPLAY_WINDOW_SEC,
+                )
+            if hasattr(self, "_model"):
+                self._model = MinMaxModel(
+                    self.sampling_rate, num_channels=self._ring.num_channels
+                )
+
     def request_render(self):
         self._render_requested = True
 

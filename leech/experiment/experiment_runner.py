@@ -9,8 +9,6 @@ import numpy as np
 RAW_CHUNK_SEC = 300
 CSV_FILE_BUFFER_BYTES = 1024 * 1024
 CSV_FLUSH_INTERVAL_SEC = 1.0
-from leech.workers.chunk_writer import ChunkWriter
-from leech.workers.hdf5_chunk_writer import Hdf5ChunkWriter
 from leech.workers.storage_worker import StorageWorker
 from leech.telemetry_logger import append_telemetry_line
 from leech.experiment.migrations import SYSTEM_DEVICE_ID, SYSTEM_DEVICE_TYPE
@@ -22,48 +20,6 @@ def sanitize_raw_key(key):
     if not key:
         raise ValueError("Device raw-data key is empty")
     return key
-
-
-def create_output_sink(
-    device,
-    sample_rate,
-    channel_names,
-    raw_dir,
-    file_prefix,
-    flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
-):
-    num_channels = len(channel_names) or 1
-    if getattr(device, "storage_mode", "csv") == "hdf5":
-        sink = Hdf5ChunkWriter(
-            sample_rate=sample_rate,
-            num_channels=num_channels,
-            channel_names=channel_names,
-            chunk_max_sec=RAW_CHUNK_SEC,
-            flush_interval_sec=flush_interval_sec,
-            adc_step_uv=float(getattr(device, "voltage_step_uv", 1.0)),
-            adc_bits=int(getattr(device, "adc_bits", 24)),
-            mea_name=getattr(device, "mea_name", None),
-            mea_layout=getattr(device, "mea_layout", None),
-        )
-    else:
-        text_rate = float(num_channels) * float(sample_rate) * 9.0
-        if text_rate > 10e6:
-            append_telemetry_line(
-                f"storage | warn | CSV at {num_channels} ch x {sample_rate:g} Hz "
-                f"is ~{text_rate / 1e6:.1f} MB/s; consider .rhs for Intan"
-            )
-        sink = ChunkWriter(
-            sample_rate=sample_rate,
-            num_channels=num_channels,
-            channel_names=channel_names,
-            chunk_max_sec=RAW_CHUNK_SEC,
-            buffer_bytes=CSV_FILE_BUFFER_BYTES,
-            flush_interval_sec=flush_interval_sec,
-        )
-    sink.raw_chunks_dir = raw_dir
-    sink.filename_prefix = file_prefix
-    sink._open_new_chunk_locked()
-    return sink
 
 
 class ExperimentRunner(QtCore.QObject):
@@ -311,6 +267,7 @@ class _RunnerThread(QtCore.QThread):
             operations = _SYSTEM_OPERATIONS
         else:
             operations = device.get_operations()
+            action = device.canonical_operation_id(action)
         for operation in operations:
             if action in (operation.operation_id, operation.name):
                 return operation
@@ -365,10 +322,9 @@ class _RunnerThread(QtCore.QThread):
                 handler(self, step_idx, device, device_name, params, duration)
             elif action == "Stream":
                 self._run_stream(step_idx, device, device_name, params, duration)
-            elif action in ("force_current",):
-                self._run_force_current(step_idx, device, device_name, params)
             elif action in ("Configure", "configure"):
-                device.configure(**params)
+                device.configure(**{k: v for k, v in params.items()
+                                    if k not in ('duration_s', 'block_label', '_start')})
                 time.sleep(0.1)
             elif action == "Write":
                 ch = params.get("channel", 1) - 1
@@ -379,29 +335,6 @@ class _RunnerThread(QtCore.QThread):
                 ch = params.get("channel", 1) - 1
                 device.trigger_action(ch)
                 time.sleep(0.1)
-            elif action == "Stimulus":
-                self._run_stimulus(step_idx, device, device_name, params, duration)
-            elif action == "force_voltage":
-                self._run_force_voltage(device, params)
-            elif action in ("Measure", "measure"):
-                if hasattr(device, 'read_data'):
-                    data = device.read_data()
-                    print(f"[Runner] {device_name} Measure: got {data.shape if data is not None else 'None'}")
-                time.sleep(0.1)
-            elif action == "wait_input":
-                msg = params.get("message", "Click OK to continue")
-                self._input_result = None
-                self.user_input_requested.emit(msg)
-                while self._input_result is None and not self._abort:
-                    time.sleep(0.1)
-                print(f"[Runner] Wait input result: {self._input_result}")
-            elif action == "log_event":
-                append_telemetry_line(f"log | {step_idx} | {device_name} | {params}")
-                print(f"[Runner] Log event: {params}")
-            elif action == "pause":
-                time.sleep(duration)
-            elif action in ("start_recording", "stop_recording"):
-                print(f"[Runner] Recording op {action} (handled by Stream)")
             else:
                 self._report_error(device_name or SYSTEM_DEVICE_TYPE, f"Unknown action {action!r}")
 
@@ -436,23 +369,17 @@ class _RunnerThread(QtCore.QThread):
         file_label = re.sub(r"[^A-Za-z0-9._-]+", "_", label).strip("._") or "Stream"
         file_prefix = f"{step_idx + 1:06d}_{file_label}"
 
-        use_rhs = (getattr(device, "storage_mode", "csv") == "rhs"
-                   and hasattr(device, "start_recording_session"))
         rhs_folder = None
-        if use_rhs:
-            # RHX writes the raw .rhs itself (Traditional format), one folder
-            # per stage, named like the CSV chunk prefix.
+        sink = device.create_output_sink(
+            sample_rate=sr,
+            channel_names=ch_labels,
+            raw_dir=dev_raw_dir,
+            file_prefix=file_prefix,
+            flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
+        )
+        if sink is None:
+            # Device records natively (e.g. RHX .rhs), one folder per stage.
             rhs_folder = device.start_recording_session(dev_raw_dir, file_prefix)
-            sink = None
-        else:
-            sink = create_output_sink(
-                device,
-                sample_rate=sr,
-                channel_names=ch_labels,
-                raw_dir=dev_raw_dir,
-                file_prefix=file_prefix,
-                flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
-            )
 
         storage = StorageWorker(sink) if sink is not None else None
         device.start_acquisition()
@@ -526,23 +453,9 @@ class _RunnerThread(QtCore.QThread):
         except Exception:
             pass
 
-    def _run_force_voltage(self, device, params):
-        if hasattr(device, 'configure'):
-            device.configure(mode="FVMI")
-        if hasattr(device, 'write_output'):
-            ch = params.get("channel", 1) - 1
-            val = params.get("voltage", params.get("amplitude", 5.0))
-            device.write_output(max(0, ch), val)
-        dur = params.get("duration_s", 1.0)
-        time.sleep(dur)
-        try:
-            device.write_output(max(0, ch), 0.0)
-        except Exception:
-            pass
-
     def _prepare_step(self, step):
-        """Program/config a device while its board is stopped, before the group
-        runs. Uploads are rejected (or wedge the server) while running."""
+        """Let the device configure itself while its board is stopped, before
+        the group runs. Uploads are rejected (or wedge the server) while running."""
         action = self._action_of(step)
         device_name = self._name_of(step)
         params = self._params_of(step)
@@ -550,165 +463,8 @@ class _RunnerThread(QtCore.QThread):
         device = self._device_for_step(step)
         if device is None:
             return
-        try:
-            if action == "Stimulus":
-                stim_params = {k: v for k, v in params.items()
-                               if k not in ('duration_s', 'block_label', '_start')}
-                device.program_stimulation(stim_params)
-                append_telemetry_line(f"stim_programmed | {step_idx} | {device_name} | {action} | ok")
-            # Stream config is applied in _run_stream (still before run mode).
-        except Exception as e:
-            self._report_error(device_name, str(e))
-            append_telemetry_line(f"step_error | {step_idx} | {device_name} | {action} | prepare: {e}")
-            print(f"[Runner] Error preparing step {step_idx} ({action}): {e}")
-
-    def _run_stimulus(self, step_idx, device, device_name, params, duration):
-        if not getattr(device, 'connected', False):
-            self._report_error(device_name, "Device not connected")
+        operation = self._operation_for_device(device, action)
+        prepare = operation.prepare if operation is not None else None
+        if prepare is None:
             return
-        label = params.get("block_label", "Stimulus")
-        stim_params = {k: v for k, v in params.items() if k not in ('duration_s', 'block_label', '_start')}
-        append_telemetry_line(
-            f"stim_start | {step_idx} | {device_name} | {stim_params} dur={duration}s label={label}"
-        )
-        burst_on = float(params.get("burst_on_s", 0.0) or 0.0)
-        burst_off = float(params.get("burst_off_s", 0.0) or 0.0)
-        period_us = float(params.get("pulse_period_us", 200.0) or 200.0)
-        train_dur = getattr(device, '_stim_train_duration_s', None)
-        if train_dur is None:
-            ppt = getattr(device, '_stim_pulses_per_train', 0)
-            train_dur = ppt * period_us * 1e-6
-        interval = float(params.get("train_interval_s", 0.0) or 0.0)
-        if interval > 0:
-            if interval < train_dur:
-                append_telemetry_line(
-                    f"stim_warn | {step_idx} | {device_name} | Stimulus | "
-                    f"train_interval {interval:.3f}s shorter than train "
-                    f"{train_dur:.3f}s; clamped"
-                )
-                print(f"[Runner] Warning: train interval {interval}s < train duration "
-                      f"{train_dur:.3f}s, clamped")
-            interval = max(interval, train_dur)
-        else:
-            interval = train_dur
-        burst_cycle = (burst_on + burst_off) if (burst_on > 0 and burst_off > 0) else 0.0
-        # The Stream step sets runmode=run from a daemon thread; the first edge
-        # written before the chip is clocked is silently lost. Wait for the
-        # board to actually run before firing the first train.
-        if getattr(device, 'wait_for_run_mode', None) is not None:
-            if not device.wait_for_run_mode(timeout=10.0):
-                msg = "Stimulus aborted: device did not reach run mode before block start"
-                self._report_error(device_name, msg)
-                append_telemetry_line(f"stim_error | {step_idx} | {device_name} | Stimulus | {msg}")
-                print(f"[Runner] {msg}")
-                return
-        t0 = time.perf_counter()
-        deadline = t0 + duration
-        next_train = t0
-        trains = 0
-        try:
-            while time.perf_counter() < deadline and not self._abort:
-                if self._paused:
-                    pause_start = time.perf_counter()
-                    while self._paused and not self._abort:
-                        time.sleep(0.1)
-                    pause = time.perf_counter() - pause_start
-                    deadline += pause
-                    next_train += pause
-                    t0 += pause
-                elapsed = time.perf_counter() - t0
-                in_burst = burst_cycle <= 0 or (elapsed % burst_cycle) < burst_on
-                if in_burst and time.perf_counter() >= next_train:
-                    device.trigger_train()
-                    trains += 1
-                    next_train += interval
-                remaining = deadline - time.perf_counter()
-                time.sleep(min(0.01, max(0, remaining)) if remaining > 0 else 0.01)
-        finally:
-            try:
-                device.stop_stimulation()
-            except Exception:
-                pass
-        ppt = getattr(device, '_stim_pulses_per_train', 0)
-        pulses = trains * ppt
-        append_telemetry_line(
-            f"stim_end | {step_idx} | {device_name} | Stimulus | {pulses} pulses ({trains} trains x {ppt})"
-        )
-        print(f"[Runner] Stimulus {label}: {pulses} pulses delivered ({trains} trains x {ppt})")
-
-    def _run_force_current(self, step_idx, device, device_name, params):
-        ch = params.get("channel", 1) - 1
-        current_nA = float(params.get("current", params.get("current_nA", -100000.0)))
-        dur = float(params.get("duration_s", 1200.0))
-        label = params.get("block_label", "ForceCurrent")
-
-        if hasattr(device, 'configure'):
-            device.configure(mode="FIMV")
-
-        sr = getattr(device, 'sample_rate', 1000.0) or 1000.0
-        ch_labels = [c.name for c in getattr(device, 'channels', [])]
-        num_ch = len(ch_labels) or 2
-
-        dev_raw_dir = self._run_path / "raw" / self._raw_device_key(device, device_name)
-        dev_raw_dir.mkdir(parents=True, exist_ok=True)
-
-        file_label = re.sub(r"[^A-Za-z0-9._-]+", "_", str(label)).strip("._") or "ForceCurrent"
-        sink = create_output_sink(
-            device,
-            sample_rate=sr,
-            channel_names=ch_labels,
-            raw_dir=dev_raw_dir,
-            file_prefix=f"{step_idx + 1:06d}_{file_label}",
-        )
-
-        storage = StorageWorker(sink)
-        device.start_acquisition()
-        append_telemetry_line(
-            f"acq_start | {step_idx} | {device_name} | force_current | "
-            f"current_nA={current_nA} ch={ch} dur={dur} label={label}"
-        )
-        first_chunk = True
-        device.write_output(ch, current_nA / 1e9)
-
-        deadline = time.perf_counter() + dur
-        while time.perf_counter() < deadline and not self._abort:
-            if self._paused:
-                pause_start = time.perf_counter()
-                while self._paused and not self._abort:
-                    time.sleep(0.1)
-                deadline += time.perf_counter() - pause_start
-            try:
-                data = device.read_data()
-            except Exception:
-                data = None
-            if data is not None:
-                arr = np.asarray(data)
-                if arr.ndim == 2 and arr.shape[1] > 0:
-                    marker_info = (
-                        {0: {"id": step_idx + 1, "name": label}}
-                        if first_chunk
-                        else None
-                    )
-                    if not storage.submit(arr, marker_info=marker_info):
-                        self._report_error(device_name, f"Storage writer failed: {storage.error}")
-                        break
-                    self.data_received.emit(device_name, arr)
-                    first_chunk = False
-            remaining = deadline - time.perf_counter()
-            time.sleep(min(0.01, max(0, remaining)) if remaining > 0 else 0.01)
-
-        storage_error = storage.close()
-        if storage_error is not None and not self._abort:
-            self._report_error(device_name, f"Storage writer failed: {storage_error}")
-        append_telemetry_line(
-            f"acq_end | {step_idx} | {device_name} | force_current | "
-            f"samples_in_chunk={sink._chunk_samples_written} backpressure={storage.backpressure_count}"
-        )
-        try:
-            device.write_output(ch, 0.0)
-        except Exception:
-            pass
-        try:
-            device.stop_acquisition()
-        except Exception:
-            pass
+        prepare(self, step_idx, device, device_name, params, params.get('duration_s', 2.0))

@@ -76,10 +76,10 @@ class ReplaySession(QtCore.QObject):
                 failures.append(f"{name}: {exc}")
                 continue
             device_type = str(record.get("device_type", ""))
-            if fmt == "csv" and self._is_intan(device_type):
+            if fmt == "csv" and not self._supports_csv(device_type):
                 self.unsupported.emit(
                     name,
-                    "Old Intan CSV run — replay supports native .rhd/.rhs or HDF5.",
+                    "Old CSV run — replay supports this device's native format only.",
                 )
                 continue
             try:
@@ -212,9 +212,11 @@ class ReplaySession(QtCore.QObject):
 
     # ── metadata ────────────────────────────────────────────────────────
     @staticmethod
-    def _is_intan(device_type: str) -> bool:
-        value = str(device_type or "").lower()
-        return "rhx" in value or "intan" in value
+    def _supports_csv(device_type: str) -> bool:
+        from leech.device.registry import DEVICE_CLASSES
+
+        cls = DEVICE_CLASSES.get(str(device_type or ""))
+        return cls is None or "csv" in getattr(cls, "replay_source_formats", ())
 
     @staticmethod
     def _label_order(record):

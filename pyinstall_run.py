@@ -29,7 +29,7 @@ except Exception:
         
         
         
-        'leech.workers.chunk_writer', 'leech.workers.replay_worker',
+        'leech.workers.chunk_writer',
         'leech.experiment.experiment', 'leech.experiment.experiment_dialog',
         'leech.experiment.experiment_runner',
     ]
