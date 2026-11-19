@@ -3,8 +3,8 @@ import time
 import pyqtgraph as pg
 from PyQt5 import QtWidgets, QtCore
 
-from leech.gui.plot_helpers import PLOT_UPDATE_FREQ_HZ, DISPLAY_BUFFER_SEC
-from leech.gui.ring_buffer import RingBuffer
+from leech.gui.plot_helpers import PLOT_UPDATE_FREQ_HZ, DISPLAY_WINDOW_SEC
+from leech.gui.ring_buffer import RingBuffer, MinMaxModel
 
 
 PLANNING_EMPTY_MESSAGE = (
@@ -111,7 +111,9 @@ class TabHost(QtWidgets.QWidget):
             if sample_rate > 0 and hasattr(tab, 'sampling_rate'):
                 tab.sampling_rate = float(sample_rate)
                 if not getattr(tab, "owns_ring", False):
-                    tab._ring = RingBuffer(tab.sampling_rate, tab._ring.num_channels, duration_sec=DISPLAY_BUFFER_SEC)
+                    tab._ring = RingBuffer(tab.sampling_rate, tab._ring.num_channels, duration_sec=DISPLAY_WINDOW_SEC)
+                if hasattr(tab, '_model'):
+                    tab._model = MinMaxModel(tab.sampling_rate, num_channels=tab._ring.num_channels)
 
     def clear_all(self):
         for name in list(self._tabs):
@@ -128,6 +130,20 @@ class TabHost(QtWidgets.QWidget):
     def on_data(self, source, chunk):
         for tab in self._route.get(source, ()):
             tab.on_data(chunk)
+
+    def add_markers(self, source, markers):
+        for tab in self._route.get(source, ()):
+            add_marker = getattr(tab, 'add_marker', None)
+            if not callable(add_marker):
+                continue
+            for marker in markers or ():
+                add_marker(marker)
+
+    def show_message(self, source: str, message: str):
+        for tab in self._route.get(source, ()):
+            show = getattr(tab, 'show_message', None)
+            if callable(show):
+                show(message)
 
     # ── Render ─────────────────────────────────────────────────────────────
 

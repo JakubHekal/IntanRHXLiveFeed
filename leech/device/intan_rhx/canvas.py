@@ -26,7 +26,7 @@ class PgCanvas(QtWidgets.QWidget):
         self.raw_plot.setLabel('left',   'U [uV]')
         self.raw_plot.setLabel('bottom', 't [s]')
         self.raw_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.raw_plot.setDownsampling(auto=True, mode='peak')
+        self.raw_plot.setDownsampling(None)
         self.raw_plot.setClipToView(True)
         self.raw_plot.setMouseEnabled(x=True, y=True)
 

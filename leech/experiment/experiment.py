@@ -278,13 +278,90 @@ def _config_to_dict(config: ExperimentConfig) -> dict:
     })
 
 
+def _device_storage_format(device) -> str:
+    if not isinstance(device, dict):
+        return "csv"
+    device_type = str(device.get("device_type", "")).lower()
+    if "mcs" in device_type:
+        return "hdf5"
+    config = device.get("config") if isinstance(device.get("config"), dict) else {}
+    mode = config.get("storage_mode")
+    if isinstance(mode, str) and mode in ("rhs", "csv", "hdf5"):
+        return mode
+    return "csv"
+
+
+def _device_data_dir(device) -> str:
+    name = str(device.get("name", "device"))
+    device_id = device.get("device_id")
+    key = f"{name}_{device_id}" if device_id else name
+    key = re.sub(r"[^A-Za-z0-9._-]+", "_", key).strip("._") or "device"
+    return f"raw/{key}"
+
+
 def _storage_format(devices) -> str:
     for device in devices:
-        config = device.get("config") if isinstance(device, dict) else None
-        mode = config.get("storage_mode") if isinstance(config, dict) else None
-        if isinstance(mode, str) and mode:
-            return mode
+        if isinstance(device, dict):
+            return _device_storage_format(device)
     return "csv"
+
+
+def resolve_storage(device_record, run_path, device_dir=None):
+    """Resolve (format, chunks_dir) per device; first hit wins."""
+    run_path = Path(run_path)
+    metadata = {}
+    for name in ("run.json", "metadata.json"):
+        path = run_path / name
+        if path.exists():
+            try:
+                metadata = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                metadata = {}
+            break
+    run_storage = metadata.get("storage") if isinstance(metadata.get("storage"), dict) else {}
+    record = device_record if isinstance(device_record, dict) else {}
+    device_storage = record.get("storage") if isinstance(record.get("storage"), dict) else {}
+
+    fmt = device_storage.get("format")
+    if not isinstance(fmt, str) or not fmt:
+        fmt = _device_storage_format(record) if record else None
+
+    if device_dir is not None:
+        candidates = [Path(device_dir)]
+    else:
+        data_dir = device_storage.get("data_dir") or run_storage.get("data_dir")
+        candidates = []
+        if isinstance(data_dir, str) and data_dir:
+            candidates.append(run_path / data_dir)
+        candidates.extend([run_path / "raw", run_path / "raw_chunks"])
+
+    chunks_dir = None
+    for candidate in candidates:
+        if candidate.is_dir():
+            if any(candidate.rglob("chunk_*.h5")) or any(candidate.rglob("chunk_*.csv")):
+                chunks_dir = candidate
+                break
+    if chunks_dir is None:
+        for candidate in candidates:
+            if candidate.is_dir():
+                chunks_dir = candidate
+                break
+    if chunks_dir is None:
+        chunks_dir = run_path / "raw"
+
+    has_h5 = any(chunks_dir.rglob("chunk_*.h5"))
+    has_csv = any(chunks_dir.rglob("chunk_*.csv"))
+    # Files on disk outrank metadata: mixed runs used to record the first
+    # device's format at run level and mislabel the rest.
+    if has_h5 and not has_csv:
+        fmt = "hdf5"
+    elif has_csv and not has_h5:
+        fmt = "csv"
+    elif not fmt:
+        fmt = run_storage.get("format") if isinstance(run_storage.get("format"), str) else None
+    if not fmt:
+        raise FileNotFoundError(f"No storage format or chunk files in {chunks_dir}")
+    return fmt, chunks_dir
 
 
 class ExperimentManager:
@@ -369,6 +446,13 @@ class ExperimentManager:
     @staticmethod
     def init_run(run_path: str | Path, config_data: dict, devices: list, sequence: list) -> Path:
         run_path = Path(run_path)
+        devices = deepcopy(devices)
+        for device in devices:
+            if isinstance(device, dict) and "storage" not in device:
+                device["storage"] = {
+                    "format": _device_storage_format(device),
+                    "data_dir": _device_data_dir(device),
+                }
         run_json = {
             "experiment": {
                 "name": config_data.get("metadata", {}).get("experiment_name", ""),

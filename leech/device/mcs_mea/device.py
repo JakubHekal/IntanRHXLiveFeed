@@ -128,6 +128,13 @@ class McsMEA2100Device(Device):
     name = "MCS MEA2100"
     device_type = "mcs_mea2100"
 
+    @staticmethod
+    def _coerce_storage_mode(mode: Any) -> str:
+        mode = str(mode or "hdf5")
+        if mode != "hdf5":
+            print(f"[MCS] storage_mode {mode!r} is no longer supported; using hdf5")
+        return "hdf5"
+
     def __init__(
         self,
         sample_rate: int = 20000,
@@ -140,7 +147,7 @@ class McsMEA2100Device(Device):
         self._sample_rate = int(sample_rate)
         self._num_channels = int(num_channels)
         self._buffer_duration_sec = float(buffer_duration_sec)
-        self.storage_mode = str(storage_mode or "hdf5")
+        self.storage_mode = self._coerce_storage_mode(storage_mode)
         self._dll_path = str(dll_path or "")
         self._connected = False
         self._last_connect_error = ""
@@ -212,7 +219,7 @@ class McsMEA2100Device(Device):
         new_count = int(kwargs.get("num_channels", self._num_channels))
         new_buffer = float(kwargs.get("buffer_duration_sec", self._buffer_duration_sec))
         if "storage_mode" in kwargs:
-            self.storage_mode = str(kwargs["storage_mode"])
+            self.storage_mode = self._coerce_storage_mode(kwargs["storage_mode"])
         if "dll_path" in kwargs:
             self._dll_path = str(kwargs["dll_path"] or "")
 
@@ -335,7 +342,7 @@ class McsMEA2100Device(Device):
             ParamDef("sample_rate", "Sample rate (Hz)", "int", default=20000, min_val=1000, max_val=100000),
             ParamDef("num_channels", "Electrode channels", "choice", default="60", choices=["60", "120"]),
             ParamDef("buffer_duration_sec", "Device buffer (s)", "float", default=5.0, min_val=1.0, max_val=60.0),
-            ParamDef("storage_mode", "Storage format", "choice", default="hdf5", choices=["hdf5", "csv"]),
+            ParamDef("storage_mode", "Storage format", "choice", default="hdf5", choices=["hdf5"]),
             ParamDef("dll_path", "McsUsbNet.dll override", "str", default=""),
         ]
 

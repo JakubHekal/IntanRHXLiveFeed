@@ -6,6 +6,9 @@ from pathlib import Path
 import numpy as np
 from PyQt5 import QtCore
 
+from leech.experiment.experiment import resolve_storage
+from leech.workers.replay_source import make_source
+
 
 class ReplayWorker(QtCore.QObject):
     data_received = QtCore.pyqtSignal(str, object)
@@ -29,37 +32,41 @@ class ReplayWorker(QtCore.QObject):
         self._source_device_name = source_device_name
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._emit_next_chunk)
+        self._source = None
         self._chunk_files = []
         self._chunk_idx = 0
 
-    def start(self):
+    def _device_record(self):
         metadata = self._metadata()
-        storage = metadata.get("storage") if isinstance(metadata.get("storage"), dict) else {}
-        fmt = storage.get("format") or "csv"
-        if fmt != "csv":
-            self.error.emit(f"Replay supports CSV only (run storage format: {fmt})")
-            return
-        chunks_dir = self._device_dir
-        if chunks_dir is None:
-            data_dir = storage.get("data_dir")
-            if isinstance(data_dir, str) and data_dir:
-                chunks_dir = self._run_path / data_dir
-            else:
-                chunks_dir = self._run_path / "raw"
-            # Legacy runs without a recorded location may use raw_chunks/.
-            if not chunks_dir.exists() and chunks_dir.name == "raw":
-                chunks_dir = self._run_path / "raw_chunks"
-        if not chunks_dir.exists():
-            self.error.emit(f"No raw/ dir in {chunks_dir}")
-            return
+        devices = metadata.get("devices")
+        if not isinstance(devices, list):
+            return {}
+        for item in devices:
+            if not isinstance(item, dict):
+                continue
+            if self._device_id and item.get("device_id") == self._device_id:
+                return item
+            if self._source_device_name and item.get("name") == self._source_device_name:
+                return item
+        return devices[0] if devices and isinstance(devices[0], dict) else {}
 
-        self._chunk_files = sorted(chunks_dir.rglob("chunk_*.csv"), key=self._chunk_sort_key)
-        if not self._chunk_files:
-            self.error.emit(f"No CSV chunks in {chunks_dir}")
+    def start(self):
+        record = self._device_record()
+        try:
+            fmt, chunks_dir = resolve_storage(record, self._run_path, self._device_dir)
+        except (OSError, ValueError, FileNotFoundError) as exc:
+            self.error.emit(str(exc))
             return
-
+        if fmt == "rhs":
+            self.error.emit("Native RHX recording — open in Intan RHX")
+            return
+        try:
+            self._source = make_source(chunks_dir, fmt, label_order=self._label_order())
+        except Exception as exc:  # noqa: BLE001 - surfaced to the UI
+            self.error.emit(str(exc))
+            return
         self._chunk_idx = 0
-        self._timer.start(500)
+        self._timer.start(max(1, int(1000 * 0.05)))
 
     def _metadata(self):
         for name in ("run.json", "metadata.json"):
@@ -140,17 +147,19 @@ class ReplayWorker(QtCore.QObject):
         return data.T
 
     def _emit_next_chunk(self):
-        while self._chunk_idx < len(self._chunk_files):
-            csv_path = self._chunk_files[self._chunk_idx]
-            self._chunk_idx += 1
-            try:
-                data = self._read_chunk(csv_path)
-            except Exception as exc:
-                self.error.emit(f"Could not replay {csv_path.name}: {exc}")
-                continue
-            if data is None:
-                continue
-            self.data_received.emit(self._device_name, data)
+        if self._source is None:
+            self._timer.stop()
+            self.finished.emit()
             return
-        self._timer.stop()
-        self.finished.emit()
+        try:
+            n = max(1, int(self._source.sample_rate * 0.05))
+            data, _markers = self._source.read(n)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the UI
+            self._timer.stop()
+            self.error.emit(f"Could not replay {self._device_name}: {exc}")
+            return
+        if data is None or data.shape[1] == 0:
+            self._timer.stop()
+            self.finished.emit()
+            return
+        self.data_received.emit(self._device_name, data)

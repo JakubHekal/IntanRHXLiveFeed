@@ -571,13 +571,19 @@ class IntanRHXDevice(Device):
     def parse_emg_stream_fast(self, raw_bytes: bytearray, synced=True):
         C = self.num_channels
         frames = FRAMES_PER_BLOCK
-        bytes_per_frame = 4 + 2 * C
-        bytes_per_block = 4 + frames * bytes_per_frame
+        key = (C, frames)
+        if getattr(self, "_stream_dtype_key", None) != key:
+            self._stream_bytes_per_frame = 4 + 2 * C
+            self._stream_bytes_per_block = 4 + frames * self._stream_bytes_per_frame
+            self._stream_magic = MAGIC_NUMBER.to_bytes(4, "little")
+            frame_dtype = np.dtype([('ts', '<i4'), ('v', ('<u2', C))])
+            self._stream_block_dtype = np.dtype([('magic', '<u4'), ('data', (frame_dtype, frames))])
+            self._stream_dtype_key = key
+        bytes_per_block = self._stream_bytes_per_block
         mv = memoryview(raw_bytes)
         start = 0
         if not synced:
-            magic = MAGIC_NUMBER.to_bytes(4, "little")
-            pos = raw_bytes.find(magic)
+            pos = raw_bytes.find(self._stream_magic)
             if pos == -1:
                 return None, None, 0, False
             start = pos
@@ -585,8 +591,7 @@ class IntanRHXDevice(Device):
         nblocks = available // bytes_per_block
         if nblocks <= 0:
             return None, None, start, True
-        frame_dtype = np.dtype([('ts', '<i4'), ('v', ('<u2', C))])
-        block_dtype = np.dtype([('magic', '<u4'), ('data', (frame_dtype, frames))])
+        block_dtype = self._stream_block_dtype
         blocks = np.frombuffer(mv[start:start + nblocks * bytes_per_block], dtype=block_dtype)
         good = (blocks['magic'] == MAGIC_NUMBER)
         blocks = blocks[good]
@@ -668,7 +673,8 @@ class IntanRHXDevice(Device):
                     _intentional_stop = False
                     break
                 emg_data, timestamps, consumed, self._synced = self.parse_emg_stream_fast(rolling_buffer, synced=self._synced)
-                rolling_buffer = rolling_buffer[consumed:]
+                if consumed:
+                    del rolling_buffer[:consumed]
                 if emg_data is not None:
                     n = emg_data.shape[1]
                     with self.buffer_lock:
@@ -899,6 +905,7 @@ class IntanRHXDevice(Device):
             if n_new > buf_len // 2:
                 # ponytail: advance cursor so next call sees n_new=0, not same
                 # large value — breaks permanent stall after reconfigure
+                self._dropped_samples = getattr(self, "_dropped_samples", 0) + n_new
                 self._last_read_cursor = cur
                 return None
             if prev < cur:

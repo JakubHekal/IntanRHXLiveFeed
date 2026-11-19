@@ -182,6 +182,14 @@ def _validate_current(data, kind):
             raise MigrationError(f"{kind} devices[{index}].device_type is reserved")
         if not isinstance(record.get("config"), dict):
             raise MigrationError(f"{kind} devices[{index}].config must be an object")
+        storage = record.get("storage")
+        if storage is not None:
+            if not isinstance(storage, dict):
+                raise MigrationError(f"{kind} devices[{index}].storage must be an object")
+            if storage.get("format") is not None and not isinstance(storage.get("format"), str):
+                raise MigrationError(f"{kind} devices[{index}].storage.format must be text")
+            if storage.get("data_dir") is not None and not isinstance(storage.get("data_dir"), str):
+                raise MigrationError(f"{kind} devices[{index}].storage.data_dir must be text")
         version = record.get("config_version", 1)
         if isinstance(version, bool) or not isinstance(version, int) or version < 0:
             raise MigrationError(f"{kind} devices[{index}].config_version is invalid")

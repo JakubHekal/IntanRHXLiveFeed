@@ -22,9 +22,12 @@ def build_param_widget(param_def: ParamDef, current_value=None) -> QWidget:
         return w
     elif param_def.dtype == "choice":
         w = QComboBox()
-        w.addItems(param_def.choices or [])
-        if value in (param_def.choices or []):
+        choices = param_def.choices or []
+        w.addItems(choices)
+        if value in choices:
             w.setCurrentText(value)
+        elif value:
+            w.setToolTip(f"Stored value {value!r} is no longer supported; using {choices[0] if choices else 'default'}.")
         return w
     elif param_def.dtype == "channel_list":
         from leech.gui.widgets import ChannelSelector

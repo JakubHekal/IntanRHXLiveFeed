@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 from typing import Optional, List, Union
 
@@ -30,6 +32,7 @@ class MiniSMUDevice(Device):
         self._connected = False
         self._acquisition_running = False
         self._sample_rate = 10
+        self._last_read_tel_t = 0.0
 
         self._channels = [
             ChannelInfo(0, "CH1", "bidirectional", "V/A", -12.0, 12.0),
@@ -101,7 +104,10 @@ class MiniSMUDevice(Device):
         except SMUException as e:
             _smu_tel("read_data_error", e)
             return None
-        _smu_tel("read_data", f"v={v:.6f}", f"i={i:.9f}")
+        now = time.monotonic()
+        if now - self._last_read_tel_t >= 1.0:
+            self._last_read_tel_t = now
+            _smu_tel("read_data", f"v={v:.6f}", f"i={i:.9f}")
         return np.array([[v], [i]], dtype=np.float32)
 
     def write_output(self, channel_index: int, value: Union[float, bool]) -> None:

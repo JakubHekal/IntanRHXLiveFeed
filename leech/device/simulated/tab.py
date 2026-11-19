@@ -5,8 +5,8 @@ from PyQt5 import QtWidgets, QtGui, QtCore
 import numpy as np
 
 from leech.gui.tabs.base import DataTab
-from leech.gui.ring_buffer import RingBuffer
-from leech.gui.plot_helpers import MAX_DISPLAY_POINTS, _minmax_downsample, DISPLAY_BUFFER_SEC
+from leech.gui.ring_buffer import MinMaxModel, RingBuffer
+from leech.gui.plot_helpers import DISPLAY_WINDOW_SEC, MAX_DISPLAY_POINTS
 
 
 class SimpleDeviceTab(DataTab):
@@ -17,7 +17,8 @@ class SimpleDeviceTab(DataTab):
         self.is_receiving = False
         self._render_dur_ms = 0.0
         self._last_render_t = 0.0
-        self._ring = RingBuffer(sample_rate, 1, duration_sec=DISPLAY_BUFFER_SEC)
+        self._ring = RingBuffer(sample_rate, 1, duration_sec=DISPLAY_WINDOW_SEC)
+        self._model = MinMaxModel(sample_rate, duration_sec=DISPLAY_WINDOW_SEC, num_channels=1)
         self._fps_frame_count = 0
         self._fps_last_t = time.perf_counter()
 
@@ -52,6 +53,7 @@ class SimpleDeviceTab(DataTab):
             t = (self.sample_counter + np.arange(n, dtype=np.float64)) / self.sampling_rate
             self._ring.write(t, ch0[np.newaxis, :])
             self.sample_counter += n
+        self._model.append_from_ring(self._ring)
         self.request_render()
 
     def render(self):
@@ -59,14 +61,15 @@ class SimpleDeviceTab(DataTab):
         if (now - self._last_render_t) < 1.0 / 30.0:
             return
         t0 = now
-        n_vis = min(10000, min(self._ring.total, self._ring.cap))
-        if n_vis < 2:
+        earliest, latest = self._ring.raw_time_bounds()
+        if latest <= earliest:
             return
-        t, y = self._ring.read_channel(0)
-        if t.size < 2:
+        x_end = latest
+        x_start = max(earliest, x_end - DISPLAY_WINDOW_SEC)
+        xd, yd = self._model.read(x_start, x_end, MAX_DISPLAY_POINTS, 0)
+        if xd.size < 2:
             return
-        td, yd = _minmax_downsample(t, y, MAX_DISPLAY_POINTS)
-        self.curve.setData(td, yd)
+        self.curve.setData(xd.copy(), yd.copy())
 
         y_range = float(np.max(yd)) - float(np.min(yd)) if yd.size else 1.0
         y_pad = max(0.1, y_range * 0.1)
@@ -86,6 +89,7 @@ class SimpleDeviceTab(DataTab):
 
     def clear(self):
         self._ring.clear()
+        self._model.reset()
         self.sample_counter = 0
         self.curve.setData([], [])
         self._fps_frame_count = 0

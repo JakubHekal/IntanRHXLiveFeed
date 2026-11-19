@@ -11,6 +11,7 @@ CSV_FILE_BUFFER_BYTES = 1024 * 1024
 CSV_FLUSH_INTERVAL_SEC = 1.0
 from leech.workers.chunk_writer import ChunkWriter
 from leech.workers.hdf5_chunk_writer import Hdf5ChunkWriter
+from leech.workers.storage_worker import StorageWorker
 from leech.telemetry_logger import append_telemetry_line
 from leech.experiment.migrations import SYSTEM_DEVICE_ID, SYSTEM_DEVICE_TYPE
 _SYSTEM_ACTIONS = frozenset(("wait_input", "log_event", "pause", "start_recording", "stop_recording"))
@@ -45,6 +46,12 @@ def create_output_sink(
             mea_layout=getattr(device, "mea_layout", None),
         )
     else:
+        text_rate = float(num_channels) * float(sample_rate) * 9.0
+        if text_rate > 10e6:
+            append_telemetry_line(
+                f"storage | warn | CSV at {num_channels} ch x {sample_rate:g} Hz "
+                f"is ~{text_rate / 1e6:.1f} MB/s; consider .rhs for Intan"
+            )
         sink = ChunkWriter(
             sample_rate=sample_rate,
             num_channels=num_channels,
@@ -447,6 +454,7 @@ class _RunnerThread(QtCore.QThread):
                 flush_interval_sec=CSV_FLUSH_INTERVAL_SEC,
             )
 
+        storage = StorageWorker(sink) if sink is not None else None
         device.start_acquisition()
         append_telemetry_line(
             f"acq_start | {step_idx} | {device_name} | Stream | "
@@ -473,13 +481,15 @@ class _RunnerThread(QtCore.QThread):
             if data is not None:
                 arr = np.asarray(data)
                 if arr.ndim == 2 and arr.shape[1] > 0:
-                    if sink is not None:
+                    if storage is not None:
                         marker_info = (
                             {0: {"id": step_idx + 1, "name": label}}
                             if first_chunk
                             else None
                         )
-                        sink.append_data(arr, marker_info=marker_info)
+                        if not storage.submit(arr, marker_info=marker_info):
+                            self._report_error(device_name, f"Storage writer failed: {storage.error}")
+                            stalled = True
                         first_chunk = False
                     self.data_received.emit(device_name, arr)
                 last_data_time = time.perf_counter()
@@ -494,14 +504,18 @@ class _RunnerThread(QtCore.QThread):
                 append_telemetry_line(f"acq_stall | {step_idx} | {device_name} | Stream | no data for 5s")
                 print(f"[Runner] {msg}")
             remaining = deadline - time.perf_counter()
-            time.sleep(min(0.1, max(0, remaining)) if remaining > 0 else 0.01)
+            time.sleep(min(0.01, max(0, remaining)) if remaining > 0 else 0.001)
 
         if not self._abort and not stalled and not getattr(device, "connected", True):
             self._report_error(device_name, "Device disconnected during stream")
-        if sink is not None:
-            sink.close()
+        if storage is not None:
+            storage_error = storage.close()
+            if storage_error is not None and not self._abort:
+                self._report_error(device_name, f"Storage writer failed: {storage_error}")
             append_telemetry_line(
-                f"acq_end | {step_idx} | {device_name} | Stream | samples_in_chunk={sink._chunk_samples_written}"
+                f"acq_end | {step_idx} | {device_name} | Stream | "
+                f"samples_in_chunk={sink._chunk_samples_written} "
+                f"backpressure={storage.backpressure_count}"
             )
         else:
             append_telemetry_line(
@@ -647,6 +661,7 @@ class _RunnerThread(QtCore.QThread):
             file_prefix=f"{step_idx + 1:06d}_{file_label}",
         )
 
+        storage = StorageWorker(sink)
         device.start_acquisition()
         append_telemetry_line(
             f"acq_start | {step_idx} | {device_name} | force_current | "
@@ -674,15 +689,20 @@ class _RunnerThread(QtCore.QThread):
                         if first_chunk
                         else None
                     )
-                    sink.append_data(arr, marker_info=marker_info)
+                    if not storage.submit(arr, marker_info=marker_info):
+                        self._report_error(device_name, f"Storage writer failed: {storage.error}")
+                        break
                     self.data_received.emit(device_name, arr)
                     first_chunk = False
             remaining = deadline - time.perf_counter()
-            time.sleep(min(0.1, max(0, remaining)) if remaining > 0 else 0.01)
+            time.sleep(min(0.01, max(0, remaining)) if remaining > 0 else 0.01)
 
-        sink.close()
+        storage_error = storage.close()
+        if storage_error is not None and not self._abort:
+            self._report_error(device_name, f"Storage writer failed: {storage_error}")
         append_telemetry_line(
-            f"acq_end | {step_idx} | {device_name} | force_current | samples_in_chunk={sink._chunk_samples_written}"
+            f"acq_end | {step_idx} | {device_name} | force_current | "
+            f"samples_in_chunk={sink._chunk_samples_written} backpressure={storage.backpressure_count}"
         )
         try:
             device.write_output(ch, 0.0)

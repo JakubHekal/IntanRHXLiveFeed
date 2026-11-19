@@ -160,7 +160,7 @@ class RegressionTest(unittest.TestCase):
             self.assertEqual(updated["run"]["status"], "failed")
             self.assertEqual(updated["run"]["error_count"], 2)
 
-    def test_hdf5_run_is_refused_cleanly(self):
+    def test_missing_hdf5_chunks_error_cleanly(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_path = Path(tmp)
             (run_path / "run.json").write_text(json.dumps({
@@ -174,7 +174,7 @@ class RegressionTest(unittest.TestCase):
             worker.error.connect(errors.append)
             worker.start()
             self.assertEqual(len(errors), 1)
-            self.assertIn("CSV only", errors[0])
+            self.assertIn("No HDF5 chunks", errors[0])
 
     def test_rerun_into_non_empty_dir_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

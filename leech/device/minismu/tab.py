@@ -4,8 +4,8 @@ from PyQt5 import QtWidgets
 import numpy as np
 
 from leech.gui.tabs.base import DataTab
-from leech.gui.ring_buffer import RingBuffer
-from leech.gui.plot_helpers import MAX_DISPLAY_POINTS, _minmax_downsample, DISPLAY_BUFFER_SEC
+from leech.gui.ring_buffer import MinMaxModel, RingBuffer
+from leech.gui.plot_helpers import MAX_DISPLAY_POINTS, MIN_ZOOM_SEC
 from leech.telemetry_logger import append_telemetry_line
 from .canvas import SmuCanvas
 
@@ -31,7 +31,8 @@ class SmuDeviceTab(DataTab):
         self.is_receiving = False
         self._render_dur_ms = 0.0
         self._last_render_t = 0.0
-        self._ring = RingBuffer(sample_rate, 2, duration_sec=DISPLAY_BUFFER_SEC)
+        self._ring = RingBuffer(sample_rate, 2, duration_sec=SMU_DISPLAY_WINDOW_SEC)
+        self._model = MinMaxModel(sample_rate, duration_sec=SMU_DISPLAY_WINDOW_SEC, num_channels=2)
         self._fps_frame_count = 0
         self._fps_last_t = time.perf_counter()
 
@@ -90,6 +91,7 @@ class SmuDeviceTab(DataTab):
             y = np.array([[voltage], [current]], dtype=np.float64)
             self._ring.write(np.array([t], dtype=np.float64), y)
             self.sample_counter += 1
+            self._model.append_from_ring(self._ring)
             self.request_render()
         elif arr.ndim == 2:
             n = arr.shape[1]
@@ -105,6 +107,7 @@ class SmuDeviceTab(DataTab):
             y = np.vstack([voltage, current])
             self._ring.write(t, y)
             self.sample_counter += n
+            self._model.append_from_ring(self._ring)
             if self.sample_counter % 500 < n:
                 append_telemetry_line(
                     f"smutab | on_data | shape={arr.shape} "
@@ -119,8 +122,8 @@ class SmuDeviceTab(DataTab):
         if (now - self._last_render_t) < 1.0 / 30.0:
             return
         t0 = now
-        total = min(self._ring.total, self._ring.cap)
-        if total < 2:
+        earliest, latest = self._ring.raw_time_bounds()
+        if latest <= earliest:
             return
 
         for ch_idx, key, curve, plot_item in [
@@ -128,26 +131,22 @@ class SmuDeviceTab(DataTab):
             (1, 'current', self.canvas.current_curve, self.canvas.current_plot),
         ]:
             if self._follow_axes[key]:
-                n_vis = int(self.sampling_rate * SMU_DISPLAY_WINDOW_SEC)
-                t, y = self._ring.read_tail(n_vis, ch_idx=ch_idx)
-                if t.size < 2:
+                x_end = latest
+                x_start = max(earliest, x_end - SMU_DISPLAY_WINDOW_SEC)
+                xd, yd = self._model.read(x_start, x_end, MAX_DISPLAY_POINTS, ch_idx)
+                if xd.size < 2:
                     curve.setData([], [])
                     continue
-                step = max(1, t.size // MAX_DISPLAY_POINTS)
-                xd, yd = t[::step], y[::step]
-                peak = max(abs(float(y.min())), abs(float(y.max()))) if y.size else 0.0
+                peak = max(abs(float(yd.min())), abs(float(yd.max()))) if yd.size else 0.0
                 base, prefix = _si_scale(peak)
-                yd = yd / base
-                curve.setData(xd, yd)
+                curve.setData(xd.copy(), (yd / base).copy())
                 symbol = 'U' if key == 'voltage' else 'I'
                 unit = 'V' if key == 'voltage' else 'A'
                 plot_item.setLabel('left', f'{symbol} [{prefix}{unit}]')
-                x_end = float(t[-1])
-                x_start = max(0.0, x_end - SMU_DISPLAY_WINDOW_SEC)
-                x_min_lim, _ = self._ring.raw_time_bounds()
                 self._suspend_follow_detection = True
                 try:
-                    plot_item.setLimits(xMin=max(0.0, x_min_lim), xMax=max(0.0, x_end + 0.1))
+                    plot_item.setLimits(xMin=max(0.0, earliest), xMax=max(0.0, x_end + 0.1),
+                                        minXRange=MIN_ZOOM_SEC, maxXRange=SMU_DISPLAY_WINDOW_SEC)
                     plot_item.setXRange(x_start, x_end, padding=0)
                     y_lim = max(0.1, peak * 1.2 / base)
                     plot_item.setYRange(-y_lim, y_lim, padding=0)
@@ -159,33 +158,23 @@ class SmuDeviceTab(DataTab):
                 x_end = float(vr[1])
                 if x_end <= x_start:
                     x_end = x_start + SMU_DISPLAY_WINDOW_SEC
-                span = x_end - x_start
-                t_full, y_full = self._ring.read_channel(ch_idx)
-                if t_full.size < 2:
+                span = max(MIN_ZOOM_SEC, min(SMU_DISPLAY_WINDOW_SEC, x_end - x_start))
+                x_start = max(earliest, min(x_start, latest - span))
+                x_end = min(latest, x_start + span)
+                xd, yd = self._model.read(x_start, x_end, MAX_DISPLAY_POINTS, ch_idx)
+                if xd.size < 2:
                     curve.setData([], [])
                     continue
-                margin = span * 0.05
-                i0 = int(np.searchsorted(t_full, x_start - margin, side='left'))
-                i1 = int(np.searchsorted(t_full, x_end + margin, side='right'))
-                i0 = max(0, min(i0, t_full.size))
-                i1 = max(i0, min(i1, t_full.size))
-                t_src = t_full[i0:i1]
-                y_src = y_full[i0:i1]
-                if t_src.size > 2:
-                    xd, yd = _minmax_downsample(t_src, y_src, MAX_DISPLAY_POINTS)
-                else:
-                    xd, yd = t_src, y_src
-                peak = max(abs(float(y_src.min())), abs(float(y_src.max()))) if y_src.size else 0.0
+                peak = max(abs(float(yd.min())), abs(float(yd.max()))) if yd.size else 0.0
                 base, prefix = _si_scale(peak)
-                yd = yd / base
-                curve.setData(xd, yd)
+                curve.setData(xd.copy(), (yd / base).copy())
                 symbol = 'U' if key == 'voltage' else 'I'
                 unit = 'V' if key == 'voltage' else 'A'
                 plot_item.setLabel('left', f'{symbol} [{prefix}{unit}]')
-                latest_t = float(t_full[-1]) if t_full.size else 0.0
                 self._suspend_follow_detection = True
                 try:
-                    plot_item.setLimits(xMin=0.0, xMax=max(0.1, latest_t + 0.1))
+                    plot_item.setLimits(xMin=0.0, xMax=max(0.1, latest + 0.1),
+                                        minXRange=MIN_ZOOM_SEC, maxXRange=SMU_DISPLAY_WINDOW_SEC)
                     y_lim = max(0.1, peak * 1.2 / base)
                     plot_item.setYRange(-y_lim, y_lim, padding=0)
                 finally:
@@ -206,6 +195,7 @@ class SmuDeviceTab(DataTab):
 
     def clear(self):
         self._ring.clear()
+        self._model.reset()
         self.sample_counter = 0
         self.canvas.voltage_curve.setData([], [])
         self.canvas.current_curve.setData([], [])

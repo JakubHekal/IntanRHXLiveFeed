@@ -10,9 +10,9 @@ if str(_project_root) not in sys.path:
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
-    QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton, QStatusBar,
-    QToolButton, QVBoxLayout, QWidget, QMenu,
+    QApplication, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout,
+    QInputDialog, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
+    QStatusBar, QToolButton, QVBoxLayout, QWidget, QMenu,
 )
 
 import qdarkstyle
@@ -85,6 +85,7 @@ class MainWindow(QMainWindow):
         self._run_device_instances = []
         self._run_device_instance_map = {}
         self._experiment_runner = None
+        self._replay_session = None
         self.main_stage = MainStage()
         root_layout.addWidget(self.main_stage, 1)
 
@@ -216,6 +217,8 @@ class MainWindow(QMainWindow):
         save_geometry(bytes(self.saveGeometry()))
         if getattr(self, '_experiment_runner', None) is not None and self._experiment_runner.is_running():
             self._experiment_runner.stop()
+        if getattr(self, '_replay_session', None) is not None:
+            self._replay_session.stop()
         self._close_devices()
         self.main_stage.tab_host.shutdown_workers()
         super().closeEvent(event)
@@ -300,6 +303,27 @@ class MainWindow(QMainWindow):
         self._fps_status_label = QLabel("FPS: 0.0")
         status.addPermanentWidget(self._fps_status_label)
 
+        self._replay_badge = QLabel("REPLAY")
+        self._replay_badge.setStyleSheet(
+            f"background: {ACCENT_BLUE}; color: white; font-weight: 700;"
+            " padding: 2px 8px; border-radius: 3px;"
+        )
+        self._replay_badge.hide()
+        status.addPermanentWidget(self._replay_badge)
+
+        self._replay_speed = QComboBox()
+        self._replay_speed.addItems(["0.5x", "1x", "2x", "4x", "Instant"])
+        self._replay_speed.setCurrentText("1x")
+        self._replay_speed.hide()
+        self._replay_speed.currentTextChanged.connect(self._on_replay_speed_changed)
+        status.addPermanentWidget(self._replay_speed)
+
+        self._replay_stop = QToolButton()
+        self._replay_stop.setText("Stop Replay")
+        self._replay_stop.hide()
+        self._replay_stop.clicked.connect(self._on_replay_stop_clicked)
+        status.addPermanentWidget(self._replay_stop)
+
     def _on_run_action(self, action, run_path):
         if action == "rerun":
             self._on_run_rerun(run_path)
@@ -311,6 +335,11 @@ class MainWindow(QMainWindow):
     def _on_run_rerun(self, run_path):
         if self._experiment_runner is not None and self._experiment_runner.is_running():
             QMessageBox.information(self, "Already Running", "An experiment is already in progress.")
+            return
+        if self._replay_session is not None:
+            QMessageBox.information(
+                self, "Replay Running", "Stop the replay before recording a run."
+            )
             return
         if not self._current_experiment_path:
             QMessageBox.warning(self, "No Experiment", "Open or create an experiment first.")
@@ -557,6 +586,11 @@ class MainWindow(QMainWindow):
         return True
 
     def _on_play_clicked(self):
+        if self._replay_session is not None:
+            QMessageBox.information(
+                self, "Replay Running", "Stop the replay before recording a run."
+            )
+            return
         if self._experiment_runner is not None:
             self._experiment_runner.resume()
             self.main_stage.btn_play.setEnabled(False)
@@ -567,6 +601,11 @@ class MainWindow(QMainWindow):
     def _on_experiment_run(self):
         if self._experiment_runner is not None and self._experiment_runner.is_running():
             QMessageBox.information(self, "Already Running", "An experiment is already in progress.")
+            return
+        if self._replay_session is not None:
+            QMessageBox.information(
+                self, "Replay Running", "Stop the replay before recording a run."
+            )
             return
         if not self._current_experiment_path:
             QMessageBox.information(self, "No Experiment",
@@ -862,75 +901,108 @@ class MainWindow(QMainWindow):
         self._experiment_runner = None
 
     def _on_replay_run(self, run_path):
-        from leech.workers.replay_worker import ReplayWorker
+        from leech.workers.replay_session import ReplaySession
+        if self._replay_session is not None:
+            QMessageBox.information(
+                self, "Replay Running", "Only one replay can run at a time."
+            )
+            return
+        if self._experiment_runner is not None and self._experiment_runner.is_running():
+            QMessageBox.information(
+                self, "Recording", "Stop the recording before starting a replay."
+            )
+            return
         metadata = self._read_run(run_path)
         if metadata is None:
             return
-        if "devices" in metadata:
-            devices = metadata.get("devices", [])
-            if not devices:
-                QMessageBox.warning(self, "Replay", "Run contains no replayable device.")
-                return
-            device = devices[0]
-            device_id = device.get("device_id", "")
-            device_name = device.get("name", "")
-            device_type = device.get("device_type", "unknown")
-            config = device.get("config", {})
-        else:
-            device_id = ""
-            device_name = metadata.get("device_name") or Path(run_path).name
-            device_type = metadata.get("device_type", "unknown")
-            config = metadata
-        sample_rate = config.get("sample_rate", 20000.0)
-        num_channels = config.get("num_channels", 1)
-        storage = metadata.get("storage") if isinstance(metadata.get("storage"), dict) else {}
-        fmt = storage.get("format") or "csv"
-        if fmt != "csv":
-            QMessageBox.warning(
-                self, "Replay", f"Replay supports CSV only (run storage format: {fmt})."
+        devices = metadata.get("devices")
+        if not isinstance(devices, list) or not devices:
+            devices = [{
+                "name": metadata.get("device_name") or Path(run_path).name,
+                "device_type": metadata.get("device_type", "unknown"),
+                "config": metadata,
+            }]
+        devices = [item for item in devices if isinstance(item, dict)]
+        if not devices:
+            QMessageBox.warning(self, "Replay", "Run contains no devices to replay.")
+            return
+
+        self._set_edit_mode(False)
+        self.main_stage.tab_host.clear_all()
+        for device in devices:
+            name = str(device.get("name") or "Device")
+            device_type = str(device.get("device_type", "unknown"))
+            config = device.get("config") if isinstance(device.get("config"), dict) else {}
+            self._open_tab(
+                name,
+                device_type,
+                sample_rate=float(config.get("sample_rate", 20000.0)),
+                num_channels=int(config.get("num_channels", 1)),
             )
-            return
-        data_dir = storage.get("data_dir")
-        raw_root = Path(run_path) / (data_dir if isinstance(data_dir, str) and data_dir else "raw")
-        # New format first (name_id), then id-only and name-only legacy layouts.
-        candidates = []
-        if device_id:
-            candidates.append(raw_root / sanitize_raw_key(f"{device_name}_{device_id}"))
-            candidates.append(raw_root / sanitize_raw_key(device_id))
-        if device_name:
-            candidates.append(raw_root / sanitize_raw_key(str(device_name)))
-        device_dir = next((c for c in candidates if c.exists()), None)
-        if device_dir is None and raw_root.name == "raw":
-            raw_root = Path(run_path) / "raw_chunks"
-            candidates = [
-                raw_root / sanitize_raw_key(f"{device_name}_{device_id}") if device_id else None,
-                raw_root / sanitize_raw_key(device_id) if device_id else None,
-                raw_root / sanitize_raw_key(str(device_name)),
-            ]
-            device_dir = next((c for c in candidates if c is not None and c.exists()), None)
-        if device_dir is None or not device_dir.exists():
-            QMessageBox.warning(self, "Replay", f"No raw data found for {device_name or device_type}")
-            return
-        replay_name = f"Replay: {Path(run_path).name} — {device_name}"
-        self._open_tab(
-            replay_name,
-            device_type,
-            sample_rate=sample_rate,
-            num_channels=num_channels,
+        self.main_stage.tab_host.set_receiving_state(True)
+
+        session = ReplaySession(run_path, self)
+        session.device_configured.connect(self.main_stage.tab_host.on_device_configured)
+        session.data_received.connect(self.main_stage.tab_host.on_data)
+        session.markers_received.connect(self.main_stage.tab_host.add_markers)
+        session.unsupported.connect(self._on_replay_unsupported)
+        session.error.connect(
+            lambda message: self.statusBar().showMessage(f"Replay error: {message}")
         )
-        worker = ReplayWorker(
-            run_path,
-            replay_name,
-            self,
-            device_dir=device_dir,
-            device_id=device_id,
-            source_device_name=device_name,
-        )
-        worker.data_received.connect(self.main_stage.tab_host.on_data)
-        worker.error.connect(lambda msg: self.statusBar().showMessage(f"Replay error: {msg}"))
-        worker.finished.connect(lambda: self.statusBar().showMessage("Replay finished"))
-        worker.start()
-        self._replay_worker = worker
+        session.progress.connect(self._on_replay_progress)
+        session.finished.connect(self._on_replay_stopped)
+        session.stopped.connect(self._on_replay_stopped)
+        self._replay_session = session
+        speed = self._replay_speed_value()
+        if not session.start(speed):
+            self._replay_session = None
+            self._replay_badge.hide()
+            self._replay_speed.hide()
+            self._replay_stop.hide()
+            self._set_edit_mode(True)
+            return
+        self._replay_badge.show()
+        self._replay_speed.show()
+        self._replay_stop.show()
+        self.statusBar().showMessage(f"Replaying: {Path(run_path).name}")
+
+    def _replay_speed_value(self):
+        text = self._replay_speed.currentText().lower()
+        if text.startswith("instant"):
+            return "instant"
+        try:
+            return float(text.rstrip("x"))
+        except ValueError:
+            return 1.0
+
+    def _on_replay_speed_changed(self, _text):
+        if self._replay_session is not None:
+            self._replay_session.set_speed(self._replay_speed_value())
+
+    def _on_replay_unsupported(self, name, message):
+        self.main_stage.tab_host.show_message(name, message)
+        self.statusBar().showMessage(f"{name}: {message}")
+
+    def _on_replay_stop_clicked(self):
+        if self._replay_session is not None:
+            self._replay_session.stop()
+
+    def _on_replay_progress(self, elapsed, total):
+        if total > 0:
+            self.statusBar().showMessage(
+                f"Replay {elapsed:0.1f}s / {total:0.1f}s"
+            )
+        else:
+            self.statusBar().showMessage(f"Replay {elapsed:0.1f}s")
+
+    def _on_replay_stopped(self):
+        self._replay_session = None
+        self._replay_badge.hide()
+        self._replay_speed.hide()
+        self._replay_stop.hide()
+        self.main_stage.tab_host.clear_all()
+        self._set_edit_mode(True)
+        self.statusBar().showMessage("Replay finished")
 
     def _on_exp_error(self, device_name, error_message):
         print(f"[UI] Experiment error: {device_name}: {error_message}")
