@@ -239,16 +239,22 @@ class RunStreamStorageModeTest(unittest.TestCase):
         self.assertTrue(any("rhs=" in line for line in telemetry if line.startswith("acq_start")))
         self.assertTrue(any("rhs=" in line for line in telemetry if line.startswith("acq_end")))
 
-    def test_csv_mode_still_writes_chunks(self):
-        dev = _FakeRhsDevice()
-        dev.storage_mode = "csv"
-        t = self._thread_for(dev, self.root)
-        with patch.object(er, "append_telemetry_line", lambda line: None):
-            t._run_stream(0, dev, "IntanA", {"block_label": "rest", "duration_s": 0.3}, 0.3)
-        self.assertIsNone(dev.session)
-        csvs = list(self.root.rglob("*.csv"))
-        self.assertTrue(csvs, "csv mode must still write a chunk file")
-        self.assertIn("000001_rest", csvs[0].name)
+    def test_csv_mode_coerces_to_rhs_and_warns_once(self):
+        with patch("builtins.print") as printed:
+            dev = IntanRHXDevice(autolaunch=False, storage_mode="csv")
+        self.assertEqual(dev.storage_mode, "rhs")
+        warnings = [
+            call for call in printed.call_args_list
+            if call.args and "storage_mode" in call.args[0]
+        ]
+        self.assertEqual(len(warnings), 1)
+
+    def test_configure_storage_mode_coerces_to_rhs(self):
+        dev = IntanRHXDevice(autolaunch=False)
+        with patch("builtins.print") as printed:
+            dev.configure(storage_mode="csv")
+        self.assertEqual(dev.storage_mode, "rhs")
+        self.assertEqual(len(printed.call_args_list), 1)
 
 
 if __name__ == "__main__":

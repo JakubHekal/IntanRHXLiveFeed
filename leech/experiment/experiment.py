@@ -282,6 +282,9 @@ def _device_storage_format(device) -> str:
     if not isinstance(device, dict):
         return "csv"
     device_type = str(device.get("device_type", "")).lower()
+    if "rhx" in device_type or "intan" in device_type:
+        # Native .rhd/.rhs, no longer configurable.
+        return "rhs"
     if "mcs" in device_type:
         return "hdf5"
     config = device.get("config") if isinstance(device.get("config"), dict) else {}
@@ -306,8 +309,24 @@ def _storage_format(devices) -> str:
     return "csv"
 
 
+def _probe_storage(directory: Path) -> dict:
+    """Which storage artifacts a directory tree holds (native, hdf5, csv)."""
+    if not directory.is_dir():
+        return {"rhs": False, "hdf5": False, "csv": False}
+    return {
+        "rhs": any(directory.rglob("*.rhd")) or any(directory.rglob("*.rhs")),
+        "hdf5": any(directory.rglob("chunk_*.h5")),
+        "csv": any(directory.rglob("chunk_*.csv")),
+    }
+
+
 def resolve_storage(device_record, run_path, device_dir=None):
-    """Resolve (format, chunks_dir) per device; first hit wins."""
+    """Resolve (format, data_dir) for a device; disk probe outranks metadata.
+
+    Native files always resolve as "rhs" (the canonical native format, even
+    when the file is .rhd). Old runs without storage metadata resolve from
+    the files they contain.
+    """
     run_path = Path(run_path)
     metadata = {}
     for name in ("run.json", "metadata.json"):
@@ -321,46 +340,57 @@ def resolve_storage(device_record, run_path, device_dir=None):
     run_storage = metadata.get("storage") if isinstance(metadata.get("storage"), dict) else {}
     record = device_record if isinstance(device_record, dict) else {}
     device_storage = record.get("storage") if isinstance(record.get("storage"), dict) else {}
+    device_type = str(record.get("device_type", "")).lower()
+    is_intan = "rhx" in device_type or "intan" in device_type
 
     fmt = device_storage.get("format")
     if not isinstance(fmt, str) or not fmt:
         fmt = _device_storage_format(record) if record else None
 
+    candidates = []
     if device_dir is not None:
-        candidates = [Path(device_dir)]
-    else:
-        data_dir = device_storage.get("data_dir") or run_storage.get("data_dir")
-        candidates = []
+        candidates.append(Path(device_dir))
+    for data_dir in (device_storage.get("data_dir"), run_storage.get("data_dir")):
         if isinstance(data_dir, str) and data_dir:
             candidates.append(run_path / data_dir)
-        candidates.extend([run_path / "raw", run_path / "raw_chunks"])
+    candidates.append(run_path / "raw")
+    device_id = record.get("device_id")
+    if device_id:
+        candidates.append(run_path / "raw" / str(device_id))
+    candidates.append(run_path / "raw_chunks")
 
+    # First directory that actually holds files wins, so devices in a mixed
+    # run don't read each other's chunks.
     chunks_dir = None
+    probe = {"rhs": False, "hdf5": False, "csv": False}
     for candidate in candidates:
-        if candidate.is_dir():
-            if any(candidate.rglob("chunk_*.h5")) or any(candidate.rglob("chunk_*.csv")):
-                chunks_dir = candidate
-                break
+        found = _probe_storage(candidate)
+        if any(found.values()):
+            chunks_dir = candidate
+            probe = found
+            break
     if chunks_dir is None:
-        for candidate in candidates:
-            if candidate.is_dir():
-                chunks_dir = candidate
-                break
-    if chunks_dir is None:
-        chunks_dir = run_path / "raw"
+        chunks_dir = next((c for c in candidates if c.is_dir()), run_path / "raw")
 
-    has_h5 = any(chunks_dir.rglob("chunk_*.h5"))
-    has_csv = any(chunks_dir.rglob("chunk_*.csv"))
-    # Files on disk outrank metadata: mixed runs used to record the first
-    # device's format at run level and mislabel the rest.
-    if has_h5 and not has_csv:
-        fmt = "hdf5"
-    elif has_csv and not has_h5:
-        fmt = "csv"
+    formats = {name for name, present in probe.items() if present}
+    if len(formats) == 1:
+        fmt = formats.pop()
+    elif formats:
+        # Mixed set: the device type decides.
+        if is_intan:
+            fmt = "rhs"
+        elif "mcs" in device_type:
+            fmt = "hdf5"
+        elif fmt not in formats:
+            fmt = "hdf5" if probe["hdf5"] else "csv"
     elif not fmt:
-        fmt = run_storage.get("format") if isinstance(run_storage.get("format"), str) else None
-    if not fmt:
-        raise FileNotFoundError(f"No storage format or chunk files in {chunks_dir}")
+        fmt = run_storage.get("format")
+    if not isinstance(fmt, str) or not fmt:
+        checked = ", ".join(str(candidate) for candidate in candidates)
+        raise FileNotFoundError(
+            f"No storage format or data files for device {record.get('name')!r} "
+            f"in {run_path}; checked: {checked}"
+        )
     return fmt, chunks_dir
 
 

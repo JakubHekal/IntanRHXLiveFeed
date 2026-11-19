@@ -39,6 +39,13 @@ class IntanRHXDevice(Device):
     # instance value from the actual pulse-train parameters.
     _stim_pulses_per_train = MAX_PULSES_PER_TRAIN
 
+    @staticmethod
+    def _coerce_storage_mode(mode) -> str:
+        mode = str(mode or "rhs")
+        if mode != "rhs":
+            print(f"[IntanRHX] storage_mode {mode!r} is no longer supported; using rhs")
+        return "rhs"
+
     def __init__(self,
                  host="127.0.0.1",
                  command_port=5000,
@@ -58,7 +65,7 @@ class IntanRHXDevice(Device):
         self.num_channels = num_channels
         self._sample_rate = None
         self.verbose = verbose
-        self.storage_mode = storage_mode
+        self.storage_mode = self._coerce_storage_mode(storage_mode)
         self.autolaunch = bool(autolaunch)
         self.rhx_exe_path = rhx_exe_path or ""
         self.rhx_device_serial = rhx_device_serial or ""
@@ -710,7 +717,9 @@ class IntanRHXDevice(Device):
 
     def configure(self, **kwargs):
         for key, value in kwargs.items():
-            if "channels" in key:
+            if key == "storage_mode":
+                self.storage_mode = self._coerce_storage_mode(value)
+            elif "channels" in key:
                 if str(value).strip():
                     indices = self._parse_channel_range(str(value))
                     self._set_enabled_channels(indices)
@@ -973,7 +982,7 @@ class IntanRHXDevice(Device):
             ParamDef("num_channels", "Num Channels", "int", default=128, min_val=1, max_val=512),
             ParamDef("buffer_duration_sec", "Buffer Duration (s)", "float", default=5.0, min_val=1.0, max_val=60.0),
             ParamDef("storage_mode", "Experiment Storage", "choice", default="rhs",
-                     choices=["rhs", "csv"]),
+                     choices=["rhs"]),
             ParamDef("autolaunch", "Auto-launch IntanRHX", "bool", default=True),
             ParamDef("rhx_exe_path", "IntanRHX Path (blank = autodiscover)", "str", default=""),
             ParamDef("rhx_device_serial", "RHX Device Serial (blank = first detected)", "str", default=""),

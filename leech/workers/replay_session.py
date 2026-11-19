@@ -75,9 +75,11 @@ class ReplaySession(QtCore.QObject):
             except (OSError, ValueError, FileNotFoundError) as exc:
                 failures.append(f"{name}: {exc}")
                 continue
-            if fmt == "rhs":
+            device_type = str(record.get("device_type", ""))
+            if fmt == "csv" and self._is_intan(device_type):
                 self.unsupported.emit(
-                    name, "Native RHX recording — open this run in Intan RHX."
+                    name,
+                    "Old Intan CSV run — replay supports native .rhd/.rhs or HDF5.",
                 )
                 continue
             try:
@@ -85,6 +87,7 @@ class ReplaySession(QtCore.QObject):
                     chunks_dir, fmt,
                     sample_rate=float(config.get("sample_rate", 20000.0)),
                     label_order=self._label_order(record),
+                    device_type=device_type,
                 )
             except Exception as exc:  # noqa: BLE001 - surfaced to the user
                 failures.append(f"{name}: {exc}")
@@ -208,6 +211,11 @@ class ReplaySession(QtCore.QObject):
         self._sources.clear()
 
     # ── metadata ────────────────────────────────────────────────────────
+    @staticmethod
+    def _is_intan(device_type: str) -> bool:
+        value = str(device_type or "").lower()
+        return "rhx" in value or "intan" in value
+
     @staticmethod
     def _label_order(record):
         blocks = record.get("blocks") if isinstance(record, dict) else None

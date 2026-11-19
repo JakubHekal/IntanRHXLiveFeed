@@ -6,7 +6,10 @@ from pathlib import Path
 import numpy as np
 
 from leech.workers.hdf5_chunk_writer import Hdf5ChunkWriter
-from leech.workers.replay_source import CsvSource, Hdf5Source, chunk_files
+from leech.device.csv_source import CsvSource
+from leech.device.mcs_mea.replay import McsHdf5Source
+from leech.device.replay_paths import chunk_files
+from leech.workers.replay_source import make_source
 from leech.workers.replay_session import ReplaySession
 
 ADC_STEP_UV = 0.059605
@@ -39,7 +42,7 @@ class ReplaySourceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             raw = (np.arange(36, dtype=np.int32).reshape(3, 12) - 10)
             expected = _write_hdf5(tmp, raw)
-            source = Hdf5Source(Path(tmp))
+            source = McsHdf5Source(Path(tmp))
             self.assertEqual(source.num_channels, 3)
             self.assertEqual(source.sample_rate, 20000)
             self.assertEqual(source.total_samples, 12)
@@ -57,6 +60,30 @@ class ReplaySourceTest(unittest.TestCase):
             source.close()
             np.testing.assert_allclose(joined, expected, rtol=0, atol=1e-6)
             self.assertEqual(markers, [(4, 3, "stim")])
+
+    def test_replay_sources_live_with_their_devices(self):
+        self.assertEqual(CsvSource.__module__, "leech.device.csv_source")
+        self.assertEqual(
+            McsHdf5Source.__module__, "leech.device.mcs_mea.replay"
+        )
+
+    def test_factory_dispatches_to_device_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = (np.arange(36, dtype=np.int32).reshape(3, 12) - 10)
+            _write_hdf5(tmp, raw)
+            source = make_source(Path(tmp), "hdf5")
+            self.assertIsInstance(source, McsHdf5Source)
+            source.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "chunk_A_000001.csv").write_text(
+                "time_s,A_uV,marker_id,marker_name\n0,1,0,\n",
+                encoding="utf-8",
+            )
+            source = make_source(root, "csv", sample_rate=10.0)
+            self.assertIsInstance(source, CsvSource)
+            source.close()
 
     def test_legacy_chunks_follow_recorded_block_order(self):
         with tempfile.TemporaryDirectory() as tmp:

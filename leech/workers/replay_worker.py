@@ -57,11 +57,18 @@ class ReplayWorker(QtCore.QObject):
         except (OSError, ValueError, FileNotFoundError) as exc:
             self.error.emit(str(exc))
             return
-        if fmt == "rhs":
-            self.error.emit("Native RHX recording — open in Intan RHX")
+        device_type = str(record.get("device_type", ""))
+        if fmt == "csv" and ("rhx" in device_type.lower() or "intan" in device_type.lower()):
+            self.error.emit(
+                "Old Intan CSV run — replay supports native .rhd/.rhs or HDF5."
+            )
             return
         try:
-            self._source = make_source(chunks_dir, fmt, label_order=self._label_order())
+            self._source = make_source(
+                chunks_dir, fmt,
+                label_order=self._label_order(),
+                device_type=device_type,
+            )
         except Exception as exc:  # noqa: BLE001 - surfaced to the UI
             self.error.emit(str(exc))
             return
@@ -146,20 +153,28 @@ class ReplayWorker(QtCore.QObject):
             return None
         return data.T
 
+    def _finish(self):
+        self._timer.stop()
+        source = self._source
+        self._source = None
+        closer = getattr(source, "close", None)
+        if callable(closer):
+            closer()
+
     def _emit_next_chunk(self):
         if self._source is None:
-            self._timer.stop()
+            self._finish()
             self.finished.emit()
             return
         try:
             n = max(1, int(self._source.sample_rate * 0.05))
             data, _markers = self._source.read(n)
         except Exception as exc:  # noqa: BLE001 - surfaced to the UI
-            self._timer.stop()
+            self._finish()
             self.error.emit(f"Could not replay {self._device_name}: {exc}")
             return
         if data is None or data.shape[1] == 0:
-            self._timer.stop()
+            self._finish()
             self.finished.emit()
             return
         self.data_received.emit(self._device_name, data)

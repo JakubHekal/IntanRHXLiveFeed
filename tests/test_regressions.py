@@ -153,7 +153,7 @@ class RegressionTest(unittest.TestCase):
             )
             loaded = ExperimentManager.load_run(run_path)
             self.assertEqual(loaded["schema_version"], 3)
-            self.assertEqual(loaded["storage"], {"format": "csv", "data_dir": "raw"})
+            self.assertEqual(loaded["storage"], {"format": "rhs", "data_dir": "raw"})
             self.assertEqual(loaded["sequence"][0]["device_id"], device_b)
             ExperimentManager.update_run(run_path, "failed", error_count=2)
             updated = ExperimentManager.load_run(run_path)
