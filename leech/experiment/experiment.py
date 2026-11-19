@@ -278,13 +278,151 @@ def _config_to_dict(config: ExperimentConfig) -> dict:
     })
 
 
+def _storage_globs() -> dict:
+    """format -> file patterns, assembled from the registered device classes."""
+    from leech.device.registry import DEVICE_CLASSES
+
+    globs = {}
+    for cls in DEVICE_CLASSES.values():
+        fmt = getattr(cls, "storage_format", "csv")
+        patterns = tuple(getattr(cls, "storage_globs", ()))
+        globs[fmt] = tuple(dict.fromkeys(globs.get(fmt, ()) + patterns))
+    globs.setdefault("csv", ("chunk_*.csv",))
+    return globs
+
+
+def _class_storage_format(device):
+    """Storage format declared by the registered class, or None."""
+    if not isinstance(device, dict):
+        return None
+    from leech.device.registry import DEVICE_CLASSES
+
+    cls = DEVICE_CLASSES.get(str(device.get("device_type", "")))
+    if cls is None:
+        return None
+    return getattr(cls, "storage_format", None)
+
+
+def _legacy_storage_format(device):
+    """Guessed format for device types from older builds / unregistered plugins."""
+    if not isinstance(device, dict):
+        return None
+    device_type = str(device.get("device_type", "")).lower()
+    if "rhx" in device_type or "intan" in device_type:
+        return "rhs"
+    if "mcs" in device_type:
+        return "hdf5"
+    return None
+
+
+def _device_storage_format(device) -> str:
+    if not isinstance(device, dict):
+        return "csv"
+    declared = _class_storage_format(device) or _legacy_storage_format(device)
+    if declared:
+        return declared
+    config = device.get("config") if isinstance(device.get("config"), dict) else {}
+    mode = config.get("storage_format", config.get("storage_mode"))
+    if isinstance(mode, str) and mode in ("rhs", "csv", "hdf5"):
+        return mode
+    return "csv"
+
+
+def _device_data_dir(device) -> str:
+    name = str(device.get("name", "device"))
+    device_id = device.get("device_id")
+    key = f"{name}_{device_id}" if device_id else name
+    key = re.sub(r"[^A-Za-z0-9._-]+", "_", key).strip("._") or "device"
+    return f"raw/{key}"
+
+
 def _storage_format(devices) -> str:
     for device in devices:
-        config = device.get("config") if isinstance(device, dict) else None
-        mode = config.get("storage_mode") if isinstance(config, dict) else None
-        if isinstance(mode, str) and mode:
-            return mode
+        if isinstance(device, dict):
+            return _device_storage_format(device)
     return "csv"
+
+
+def _probe_storage(directory: Path) -> dict:
+    """Which storage formats a directory tree holds."""
+    globs = _storage_globs()
+    if not directory.is_dir():
+        return {fmt: False for fmt in globs}
+    found = {}
+    for fmt, patterns in globs.items():
+        found[fmt] = any(next(directory.rglob(p), None) is not None for p in patterns)
+    return found
+
+
+def resolve_storage(device_record, run_path, device_dir=None):
+    """Resolve (format, data_dir) for a device; disk probe outranks metadata.
+
+    Native files always resolve as "rhs" (the canonical native format, even
+    when the file is .rhd). Old runs without storage metadata resolve from
+    the files they contain.
+    """
+    run_path = Path(run_path)
+    metadata = {}
+    for name in ("run.json", "metadata.json"):
+        path = run_path / name
+        if path.exists():
+            try:
+                metadata = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                metadata = {}
+            break
+    run_storage = metadata.get("storage") if isinstance(metadata.get("storage"), dict) else {}
+    record = device_record if isinstance(device_record, dict) else {}
+    device_storage = record.get("storage") if isinstance(record.get("storage"), dict) else {}
+    declared = _class_storage_format(record) or _legacy_storage_format(record)
+
+    fmt = device_storage.get("format")
+    if not isinstance(fmt, str) or not fmt:
+        fmt = _device_storage_format(record) if record else None
+
+    candidates = []
+    if device_dir is not None:
+        candidates.append(Path(device_dir))
+    for data_dir in (device_storage.get("data_dir"), run_storage.get("data_dir")):
+        if isinstance(data_dir, str) and data_dir:
+            candidates.append(run_path / data_dir)
+    candidates.append(run_path / "raw")
+    device_id = record.get("device_id")
+    if device_id:
+        candidates.append(run_path / "raw" / str(device_id))
+    candidates.append(run_path / "raw_chunks")
+
+    # First directory that actually holds files wins, so devices in a mixed
+    # run don't read each other's chunks.
+    chunks_dir = None
+    probe = {name: False for name in _storage_globs()}
+    for candidate in candidates:
+        found = _probe_storage(candidate)
+        if any(found.values()):
+            chunks_dir = candidate
+            probe = found
+            break
+    if chunks_dir is None:
+        chunks_dir = next((c for c in candidates if c.is_dir()), run_path / "raw")
+
+    formats = {name for name, present in probe.items() if present}
+    if len(formats) == 1:
+        fmt = formats.pop()
+    elif formats:
+        # Mixed set: the device's declared format decides, else keep metadata.
+        if declared in formats:
+            fmt = declared
+        elif fmt not in formats:
+            fmt = "hdf5" if probe.get("hdf5") else "csv"
+    elif not fmt:
+        fmt = run_storage.get("format")
+    if not isinstance(fmt, str) or not fmt:
+        checked = ", ".join(str(candidate) for candidate in candidates)
+        raise FileNotFoundError(
+            f"No storage format or data files for device {record.get('name')!r} "
+            f"in {run_path}; checked: {checked}"
+        )
+    return fmt, chunks_dir
 
 
 class ExperimentManager:
@@ -369,6 +507,13 @@ class ExperimentManager:
     @staticmethod
     def init_run(run_path: str | Path, config_data: dict, devices: list, sequence: list) -> Path:
         run_path = Path(run_path)
+        devices = deepcopy(devices)
+        for device in devices:
+            if isinstance(device, dict) and "storage" not in device:
+                device["storage"] = {
+                    "format": _device_storage_format(device),
+                    "data_dir": _device_data_dir(device),
+                }
         run_json = {
             "experiment": {
                 "name": config_data.get("metadata", {}).get("experiment_name", ""),

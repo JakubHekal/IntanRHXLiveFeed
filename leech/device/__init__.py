@@ -3,7 +3,7 @@
 from .base import Device, ChannelInfo, OutputSink, DeviceOperation, ParamDef
 from .registry import DEVICE_CLASSES, _SYSTEM_OPERATIONS, MiniSMUDevice
 from .intan_rhx import IntanRHXDevice, GetSampleRateFailure
-from .mcs_mea import McsMEA2100Device, McsMeaTab
+from .mcs_mea import McsMEA2100Device
 from .simulated import SimulatedRecordingDevice, SimulatedActorDevice, SimulatedCombinedDevice
 
 __all__ = [
@@ -11,7 +11,6 @@ __all__ = [
     "GetSampleRateFailure",
     "IntanRHXDevice",
     "McsMEA2100Device",
-    "McsMeaTab",
     "SimulatedRecordingDevice",
     "SimulatedActorDevice",
     "SimulatedCombinedDevice",

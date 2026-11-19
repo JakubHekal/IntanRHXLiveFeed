@@ -28,7 +28,7 @@ class StageLayoutTest(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def test_version_bumped(self):
-        self.assertEqual(__version__, "1.5.1")
+        self.assertEqual(__version__, "1.6.0")
 
     def test_main_stage_uses_splitter(self):
         stage = MainStage()

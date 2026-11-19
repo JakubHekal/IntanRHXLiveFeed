@@ -22,6 +22,42 @@ class TimelineSmokeTest(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_structure_changed_only_on_plan_structure(self):
+        timeline = ExperimentTimeline()
+        events = []
+        timeline.structure_changed.connect(lambda: events.append(1))
+
+        timeline.add_device("Dev", "unknown")
+        self.assertEqual(len(events), 1)
+
+        timeline.add_block(0, "New Block", start=0, duration=30)
+        timeline.update_block(0, 0, "Renamed", 30, 30)
+        self.assertEqual(len(events), 1, "block edits must not invalidate tabs")
+
+        timeline.remove_device(0)
+        self.assertEqual(len(events), 2)
+
+        timeline.add_device("Dev", "unknown")
+        timeline.add_system_device()
+        timeline.clear_all()
+        self.assertEqual(len(events), 4)
+        self.assertEqual(timeline._devices[0][2], "__system__")
+
+    def test_dirty_flag_marks_and_clears_title(self):
+        with patch("leech.ui.load_recent_experiment", return_value=""):
+            window = MainWindow()
+        try:
+            window.setWindowTitle("LEECH \u2014 Demo")
+            window._set_dirty(True)
+            self.assertEqual(window.windowTitle(), "LEECH \u2014 Demo *")
+            window._set_dirty(True)
+            self.assertEqual(window.windowTitle(), "LEECH \u2014 Demo *")
+            window._set_dirty(False)
+            self.assertEqual(window.windowTitle(), "LEECH \u2014 Demo")
+            self.assertFalse(window._dirty)
+        finally:
+            window.deleteLater()
+
     def test_migration_and_name_only_device_removal(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

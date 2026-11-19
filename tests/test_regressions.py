@@ -10,11 +10,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 from PyQt5.QtWidgets import QApplication
 
+from leech.device.base import DeviceOperation
+from leech.device.csv_source import CsvSource
+from leech.device.replay_paths import chunk_files
 from leech.experiment.experiment import ExperimentManager, SequenceStep
 from leech.experiment.experiment_dialog import RunExperimentDialog
 from leech.experiment.experiment_runner import _RunnerThread
 from leech.screens.timeline import DeviceRow
-from leech.workers.replay_worker import ReplayWorker
+from leech.workers.replay_session import ReplaySession
 
 
 class RegressionTest(unittest.TestCase):
@@ -56,6 +59,39 @@ class RegressionTest(unittest.TestCase):
         )
         self.assertEqual(results, [(False, "Failed")])
 
+    def test_runner_dispatches_custom_operation_handler(self):
+        calls = []
+
+        class CustomDevice:
+            connected = True
+
+            def get_operations(self):
+                return [DeviceOperation(
+                    "Zap", "Zap",
+                    handler=lambda runner, idx, dev, name, params, dur:
+                        calls.append((name, params.get("x"))),
+                )]
+
+            def canonical_operation_id(self, operation_id):
+                return operation_id
+
+            def close(self):
+                pass
+
+        row = DeviceRow("Custom", [], "future", device_id="c1")
+        row.instance = CustomDevice()
+        step = SequenceStep(
+            action="Zap",
+            operation_id="Zap",
+            device_name="Custom",
+            device_id="c1",
+            parameters={"x": 7, "_start": 0},
+        )
+        runner = _RunnerThread([row], [step], Path("run"))
+        with patch("leech.experiment.experiment_runner.append_telemetry_line"):
+            runner.run()
+        self.assertEqual(calls, [("Custom", 7)])
+
     def test_replay_reads_channels_and_uses_run_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_path = Path(tmp)
@@ -81,19 +117,17 @@ class RegressionTest(unittest.TestCase):
                 "0,5,6,0,beta\n",
                 encoding="utf-8",
             )
-            worker = ReplayWorker(
-                run_path,
-                "Replay",
-                device_dir=raw_dir,
-                device_id="device-a",
-                source_device_name="A",
-            )
-            ordered = sorted([first, second], key=worker._chunk_sort_key)
+            ordered = chunk_files(raw_dir, "csv", {"second": 0, "first": 1})
             self.assertEqual(ordered, [second, first])
-            np.testing.assert_array_equal(
-                worker._read_chunk(first),
-                np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+            source = CsvSource(
+                raw_dir, sample_rate=0.1, label_order={"second": 0, "first": 1}
             )
+            chunk, _ = source.read(1)
+            np.testing.assert_array_equal(
+                chunk,
+                np.array([[5.0], [6.0]], dtype=np.float32),
+            )
+            source.close()
 
     def test_dialog_transfers_or_closes_devices_once(self):
         class Device:
@@ -153,28 +187,34 @@ class RegressionTest(unittest.TestCase):
             )
             loaded = ExperimentManager.load_run(run_path)
             self.assertEqual(loaded["schema_version"], 3)
-            self.assertEqual(loaded["storage"], {"format": "csv", "data_dir": "raw"})
+            self.assertEqual(loaded["storage"], {"format": "rhs", "data_dir": "raw"})
             self.assertEqual(loaded["sequence"][0]["device_id"], device_b)
             ExperimentManager.update_run(run_path, "failed", error_count=2)
             updated = ExperimentManager.load_run(run_path)
             self.assertEqual(updated["run"]["status"], "failed")
             self.assertEqual(updated["run"]["error_count"], 2)
 
-    def test_hdf5_run_is_refused_cleanly(self):
+    def test_missing_hdf5_chunks_error_cleanly(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_path = Path(tmp)
             (run_path / "run.json").write_text(json.dumps({
                 "schema_version": 3,
-                "devices": [],
+                "devices": [{
+                    "device_id": "a",
+                    "name": "A",
+                    "device_type": "mcs_mea2100",
+                    "config": {},
+                    "storage": {"format": "hdf5", "data_dir": "raw"},
+                }],
                 "sequence": [],
                 "storage": {"format": "hdf5", "data_dir": "raw"},
             }), encoding="utf-8")
             errors = []
-            worker = ReplayWorker(run_path, "A")
-            worker.error.connect(errors.append)
-            worker.start()
+            session = ReplaySession(run_path)
+            session.error.connect(errors.append)
+            self.assertFalse(session.start())
             self.assertEqual(len(errors), 1)
-            self.assertIn("CSV only", errors[0])
+            self.assertIn("No HDF5 chunks", errors[0])
 
     def test_rerun_into_non_empty_dir_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

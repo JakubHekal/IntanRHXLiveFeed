@@ -1,0 +1,53 @@
+"""Replay source factory.
+
+Device-specific readers live with their device:
+
+    device/intan_rhx/replay.py  -> IntanNativeSource
+    device/mcs_mea/replay.py   -> McsHdf5Source
+    device/csv_source.py       -> CsvSource (generic ChunkWriter layout)
+
+Sources expose the same small interface used by ReplaySession:
+
+    source.sample_rate        -> float
+    source.num_channels       -> int
+    source.labels             -> list[str]
+    source.total_samples      -> int | None   (None when not known up front)
+    source.read(n)            -> (chunk, markers) | (None, [])
+    source.exhausted          -> bool
+
+``chunk`` is a float32 matrix of shape (channels, samples) in microvolts.
+``markers`` is a list of (offset_in_chunk, marker_id, marker_name).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+
+def make_source(
+    chunks_dir: Path,
+    fmt: str,
+    sample_rate: float = 20000.0,
+    label_order=None,
+    device_type=None,
+):
+    fmt = str(fmt or "").lower()
+    from leech.device.registry import REPLAY_SOURCE_CLASSES
+
+    source_cls = REPLAY_SOURCE_CLASSES.get(fmt)
+    if source_cls is not None:
+        return source_cls.replay_source(
+            chunks_dir,
+            fmt,
+            sample_rate=sample_rate,
+            label_order=label_order,
+            device_type=device_type,
+        )
+    if fmt == "csv":
+        from leech.device.csv_source import CsvSource
+
+        return CsvSource(chunks_dir, sample_rate=sample_rate, label_order=label_order)
+    raise ValueError(f"Unsupported replay format: {fmt}")
+
+
+__all__ = ["make_source"]

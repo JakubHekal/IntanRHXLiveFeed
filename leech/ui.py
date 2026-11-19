@@ -10,9 +10,9 @@ if str(_project_root) not in sys.path:
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
-    QApplication, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
-    QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton, QStatusBar,
-    QToolButton, QVBoxLayout, QWidget, QMenu,
+    QApplication, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout,
+    QInputDialog, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
+    QStatusBar, QToolButton, QVBoxLayout, QWidget, QMenu,
 )
 
 import qdarkstyle
@@ -80,10 +80,12 @@ class MainWindow(QMainWindow):
 
         self._current_experiment_path = None
         self._current_run_path = None
+        self._dirty = False
         self._run_device_configs = {}
         self._run_device_instances = []
         self._run_device_instance_map = {}
         self._experiment_runner = None
+        self._replay_session = None
         self.main_stage = MainStage()
         root_layout.addWidget(self.main_stage, 1)
 
@@ -118,6 +120,7 @@ class MainWindow(QMainWindow):
             return None
         self._current_experiment_path = str(path)
         self.setWindowTitle(f"LEECH — {config.metadata.experiment_name}")
+        self._set_dirty(False)
         self.main_stage.left_sidebar.reload_runs(str(Path(path) / "runs"))
         return config
 
@@ -146,6 +149,33 @@ class MainWindow(QMainWindow):
             config_path = Path(path) / "config.json"
             if config_path.exists() and self._activate_experiment(path) is not None:
                 save_recent_experiment(str(path))
+
+    def _on_timeline_changed(self):
+        if self._current_experiment_path and self.main_stage.timeline._edit_mode:
+            self._set_dirty(True)
+
+    def _set_dirty(self, dirty):
+        dirty = bool(dirty)
+        if dirty == self._dirty:
+            return
+        self._dirty = dirty
+        base = self.windowTitle().rstrip(" *")
+        self.setWindowTitle(base + (" *" if self._dirty else ""))
+
+    def _confirm_discard_changes(self):
+        if not self._dirty or not self._current_experiment_path:
+            return True
+        reply = QMessageBox.warning(
+            self, "Unsaved Changes",
+            "Save changes to this experiment before closing?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if reply == QMessageBox.Cancel:
+            return False
+        if reply == QMessageBox.Save:
+            return self._save_experiment()
+        return True
 
     def _close_devices(self):
         for inst in getattr(self, '_run_device_instances', []):
@@ -181,9 +211,14 @@ class MainWindow(QMainWindow):
             self.main_stage.tab_host.set_planning_state()
 
     def closeEvent(self, event):
+        if not self._confirm_discard_changes():
+            event.ignore()
+            return
         save_geometry(bytes(self.saveGeometry()))
         if getattr(self, '_experiment_runner', None) is not None and self._experiment_runner.is_running():
             self._experiment_runner.stop()
+        if getattr(self, '_replay_session', None) is not None:
+            self._replay_session.stop()
         self._close_devices()
         self.main_stage.tab_host.shutdown_workers()
         super().closeEvent(event)
@@ -196,12 +231,17 @@ class MainWindow(QMainWindow):
 
         experiment_menu = QMenu("Experiment", self)
         self._exp_new_action = experiment_menu.addAction("New Experiment")
+        self._exp_new_action.setShortcut("Ctrl+N")
         self._exp_open_action = experiment_menu.addAction("Open Experiment")
+        self._exp_open_action.setShortcut("Ctrl+O")
         experiment_menu.addSeparator()
         self._exp_save_action = experiment_menu.addAction("Save Experiment")
+        self._exp_save_action.setShortcut("Ctrl+S")
         self._exp_duplicate_action = experiment_menu.addAction("Duplicate Experiment")
+        self._exp_duplicate_action.setShortcut("Ctrl+Shift+S")
         experiment_menu.addSeparator()
         self._exp_run_action = experiment_menu.addAction("Run Experiment\u2026")
+        self._exp_run_action.setShortcut("F5")
         exp_btn = self._create_menu_button("Experiment", experiment_menu)
         menubar_layout.addWidget(exp_btn)
 
@@ -250,6 +290,7 @@ class MainWindow(QMainWindow):
         self.main_stage.left_sidebar.run_selected.connect(self._on_replay_run)
         self.main_stage.left_sidebar.run_action.connect(self._on_run_action)
         self.main_stage.btn_play.clicked.connect(self._on_play_clicked)
+        self.main_stage.timeline.data_changed.connect(self._on_timeline_changed)
 
     def _setup_status_bar(self):
         status = QStatusBar()
@@ -262,6 +303,27 @@ class MainWindow(QMainWindow):
         self._fps_status_label = QLabel("FPS: 0.0")
         status.addPermanentWidget(self._fps_status_label)
 
+        self._replay_badge = QLabel("REPLAY")
+        self._replay_badge.setStyleSheet(
+            f"background: {ACCENT_BLUE}; color: white; font-weight: 700;"
+            " padding: 2px 8px; border-radius: 3px;"
+        )
+        self._replay_badge.hide()
+        status.addPermanentWidget(self._replay_badge)
+
+        self._replay_speed = QComboBox()
+        self._replay_speed.addItems(["0.5x", "1x", "2x", "4x", "Instant"])
+        self._replay_speed.setCurrentText("1x")
+        self._replay_speed.hide()
+        self._replay_speed.currentTextChanged.connect(self._on_replay_speed_changed)
+        status.addPermanentWidget(self._replay_speed)
+
+        self._replay_stop = QToolButton()
+        self._replay_stop.setText("Stop Replay")
+        self._replay_stop.hide()
+        self._replay_stop.clicked.connect(self._on_replay_stop_clicked)
+        status.addPermanentWidget(self._replay_stop)
+
     def _on_run_action(self, action, run_path):
         if action == "rerun":
             self._on_run_rerun(run_path)
@@ -273,6 +335,11 @@ class MainWindow(QMainWindow):
     def _on_run_rerun(self, run_path):
         if self._experiment_runner is not None and self._experiment_runner.is_running():
             QMessageBox.information(self, "Already Running", "An experiment is already in progress.")
+            return
+        if self._replay_session is not None:
+            QMessageBox.information(
+                self, "Replay Running", "Stop the replay before recording a run."
+            )
             return
         if not self._current_experiment_path:
             QMessageBox.warning(self, "No Experiment", "Open or create an experiment first.")
@@ -443,13 +510,16 @@ class MainWindow(QMainWindow):
             save_recent_experiment(path)
 
     def _on_experiment_save(self):
+        self._save_experiment()
+
+    def _save_experiment(self) -> bool:
         if not self._current_experiment_path:
             QMessageBox.information(self, "No Experiment",
                                     "No experiment is open. Create or open one first.")
-            return
+            return False
         config = self._read_experiment(self._current_experiment_path)
         if config is None:
-            return
+            return False
         timeline = self.main_stage.timeline
         devs = timeline._devices
         existing_devices = {
@@ -510,10 +580,17 @@ class MainWindow(QMainWindow):
             )
         except (OSError, MigrationError, TypeError, ValueError) as exc:
             QMessageBox.warning(self, "Save Failed", str(exc))
-            return
+            return False
+        self._set_dirty(False)
         QMessageBox.information(self, "Saved", f"Experiment saved to {self._current_experiment_path}")
+        return True
 
     def _on_play_clicked(self):
+        if self._replay_session is not None:
+            QMessageBox.information(
+                self, "Replay Running", "Stop the replay before recording a run."
+            )
+            return
         if self._experiment_runner is not None:
             self._experiment_runner.resume()
             self.main_stage.btn_play.setEnabled(False)
@@ -524,6 +601,11 @@ class MainWindow(QMainWindow):
     def _on_experiment_run(self):
         if self._experiment_runner is not None and self._experiment_runner.is_running():
             QMessageBox.information(self, "Already Running", "An experiment is already in progress.")
+            return
+        if self._replay_session is not None:
+            QMessageBox.information(
+                self, "Replay Running", "Stop the replay before recording a run."
+            )
             return
         if not self._current_experiment_path:
             QMessageBox.information(self, "No Experiment",
@@ -757,8 +839,10 @@ class MainWindow(QMainWindow):
             pass
         self.main_stage.btn_pause.clicked.connect(self._experiment_runner.pause)
         self.main_stage.btn_pause.clicked.connect(lambda: self.main_stage.btn_pause.setEnabled(False))
+        self.main_stage.btn_pause.clicked.connect(lambda: self.main_stage.btn_play.setText("Resume"))
         self.main_stage.btn_pause.clicked.connect(lambda: self.main_stage.btn_play.setEnabled(True))
         self.main_stage.btn_stop.clicked.connect(self._experiment_runner.stop)
+        self.main_stage.btn_play.setText("Run Experiment")
         self.main_stage.btn_play.setEnabled(False)
         self.main_stage.btn_pause.setEnabled(True)
         self.main_stage.btn_stop.setEnabled(True)
@@ -810,81 +894,115 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage(f"Experiment aborted: {message}")
         self.main_stage.btn_play.setEnabled(True)
+        self.main_stage.btn_play.setText("Run Experiment")
         self.main_stage.btn_pause.setEnabled(False)
         self.main_stage.btn_stop.setEnabled(False)
         self._close_devices()
         self._experiment_runner = None
 
     def _on_replay_run(self, run_path):
-        from leech.workers.replay_worker import ReplayWorker
+        from leech.workers.replay_session import ReplaySession
+        if self._replay_session is not None:
+            QMessageBox.information(
+                self, "Replay Running", "Only one replay can run at a time."
+            )
+            return
+        if self._experiment_runner is not None and self._experiment_runner.is_running():
+            QMessageBox.information(
+                self, "Recording", "Stop the recording before starting a replay."
+            )
+            return
         metadata = self._read_run(run_path)
         if metadata is None:
             return
-        if "devices" in metadata:
-            devices = metadata.get("devices", [])
-            if not devices:
-                QMessageBox.warning(self, "Replay", "Run contains no replayable device.")
-                return
-            device = devices[0]
-            device_id = device.get("device_id", "")
-            device_name = device.get("name", "")
-            device_type = device.get("device_type", "unknown")
-            config = device.get("config", {})
-        else:
-            device_id = ""
-            device_name = metadata.get("device_name") or Path(run_path).name
-            device_type = metadata.get("device_type", "unknown")
-            config = metadata
-        sample_rate = config.get("sample_rate", 20000.0)
-        num_channels = config.get("num_channels", 1)
-        storage = metadata.get("storage") if isinstance(metadata.get("storage"), dict) else {}
-        fmt = storage.get("format") or "csv"
-        if fmt != "csv":
-            QMessageBox.warning(
-                self, "Replay", f"Replay supports CSV only (run storage format: {fmt})."
+        devices = metadata.get("devices")
+        if not isinstance(devices, list) or not devices:
+            devices = [{
+                "name": metadata.get("device_name") or Path(run_path).name,
+                "device_type": metadata.get("device_type", "unknown"),
+                "config": metadata,
+            }]
+        devices = [item for item in devices if isinstance(item, dict)]
+        if not devices:
+            QMessageBox.warning(self, "Replay", "Run contains no devices to replay.")
+            return
+
+        self._set_edit_mode(False)
+        self.main_stage.tab_host.clear_all()
+        for device in devices:
+            name = str(device.get("name") or "Device")
+            device_type = str(device.get("device_type", "unknown"))
+            config = device.get("config") if isinstance(device.get("config"), dict) else {}
+            self._open_tab(
+                name,
+                device_type,
+                sample_rate=float(config.get("sample_rate", 20000.0)),
+                num_channels=int(config.get("num_channels", 1)),
             )
-            return
-        data_dir = storage.get("data_dir")
-        raw_root = Path(run_path) / (data_dir if isinstance(data_dir, str) and data_dir else "raw")
-        # New format first (name_id), then id-only and name-only legacy layouts.
-        candidates = []
-        if device_id:
-            candidates.append(raw_root / sanitize_raw_key(f"{device_name}_{device_id}"))
-            candidates.append(raw_root / sanitize_raw_key(device_id))
-        if device_name:
-            candidates.append(raw_root / sanitize_raw_key(str(device_name)))
-        device_dir = next((c for c in candidates if c.exists()), None)
-        if device_dir is None and raw_root.name == "raw":
-            raw_root = Path(run_path) / "raw_chunks"
-            candidates = [
-                raw_root / sanitize_raw_key(f"{device_name}_{device_id}") if device_id else None,
-                raw_root / sanitize_raw_key(device_id) if device_id else None,
-                raw_root / sanitize_raw_key(str(device_name)),
-            ]
-            device_dir = next((c for c in candidates if c is not None and c.exists()), None)
-        if device_dir is None or not device_dir.exists():
-            QMessageBox.warning(self, "Replay", f"No raw data found for {device_name or device_type}")
-            return
-        replay_name = f"Replay: {Path(run_path).name} — {device_name}"
-        self._open_tab(
-            replay_name,
-            device_type,
-            sample_rate=sample_rate,
-            num_channels=num_channels,
+        self.main_stage.tab_host.set_receiving_state(True)
+
+        session = ReplaySession(run_path, self)
+        session.device_configured.connect(self.main_stage.tab_host.on_device_configured)
+        session.data_received.connect(self.main_stage.tab_host.on_data)
+        session.markers_received.connect(self.main_stage.tab_host.add_markers)
+        session.unsupported.connect(self._on_replay_unsupported)
+        session.error.connect(
+            lambda message: self.statusBar().showMessage(f"Replay error: {message}")
         )
-        worker = ReplayWorker(
-            run_path,
-            replay_name,
-            self,
-            device_dir=device_dir,
-            device_id=device_id,
-            source_device_name=device_name,
-        )
-        worker.data_received.connect(self.main_stage.tab_host.on_data)
-        worker.error.connect(lambda msg: self.statusBar().showMessage(f"Replay error: {msg}"))
-        worker.finished.connect(lambda: self.statusBar().showMessage("Replay finished"))
-        worker.start()
-        self._replay_worker = worker
+        session.progress.connect(self._on_replay_progress)
+        session.finished.connect(self._on_replay_stopped)
+        session.stopped.connect(self._on_replay_stopped)
+        self._replay_session = session
+        speed = self._replay_speed_value()
+        if not session.start(speed):
+            self._replay_session = None
+            self._replay_badge.hide()
+            self._replay_speed.hide()
+            self._replay_stop.hide()
+            self._set_edit_mode(True)
+            return
+        self._replay_badge.show()
+        self._replay_speed.show()
+        self._replay_stop.show()
+        self.statusBar().showMessage(f"Replaying: {Path(run_path).name}")
+
+    def _replay_speed_value(self):
+        text = self._replay_speed.currentText().lower()
+        if text.startswith("instant"):
+            return "instant"
+        try:
+            return float(text.rstrip("x"))
+        except ValueError:
+            return 1.0
+
+    def _on_replay_speed_changed(self, _text):
+        if self._replay_session is not None:
+            self._replay_session.set_speed(self._replay_speed_value())
+
+    def _on_replay_unsupported(self, name, message):
+        self.main_stage.tab_host.show_message(name, message)
+        self.statusBar().showMessage(f"{name}: {message}")
+
+    def _on_replay_stop_clicked(self):
+        if self._replay_session is not None:
+            self._replay_session.stop()
+
+    def _on_replay_progress(self, elapsed, total):
+        if total > 0:
+            self.statusBar().showMessage(
+                f"Replay {elapsed:0.1f}s / {total:0.1f}s"
+            )
+        else:
+            self.statusBar().showMessage(f"Replay {elapsed:0.1f}s")
+
+    def _on_replay_stopped(self):
+        self._replay_session = None
+        self._replay_badge.hide()
+        self._replay_speed.hide()
+        self._replay_stop.hide()
+        self.main_stage.tab_host.clear_all()
+        self._set_edit_mode(True)
+        self.statusBar().showMessage("Replay finished")
 
     def _on_exp_error(self, device_name, error_message):
         print(f"[UI] Experiment error: {device_name}: {error_message}")

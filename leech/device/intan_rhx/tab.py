@@ -1,4 +1,3 @@
-import bisect
 import time
 from pathlib import Path
 
@@ -8,20 +7,16 @@ import numpy as np
 
 from leech.plot_settings import load_plot_setting, save_plot_setting
 from leech.gui.tabs.base import DataTab
-from leech.gui.ring_buffer import RingBuffer
+from leech.gui.ring_buffer import RingBuffer, MinMaxModel
 from leech.gui.widgets import MarkerDialog
 from leech.gui.plot_helpers import (
-    _minmax_downsample,
-    DISPLAY_WINDOW_SEC,
-    MAX_DISPLAY_POINTS, PLOT_UPDATE_FREQ_HZ, RAW_RENDER_HZ,
-    RAW_HISTORY_TARGET_HZ, RAW_HISTORY_HIGH_TARGET_HZ,
-    RAW_ADAPTIVE_HIGH_RES_MAX_SPAN_SEC, RAW_FULL_RES_MAX_SPAN_SEC,
-    RAW_MANUAL_VIEW_MARGIN_SEC, MAX_RAW_HISTORY_PLOT_POINTS,
+    DISPLAY_WINDOW_SEC, DISPLAY_BUFFER_SEC,
+    MAX_DISPLAY_POINTS, RAW_RENDER_HZ,
+    MIN_ZOOM_SEC, MAX_ZOOM_SEC,
 )
 from .plot_constants import (
     DEFAULT_SAMPLING_RATE, PSD_RENDER_HZ, SPIKE_RENDER_HZ,
     WAVEFORM_YLIM_ABS_UV, SPIKE_SCROLL_WINDOW_MIN,
-    PSD_PLOT_UPDATE_EVERY_N, SPIKE_PLOT_UPDATE_EVERY_N,
 )
 from leech.device.background_worker import BackgroundWorker
 from . import processing as _proc_cfg
@@ -52,6 +47,7 @@ class IntanDeviceTab(DataTab):
         self._spike_times_cache: dict[int, list] = {}
         self._last_spike_scan_sample: dict[int, int] = {}
         self._hist_states: dict[int, dict] = {}
+        self._filter_state = None
         self._hist_last_time_s = 0.0
         self._last_proc_abs_start = 0
         self._psd_buffer_sec = load_plot_setting("psd_buffer_sec", DEFAULT_PSDS)
@@ -61,27 +57,20 @@ class IntanDeviceTab(DataTab):
         self._latest_psd_db = None
         self._latest_wf_t_ms = None
         self._latest_wf_mu = None
-        self._raw_hist_t_low = [[] for _ in range(self.num_channels)]
-        self._raw_hist_y_low = [[] for _ in range(self.num_channels)]
-        self._raw_hist_t_high = [[] for _ in range(self.num_channels)]
-        self._raw_hist_y_high = [[] for _ in range(self.num_channels)]
-        self._raw_hist_sample_mod_low = 0
-        self._raw_hist_sample_mod_high = 0
-        self._raw_hist_stride_low = 1
-        self._raw_hist_stride_high = 1
         self._follow_axes = {'raw': True, 'psd': True, 'spike': True, 'wf': True}
         self._follow_menu_actions = {}
         self._suspend_follow_detection = False
         self._psd_snapshot_curves = []
         self._wf_snapshot_curves = []
         self._ring = RingBuffer(self.sampling_rate, self.num_channels, DISPLAY_WINDOW_SEC)
+        self._model = MinMaxModel(self.sampling_rate, num_channels=self.num_channels)
         self._last_raw_render_t = 0.0
         self._last_psd_render_t = 0.0
         self._last_spike_render_t = 0.0
+        self._last_proc_started = 0.0
+        self._next_proc_t = 0.0
         self._psd_pending = False
         self._spike_pending = False
-        self.psd_update_counter = 0
-        self.spike_plot_frame_counter = 0
         self._session_id = 0
         self._task_id_counter = 0
         self._active_expensive_task_id = {}
@@ -143,6 +132,10 @@ class IntanDeviceTab(DataTab):
             spike_bin_sec=self._spike_bin_sec,
         )
         layout.addWidget(self.canvas, 1)
+        self.canvas.raw_plot.setLimits(
+            xMin=0.0, xMax=DISPLAY_BUFFER_SEC,
+            minXRange=MIN_ZOOM_SEC, maxXRange=MAX_ZOOM_SEC,
+        )
 
         self._proc_worker = BackgroundWorker(self)
         self._proc_worker.result_ready.connect(self._on_processing_result)
@@ -156,24 +149,11 @@ class IntanDeviceTab(DataTab):
         self._connect_plot_range_signals()
         self._install_plot_follow_context_actions()
         self._install_plot_bin_window_size_context_actions()
-        self._update_raw_history_stride()
 
     def _on_channel_changed(self, idx):
         self._current_channel_idx = idx
         ch = idx
-        self._raw_hist_t_low[ch].clear()
-        self._raw_hist_y_low[ch].clear()
-        self._raw_hist_t_high[ch].clear()
-        self._raw_hist_y_high[ch].clear()
-        if self._ring.total > 0:
-            t, y = self._ring.read_channel(ch)
-            if t.size > 0:
-                self._raw_hist_t_low[ch] = t.tolist()
-                self._raw_hist_y_low[ch] = y.tolist()
-                if t.size > 1:
-                    step = max(1, t.size // MAX_RAW_HISTORY_PLOT_POINTS)
-                    self._raw_hist_t_high[ch] = t[::step].tolist()
-                    self._raw_hist_y_high[ch] = y[::step].tolist()
+        self.request_render()
         # push cached spike histogram for new channel
         hist_state = self._hist_states.get(ch)
         if hist_state is not None:
@@ -265,12 +245,6 @@ class IntanDeviceTab(DataTab):
         if setting_attr == '_spike_bin_sec':
             self._schedule_spike_rebin_task()
 
-    def _update_raw_history_stride(self):
-        self._raw_hist_stride_low = max(1, int(round(self.sampling_rate / RAW_HISTORY_TARGET_HZ)))
-        self._raw_hist_stride_high = max(1, int(round(self.sampling_rate / RAW_HISTORY_HIGH_TARGET_HZ)))
-        self._raw_hist_sample_mod_low = 0
-        self._raw_hist_sample_mod_high = 0
-
     def on_data(self, chunk: np.ndarray):
         ingest_t0 = time.perf_counter()
         if chunk is None:
@@ -290,24 +264,21 @@ class IntanDeviceTab(DataTab):
 
         t_chunk = (self.sample_counter + np.arange(n_samples, dtype=np.float64)) / self.sampling_rate
         self._ring.write(t_chunk, arr)
-        self._append_raw_history(t_chunk, arr)
+        self._model.append_from_ring(self._ring)
         self.sample_counter += n_samples
         self._tel_chunks += 1
         self._tel_samples += int(n_samples)
         self.request_render()
 
-        self.psd_update_counter += 1
-        self.spike_plot_frame_counter += 1
-        do_psd = (self.psd_update_counter % max(1, PSD_PLOT_UPDATE_EVERY_N) == 0)
-        do_spike = (self.spike_plot_frame_counter % max(1, SPIKE_PLOT_UPDATE_EVERY_N) == 0)
-
         ch = self._current_channel_idx
         if ch >= self.num_channels:
             ch = 0
 
-        # first render or no results yet → force everything
-        if not self._channel_results:
-            do_psd = do_spike = True
+        now = time.perf_counter()
+        do_proc = (not self._channel_results) or now >= self._next_proc_t
+        do_psd = do_spike = do_proc
+        if do_proc:
+            self._last_proc_started = now
 
         stored = min(self._ring.total, self._ring.cap)
         # compute tail size for matrix read
@@ -317,19 +288,24 @@ class IntanDeviceTab(DataTab):
         should_run_psd = do_psd
 
         if should_run_psd or should_run_spike:
-            if should_run_spike:
-                psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec))) if should_run_psd else 0
-                spike_n = int(max(SPIKE_INCREMENTAL_MIN_SAMPLES, gap) + SPIKE_OVERLAP_SAMPLES)
-                # ponytail: no wf_n inflation — waveform extraction uses time-based
-                # searchsorted, doesn't need the full window in the matrix.
-                tail_n = min(stored, max(psd_n, spike_n))
-            else:
-                psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec)))
-                tail_n = psd_n
+            # ponytail: PSD reads one channel, spike reads only the new gap.
+            # Reading the whole 10 s x 128 matrix here cost 25-90 ms per update.
+            psd_signal = None
+            if should_run_psd:
+                psd_n = min(stored, max(8, int(round(self.sampling_rate * self._psd_buffer_sec))))
+                if psd_n > 0:
+                    _, psd_signal = self._ring.read_tail(psd_n, ch_idx=ch)
 
-            # matrix read: (1+num_channels, tail_n)
-            t_tail, sig_matrix = self._ring.read_tail_matrix(tail_n)
-            abs_start = self._ring.total - t_tail.size
+            if should_run_spike:
+                spike_n = int(max(SPIKE_INCREMENTAL_MIN_SAMPLES, gap) + SPIKE_OVERLAP_SAMPLES)
+                tail_n = min(stored, spike_n)
+                t_tail, sig_matrix = self._ring.read_tail_matrix(tail_n)
+                abs_start = self._ring.total - t_tail.size
+            else:
+                t_tail = np.array([], dtype=np.float64)
+                sig_matrix = np.empty((0, 0), dtype=np.float32)
+                abs_start = self._ring.total
+
             self._last_proc_abs_start = abs_start
             self._hist_last_time_s = float(t_tail[-1]) if t_tail.size else self._hist_last_time_s
 
@@ -337,55 +313,26 @@ class IntanDeviceTab(DataTab):
                 _run_all_channels,
                 sig_matrix, t_tail, self.sampling_rate,
                 ch,
-                dict(self._spike_times_cache),
-                dict(self._last_spike_scan_sample),
+                self._spike_times_cache,
+                self._last_spike_scan_sample,
                 bool(should_run_psd), bool(should_run_spike),
-                dict(self._hist_states),
+                self._hist_states,
                 abs_start,
                 psd_buffer_sec=self._psd_buffer_sec,
                 waveform_buffer_sec=self._waveform_buffer_sec,
                 spike_bin_sec=self._spike_bin_sec,
+                filter_state=self._filter_state,
+                psd_signal=psd_signal,
+                num_channels=self.num_channels,
             )
 
         self._tel_ingest_ms_total += (time.perf_counter() - ingest_t0) * 1000.0
         self._emit_telemetry_if_due("neural")
 
-    def _append_decimated_history(self, t_lists, y_lists, t_chunk, y_chunk, stride, mod_counter):
-        if y_chunk.shape[1] == 0:
-            return mod_counter
-        buf_stride = stride
-        i_start = buf_stride - 1 - mod_counter
-        if i_start < 0:
-            i_start = buf_stride - 1
-        t_dec = t_chunk[i_start::buf_stride]
-        if t_dec.size > 0:
-            for ch in range(len(t_lists)):
-                t_lists[ch].extend(t_dec.tolist())
-                y_lists[ch].extend(y_chunk[ch, i_start::buf_stride].tolist())
-        next_mod = (mod_counter + y_chunk.shape[1]) % buf_stride
-        for ch in range(len(t_lists)):
-            total_points = len(t_lists[ch])
-            if total_points > MAX_RAW_HISTORY_PLOT_POINTS:
-                excess = total_points - MAX_RAW_HISTORY_PLOT_POINTS
-                del t_lists[ch][:excess]
-                del y_lists[ch][:excess]
-        return next_mod
-
-    def _append_raw_history(self, t_chunk, y_chunk):
-        if y_chunk.ndim == 1:
-            y_chunk = y_chunk.reshape(1, -1)
-        self._raw_hist_sample_mod_low = self._append_decimated_history(
-            self._raw_hist_t_low, self._raw_hist_y_low,
-            t_chunk, y_chunk,
-            self._raw_hist_stride_low, self._raw_hist_sample_mod_low,
-        )
-        self._raw_hist_sample_mod_high = self._append_decimated_history(
-            self._raw_hist_t_high, self._raw_hist_y_high,
-            t_chunk, y_chunk,
-            self._raw_hist_stride_high, self._raw_hist_sample_mod_high,
-        )
-
     def _on_processing_result(self, result):
+        now = time.perf_counter()
+        duration = max(0.0, now - self._last_proc_started)
+        self._next_proc_t = self._last_proc_started + min(2.0, max(0.5, 6.0 * duration))
         ch = result.selected_ch if hasattr(result, 'selected_ch') else None
         if ch is not None:
             self._channel_results[ch] = result
@@ -398,6 +345,7 @@ class IntanDeviceTab(DataTab):
             self._last_spike_scan_sample.update(result.last_scans)
         if getattr(result, 'hist_states', None) is not None:
             self._hist_states = result.hist_states
+        self._filter_state = getattr(result, 'filter_state', None)
         if ch is not None and ch == self._current_channel_idx:
             if getattr(result, 'has_psd_update', False) and result.psd_f is not None:
                 self._psd_pending = True
@@ -446,7 +394,7 @@ class IntanDeviceTab(DataTab):
 
     def _sync_marker_lines(self, x_min, x_max):
         lines_to_remove = []
-        for line, label in zip(self.canvas._marker_lines, self.canvas._marker_labels):
+        for line, label in list(zip(self.canvas._marker_lines, self.canvas._marker_labels)):
             pos = line.getPos()
             if pos is not None:
                 pos_x = float(pos[0]) if hasattr(pos, '__getitem__') else float(pos)
@@ -480,7 +428,7 @@ class IntanDeviceTab(DataTab):
 
     def _sync_spike_marker_lines(self, x_min, x_max):
         lines_to_remove = []
-        for line, label in zip(self.canvas._spike_marker_lines, self.canvas._spike_marker_labels):
+        for line, label in list(zip(self.canvas._spike_marker_lines, self.canvas._spike_marker_labels)):
             pos = line.getPos()
             if pos is not None:
                 pos_x = float(pos[0]) if hasattr(pos, '__getitem__') else float(pos)
@@ -543,87 +491,38 @@ class IntanDeviceTab(DataTab):
         if (now - self._last_raw_render_t) >= 1.0 / RAW_RENDER_HZ:
             did_work = True
             self._tel_raw_renders += 1
+            ch = self._current_channel_idx
+            earliest, latest = self._ring.raw_time_bounds()
             if self._follow_axes['raw']:
-                n_vis = int(self.sampling_rate * DISPLAY_WINDOW_SEC)
-                x_vis, y_vis = self._ring.read_tail(n_vis, ch_idx=self._current_channel_idx)
-                # ponytail: strided take, zero-alloc. _minmax_downsample costs 3-6ms
-                # with 5 numpy allocs for 200K→5K; strided take is ~0.001ms.
-                step = max(1, x_vis.size // MAX_DISPLAY_POINTS)
-                xd, yd = x_vis[::step], y_vis[::step]
-                self.canvas.raw_curve.setData(xd, yd)
-                x_end = float(x_vis[-1]) if x_vis.size else 0.0
+                x_end = latest
                 x_start = max(0.0, x_end - DISPLAY_WINDOW_SEC)
-                x_min_lim, _ = self._ring.raw_time_bounds()
-                self.canvas.raw_plot.setLimits(xMin=max(0.0, x_min_lim), xMax=max(0.0, x_end + 0.1))
+            else:
+                vr = self.canvas.raw_plot.vb.viewRange()[0]
+                x_start = float(vr[0]) if len(vr) >= 2 else 0.0
+                x_end = float(vr[1]) if len(vr) >= 2 else latest
+                if latest > 0.0 and x_end <= 0.0:
+                    x_end = latest
+                span = min(MAX_ZOOM_SEC, max(MIN_ZOOM_SEC, x_end - x_start))
+                x_start = max(earliest, min(x_start, latest - span))
+                x_end = x_start + span
+            x_env, y_env = self._model.read(x_start, x_end, MAX_DISPLAY_POINTS, ch)
+            if x_env.size:
+                self.canvas.raw_curve.setData(x_env.copy(), y_env.copy(), antialias=False)
+            else:
+                self.canvas.raw_curve.setData([], [])
+            if self._follow_axes['raw']:
                 self._suspend_follow_detection = True
                 try:
                     self.canvas.raw_plot.setXRange(x_start, x_end, padding=0)
                 finally:
                     self._suspend_follow_detection = False
-                # ponytail: zero-alloc peak — np.max(np.abs(y_vis)) allocates a 200K temp
-                peak = max(abs(float(y_vis.min())), abs(float(y_vis.max()))) if y_vis.size else 0.0
+                peak = max(abs(float(y_env.min())), abs(float(y_env.max()))) if y_env.size else 0.0
                 y_lim = max(0.2, peak * 1.2)
                 self._suspend_follow_detection = True
                 try:
                     self.canvas.raw_plot.setYRange(-y_lim, y_lim, padding=0)
                 finally:
                     self._suspend_follow_detection = False
-            else:
-                history_end = 0.0
-                history_start = 0.0
-                ch = self._current_channel_idx
-                if ch < len(self._raw_hist_t_low) and self._raw_hist_t_low[ch]:
-                    history_start = float(self._raw_hist_t_low[ch][0])
-                    history_end = float(self._raw_hist_t_low[ch][-1])
-                    self.canvas.raw_plot.setLimits(xMin=max(0.0, history_start), xMax=max(0.0, history_end + 0.1))
-                vr = self.canvas.raw_plot.vb.viewRange()[0]
-                x_start = float(vr[0]) if len(vr) >= 2 else 0.0
-                x_end = float(vr[1]) if len(vr) >= 2 else (history_end if history_end > 0.0 else DISPLAY_WINDOW_SEC)
-                if history_end > 0.0 and x_end <= 0:
-                    x_end = history_end
-                    x_start = max(0.0, x_end - DISPLAY_WINDOW_SEC)
-                span = max(0.0, x_end - x_start)
-                t_src = None
-                y_src = None
-                stored = min(self._ring.total, self._ring.cap)
-                if stored > 1 and span <= RAW_FULL_RES_MAX_SPAN_SEC:
-                    earliest_t, latest_t = self._ring.raw_time_bounds()
-                    left_q = max(earliest_t, x_start - RAW_MANUAL_VIEW_MARGIN_SEC)
-                    right_q = min(latest_t, x_end + RAW_MANUAL_VIEW_MARGIN_SEC)
-                    if right_q > left_q:
-                        t_lin, y_lin = self._ring.read_channel(self._current_channel_idx)
-                        if t_lin.size:
-                            i0 = int(np.searchsorted(t_lin, left_q, side='left'))
-                            i1 = int(np.searchsorted(t_lin, right_q, side='right'))
-                            if i1 <= i0:
-                                i0 = max(0, min(i0, t_lin.size - 1))
-                                i1 = min(t_lin.size, i0 + 1)
-                            t_src = t_lin[i0:i1]
-                            y_src = y_lin[i0:i1]
-                if t_src is None or y_src is None:
-                    ch = self._current_channel_idx
-                    use_high = span <= RAW_ADAPTIVE_HIGH_RES_MAX_SPAN_SEC and ch < len(self._raw_hist_t_high) and bool(self._raw_hist_t_high[ch])
-                    if use_high:
-                        t_store = self._raw_hist_t_high[ch]
-                        y_store = self._raw_hist_y_high[ch]
-                    else:
-                        t_store = self._raw_hist_t_low[ch] if ch < len(self._raw_hist_t_low) else []
-                        y_store = self._raw_hist_y_low[ch] if ch < len(self._raw_hist_y_low) else []
-                    if t_store:
-                        left_q = max(0.0, x_start - RAW_MANUAL_VIEW_MARGIN_SEC)
-                        right_q = max(left_q, x_end + RAW_MANUAL_VIEW_MARGIN_SEC)
-                        i0 = bisect.bisect_left(t_store, left_q)
-                        i1 = bisect.bisect_right(t_store, right_q)
-                        if i1 <= i0:
-                            i0 = max(0, min(i0, len(t_store) - 1))
-                            i1 = min(len(t_store), i0 + 1)
-                        t_src = np.asarray(t_store[i0:i1], dtype=np.float64)
-                        y_src = np.asarray(y_store[i0:i1], dtype=np.float64)
-                if t_src is not None and y_src is not None and np.asarray(t_src).size:
-                    xd, yd = _minmax_downsample(np.asarray(t_src), np.asarray(y_src), MAX_RAW_HISTORY_PLOT_POINTS)
-                    self.canvas.raw_curve.setData(xd, yd)
-                else:
-                    self.canvas.raw_curve.setData([], [])
             self._sync_marker_lines(max(0.0, min(x_start, x_end)), max(0.0, max(x_start, x_end)))
             self._last_raw_render_t = now
 
@@ -704,7 +603,13 @@ class IntanDeviceTab(DataTab):
             self._tel_render_ms_total += self._render_dur_ms
         self._emit_telemetry_if_due("neural")
 
+    def show_message(self, message: str):
+        self.canvas.raw_plot.setTitle(
+            f"<span style='color:#cf6679'>{message}</span>"
+        )
+
     def clear(self):
+        self.canvas.raw_plot.setTitle(None)
         self.canvas.raw_curve.setData([], [])
         self.canvas.psd_curve.setData([], [])
         self.canvas.spike_curve.setData([], [])
@@ -722,25 +627,20 @@ class IntanDeviceTab(DataTab):
         self._spike_times_cache.clear()
         self._last_spike_scan_sample.clear()
         self._hist_states.clear()
+        self._filter_state = None
         self._last_proc_abs_start = 0
         self._latest_psd_f = None
         self._latest_psd_db = None
         self._latest_wf_t_ms = None
         self._latest_wf_mu = None
-        self._raw_hist_t_low = [[] for _ in range(self.num_channels)]
-        self._raw_hist_y_low = [[] for _ in range(self.num_channels)]
-        self._raw_hist_t_high = [[] for _ in range(self.num_channels)]
-        self._raw_hist_y_high = [[] for _ in range(self.num_channels)]
-        self._raw_hist_sample_mod_low = 0
-        self._raw_hist_sample_mod_high = 0
+        self._model.reset()
         self._psd_pending = False
         self._spike_pending = False
         self._active_expensive_task_id = {}
         self._last_raw_render_t = 0.0
         self._last_psd_render_t = 0.0
         self._last_spike_render_t = 0.0
-        self.psd_update_counter = 0
-        self.spike_plot_frame_counter = 0
+        self._next_proc_t = 0.0
         self.set_auto_follow(True)
         self._suspend_follow_detection = True
         try:
@@ -825,10 +725,7 @@ class IntanDeviceTab(DataTab):
         if channel_labels is not None:
             self._channel_labels = channel_labels
         self._ring.resize(num_channels)
-        self._raw_hist_t_low = [[] for _ in range(self.num_channels)]
-        self._raw_hist_y_low = [[] for _ in range(self.num_channels)]
-        self._raw_hist_t_high = [[] for _ in range(self.num_channels)]
-        self._raw_hist_y_high = [[] for _ in range(self.num_channels)]
+        self._model.resize(num_channels)
         self._channel_combo.blockSignals(True)
         self._channel_combo.clear()
         self._channel_combo.addItems(self._channel_labels)
@@ -839,6 +736,7 @@ class IntanDeviceTab(DataTab):
         self._spike_times_cache.clear()
         self._last_spike_scan_sample.clear()
         self._hist_states.clear()
+        self._filter_state = None
 
     def set_receiving_state(self, receiving: bool):
         receiving = bool(receiving)

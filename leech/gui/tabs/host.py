@@ -3,8 +3,7 @@ import time
 import pyqtgraph as pg
 from PyQt5 import QtWidgets, QtCore
 
-from leech.gui.plot_helpers import PLOT_UPDATE_FREQ_HZ, DISPLAY_BUFFER_SEC
-from leech.gui.ring_buffer import RingBuffer
+from leech.gui.plot_helpers import PLOT_UPDATE_FREQ_HZ
 
 
 PLANNING_EMPTY_MESSAGE = (
@@ -41,8 +40,8 @@ class TabHost(QtWidgets.QWidget):
         self._empty_label.setStyleSheet("color: #6C6C6C; padding: 40px 16px; font-size: 13px;")
         layout.addWidget(self._empty_label, 1)
 
-        pg.setConfigOption('background', 'white')
-        pg.setConfigOption('foreground', 'black')
+        pg.setConfigOption('background', '#1E1E1E')
+        pg.setConfigOption('foreground', '#EDEBE9')
         pg.setConfigOption('antialias', True)
 
         self.render_timer = QtCore.QTimer(self)
@@ -104,14 +103,7 @@ class TabHost(QtWidgets.QWidget):
 
     def on_device_configured(self, source: str, num_channels: int, channel_labels: list[str], sample_rate: float = 0.0):
         for tab in self._route.get(source, ()):
-            if hasattr(tab, 'clear'):
-                tab.clear()
-            if hasattr(tab, '_resize'):
-                tab._resize(num_channels, channel_labels)
-            if sample_rate > 0 and hasattr(tab, 'sampling_rate'):
-                tab.sampling_rate = float(sample_rate)
-                if not getattr(tab, "owns_ring", False):
-                    tab._ring = RingBuffer(tab.sampling_rate, tab._ring.num_channels, duration_sec=DISPLAY_BUFFER_SEC)
+            tab.on_device_configured(num_channels, channel_labels, sample_rate)
 
     def clear_all(self):
         for name in list(self._tabs):
@@ -128,6 +120,20 @@ class TabHost(QtWidgets.QWidget):
     def on_data(self, source, chunk):
         for tab in self._route.get(source, ()):
             tab.on_data(chunk)
+
+    def add_markers(self, source, markers):
+        for tab in self._route.get(source, ()):
+            add_marker = getattr(tab, 'add_marker', None)
+            if not callable(add_marker):
+                continue
+            for marker in markers or ():
+                add_marker(marker)
+
+    def show_message(self, source: str, message: str):
+        for tab in self._route.get(source, ()):
+            show = getattr(tab, 'show_message', None)
+            if callable(show):
+                show(message)
 
     # ── Render ─────────────────────────────────────────────────────────────
 

@@ -2,7 +2,7 @@ import os
 import subprocess
 import sys
 
-from PyQt5.QtCore import QPropertyAnimation, QSize, Qt, QEasingCurve, pyqtSignal
+from PyQt5.QtCore import QPropertyAnimation, QSize, Qt, QEasingCurve, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QDoubleSpinBox, QFormLayout, QFrame, QHBoxLayout,
@@ -293,6 +293,11 @@ class RightSidebar(QFrame):
         self._block_name.textChanged.connect(self._on_block_field_changed)
         self._block_start.valueChanged.connect(self._on_block_field_changed)
         self._block_dur.valueChanged.connect(self._on_block_field_changed)
+        # Debounce writes so one edit is one undoable change, not one per keystroke.
+        self._emit_timer = QTimer(self)
+        self._emit_timer.setSingleShot(True)
+        self._emit_timer.setInterval(300)
+        self._emit_timer.timeout.connect(self._emit_block_params)
 
         self._device_expander = FluentExpander("Device Properties", expanded=True)
         self._dp_widget = QWidget()
@@ -352,6 +357,12 @@ class RightSidebar(QFrame):
         self._device_expander.setVisible(has_device)
 
     def set_block_info(self, dev_idx, block_idx, display_name, op_name, start, duration, params=None, device_type=""):
+        # Flush a pending edit for the previous block before retargeting the form.
+        if self._emit_timer.isActive() and (
+            dev_idx != self._block_dev_idx or block_idx != self._block_idx
+        ):
+            self._emit_timer.stop()
+            self._emit_block_params()
         self._updating = True
         self._block_dev_idx = dev_idx
         self._block_idx = block_idx
@@ -416,7 +427,7 @@ class RightSidebar(QFrame):
             return
         if self._block_dev_idx < 0 or self._block_idx < 0:
             return
-        self._emit_block_params()
+        self._emit_timer.start()
 
 
 class MainStage(QWidget):
@@ -445,12 +456,15 @@ class MainStage(QWidget):
 
         btn_style = "QPushButton { border: 1px solid #555; border-radius: 3px; padding: 4px 10px; } QPushButton:hover { background: #3A3A3A; }"
 
-        self.btn_play = QPushButton("Play")
+        self.btn_play = QPushButton("Run Experiment")
         self.btn_play.setStyleSheet(btn_style)
+        self.btn_play.setToolTip("Start the experiment and connect devices")
         self.btn_pause = QPushButton("Pause")
         self.btn_pause.setStyleSheet(btn_style)
+        self.btn_pause.setToolTip("Pause the running experiment")
         self.btn_stop = QPushButton("Stop")
         self.btn_stop.setStyleSheet(btn_style)
+        self.btn_stop.setToolTip("Stop the running experiment")
         self.btn_stop.setEnabled(False)
         self.btn_pause.setEnabled(False)
         timeline_bar.addWidget(self.btn_play)
@@ -472,7 +486,7 @@ class MainStage(QWidget):
         self.right_sidebar.block_change_requested.connect(self.timeline.update_block)
         self.timeline.device_selected.connect(self.right_sidebar.set_device_info)
         self.right_sidebar.device_config_changed.connect(self.timeline.update_device_config)
-        self.timeline.data_changed.connect(self._on_timeline_data_changed)
+        self.timeline.structure_changed.connect(self._on_timeline_structure_changed)
 
         center_layout.addLayout(timeline_bar)
 
@@ -497,7 +511,9 @@ class MainStage(QWidget):
             lambda *_: save_list("layout/sizes_v", vsplit.sizes()))
         self._v_splitter = vsplit
 
-    def _on_timeline_data_changed(self):
+    def _on_timeline_structure_changed(self):
+        # Only plan structure invalidates open tabs; moving a block must not
+        # destroy a replay tab mid-drag.
         if self.timeline._edit_mode:
             self.tab_host.clear_all()
 

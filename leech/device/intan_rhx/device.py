@@ -34,10 +34,21 @@ class GetSampleRateFailure(Exception):
 class IntanRHXDevice(Device):
     name = "Intan RHX"
     device_type = "rhx"
+    config_version = 2
+    storage_format = "rhs"
+    storage_globs = ("*.rhd", "*.rhs")
+    replay_source_formats = frozenset(("rhs", "rhd", "native", "intan"))
     _enabled_ports = []
     # Fallback for pre-programming state; program_stimulation() sets the
     # instance value from the actual pulse-train parameters.
     _stim_pulses_per_train = MAX_PULSES_PER_TRAIN
+
+    @staticmethod
+    def _coerce_storage_format(mode) -> str:
+        mode = str(mode or "rhs")
+        if mode != "rhs":
+            print(f"[IntanRHX] storage format {mode!r} is no longer supported; using rhs")
+        return "rhs"
 
     def __init__(self,
                  host="127.0.0.1",
@@ -47,7 +58,8 @@ class IntanRHXDevice(Device):
                  buffer_duration_sec=5,
                  auto_start=False,
                  verbose=False,
-                 storage_mode="rhs",
+                 storage_format=None,
+                 storage_mode=None,
                  autolaunch=True,
                  rhx_exe_path="",
                  rhx_device_serial="",
@@ -58,7 +70,7 @@ class IntanRHXDevice(Device):
         self.num_channels = num_channels
         self._sample_rate = None
         self.verbose = verbose
-        self.storage_mode = storage_mode
+        self.storage_format = self._coerce_storage_format(storage_format or storage_mode)
         self.autolaunch = bool(autolaunch)
         self.rhx_exe_path = rhx_exe_path or ""
         self.rhx_device_serial = rhx_device_serial or ""
@@ -571,13 +583,19 @@ class IntanRHXDevice(Device):
     def parse_emg_stream_fast(self, raw_bytes: bytearray, synced=True):
         C = self.num_channels
         frames = FRAMES_PER_BLOCK
-        bytes_per_frame = 4 + 2 * C
-        bytes_per_block = 4 + frames * bytes_per_frame
+        key = (C, frames)
+        if getattr(self, "_stream_dtype_key", None) != key:
+            self._stream_bytes_per_frame = 4 + 2 * C
+            self._stream_bytes_per_block = 4 + frames * self._stream_bytes_per_frame
+            self._stream_magic = MAGIC_NUMBER.to_bytes(4, "little")
+            frame_dtype = np.dtype([('ts', '<i4'), ('v', ('<u2', C))])
+            self._stream_block_dtype = np.dtype([('magic', '<u4'), ('data', (frame_dtype, frames))])
+            self._stream_dtype_key = key
+        bytes_per_block = self._stream_bytes_per_block
         mv = memoryview(raw_bytes)
         start = 0
         if not synced:
-            magic = MAGIC_NUMBER.to_bytes(4, "little")
-            pos = raw_bytes.find(magic)
+            pos = raw_bytes.find(self._stream_magic)
             if pos == -1:
                 return None, None, 0, False
             start = pos
@@ -585,8 +603,7 @@ class IntanRHXDevice(Device):
         nblocks = available // bytes_per_block
         if nblocks <= 0:
             return None, None, start, True
-        frame_dtype = np.dtype([('ts', '<i4'), ('v', ('<u2', C))])
-        block_dtype = np.dtype([('magic', '<u4'), ('data', (frame_dtype, frames))])
+        block_dtype = self._stream_block_dtype
         blocks = np.frombuffer(mv[start:start + nblocks * bytes_per_block], dtype=block_dtype)
         good = (blocks['magic'] == MAGIC_NUMBER)
         blocks = blocks[good]
@@ -668,7 +685,8 @@ class IntanRHXDevice(Device):
                     _intentional_stop = False
                     break
                 emg_data, timestamps, consumed, self._synced = self.parse_emg_stream_fast(rolling_buffer, synced=self._synced)
-                rolling_buffer = rolling_buffer[consumed:]
+                if consumed:
+                    del rolling_buffer[:consumed]
                 if emg_data is not None:
                     n = emg_data.shape[1]
                     with self.buffer_lock:
@@ -704,7 +722,9 @@ class IntanRHXDevice(Device):
 
     def configure(self, **kwargs):
         for key, value in kwargs.items():
-            if "channels" in key:
+            if key in ("storage_format", "storage_mode"):
+                self.storage_format = self._coerce_storage_format(value)
+            elif "channels" in key:
                 if str(value).strip():
                     indices = self._parse_channel_range(str(value))
                     self._set_enabled_channels(indices)
@@ -899,6 +919,7 @@ class IntanRHXDevice(Device):
             if n_new > buf_len // 2:
                 # ponytail: advance cursor so next call sees n_new=0, not same
                 # large value — breaks permanent stall after reconfigure
+                self._dropped_samples = getattr(self, "_dropped_samples", 0) + n_new
                 self._last_read_cursor = cur
                 return None
             if prev < cur:
@@ -926,6 +947,7 @@ class IntanRHXDevice(Device):
     @classmethod
     def get_operations(cls):
         from ..base import DeviceOperation, ParamDef
+        from .operations import prepare_stimulus, run_stimulus
         return [
             DeviceOperation("Configure", "Configure", instantaneous=True, default_duration=0, color="#2B88D8", params=[
                 ParamDef("blocks_per_write", "Blocks per Write", "int", default=1, min_val=1, max_val=100),
@@ -953,7 +975,7 @@ class IntanRHXDevice(Device):
                 ParamDef("burst_on_s", "Burst On (s, 0 = continuous)", "float", default=0.0, min_val=0.0, max_val=100000.0),
                 ParamDef("burst_off_s", "Burst Off (s, 0 = continuous)", "float", default=0.0, min_val=0.0, max_val=100000.0),
                 ParamDef("train_interval_s", "Train Interval (s, 0 = fastest)", "float", default=0.0, min_val=0.0, max_val=100000.0),
-            ])
+            ], handler=run_stimulus, prepare=prepare_stimulus)
         ]
 
     @classmethod
@@ -965,14 +987,35 @@ class IntanRHXDevice(Device):
             ParamDef("data_port", "Data Port", "int", default=5001, min_val=1024, max_val=65535),
             ParamDef("num_channels", "Num Channels", "int", default=128, min_val=1, max_val=512),
             ParamDef("buffer_duration_sec", "Buffer Duration (s)", "float", default=5.0, min_val=1.0, max_val=60.0),
-            ParamDef("storage_mode", "Experiment Storage", "choice", default="rhs",
-                     choices=["rhs", "csv"]),
+            ParamDef("storage_format", "Experiment Storage", "choice", default="rhs",
+                     choices=["rhs"]),
             ParamDef("autolaunch", "Auto-launch IntanRHX", "bool", default=True),
             ParamDef("rhx_exe_path", "IntanRHX Path (blank = autodiscover)", "str", default=""),
             ParamDef("rhx_device_serial", "RHX Device Serial (blank = first detected)", "str", default=""),
             ParamDef("rhx_sample_rate_hz", "RHX Sample Rate Hz (0 = RHX default)", "int",
                      default=0, min_val=0, max_val=30000),
         ]
+
+    @classmethod
+    def migrate_config(cls, config, from_version):
+        from ..base import migrate_storage_key
+        return migrate_storage_key(config)
+
+    def create_output_sink(self, sample_rate, channel_names, raw_dir, file_prefix,
+                           flush_interval_sec=1.0):
+        # RHX writes its own .rhs/.rhd files; no Python sink.
+        return None
+
+    @classmethod
+    def replay_source(cls, chunks_dir, fmt, sample_rate=20000.0, label_order=None,
+                      device_type=None):
+        from .replay import IntanNativeSource
+        return IntanNativeSource(
+            chunks_dir,
+            sample_rate=sample_rate,
+            label_order=label_order,
+            device_type=device_type or cls.device_type,
+        )
 
     @classmethod
     def get_tab_class(cls):

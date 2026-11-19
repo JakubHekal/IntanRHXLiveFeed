@@ -1,6 +1,7 @@
 import time
 import numpy as np
 import threading
+from collections import deque
 from typing import Optional, List, Union
 
 from ..base import Device, ChannelInfo
@@ -20,7 +21,7 @@ class SimulatedRecordingDevice(Device):
         self._connected = False
         self._streaming = False
         self._phase = 0.0
-        self._buffer = np.zeros((self._num_channels, 0), dtype=np.float32)
+        self._buffer = deque()
         self._buffer_lock = threading.Lock()
         self._thread = None
         self._t0 = 0.0
@@ -55,7 +56,8 @@ class SimulatedRecordingDevice(Device):
             return
         self._streaming = True
         self._t0 = time.perf_counter()
-        self._buffer = np.zeros((self._num_channels, 0), dtype=np.float32)
+        with self._buffer_lock:
+            self._buffer.clear()
         self._thread = threading.Thread(target=self._generate, daemon=True)
         self._thread.start()
 
@@ -66,26 +68,45 @@ class SimulatedRecordingDevice(Device):
             self._thread = None
 
     def _generate(self):
+        # ponytail: pace against the wall clock and keep blocks in a deque.
+        # Fixed 50 ms sleeps plus np.hstack lost ~25% of the samples at 128 ch.
+        emitted = 0
+        max_len = int(self._sample_rate * 5)
         while self._streaming:
-            elapsed = time.perf_counter() - self._t0
-            n = int(self._sample_rate * 0.05)
-            t = np.arange(n, dtype=np.float32) / self._sample_rate
-            phase = 2.0 * np.pi * self._frequency * (elapsed + t)
-            data = self._amplitude * np.sin(phase[np.newaxis, :] + np.arange(self._num_channels)[:, np.newaxis])
+            now = time.perf_counter()
+            target = int((now - self._t0) * self._sample_rate)
+            n = min(target - emitted, int(self._sample_rate * 0.5))
+            if n <= 0:
+                time.sleep(0.002)
+                continue
+            t = (emitted + np.arange(n, dtype=np.float64)) / self._sample_rate
+            phase = 2.0 * np.pi * self._frequency * t
+            data = self._amplitude * np.sin(
+                phase[np.newaxis, :] + np.arange(self._num_channels)[:, np.newaxis]
+            )
             data += np.random.normal(0, self._noise_level, data.shape)
+            emitted += n
             with self._buffer_lock:
-                self._buffer = np.hstack([self._buffer, data.astype(np.float32)])
-                max_len = int(self._sample_rate * 5)
-                if self._buffer.shape[1] > max_len:
-                    self._buffer = self._buffer[:, -max_len:]
-            time.sleep(0.05)
+                self._buffer.append(data.astype(np.float32))
+                total = sum(block.shape[1] for block in self._buffer)
+                while total > max_len:
+                    drop = total - max_len
+                    first = self._buffer[0]
+                    if first.shape[1] <= drop:
+                        self._buffer.popleft()
+                        total -= first.shape[1]
+                    else:
+                        self._buffer[0] = first[:, drop:]
+                        total -= drop
+            time.sleep(0.005)
 
     def read_data(self) -> Optional[np.ndarray]:
         with self._buffer_lock:
-            if self._buffer.shape[1] < 1:
+            if not self._buffer:
                 return None
-            data = self._buffer.copy()
-            self._buffer = np.zeros((self._num_channels, 0), dtype=np.float32)
+            data = (np.concatenate(self._buffer, axis=1)
+                    if len(self._buffer) > 1 else self._buffer[0])
+            self._buffer.clear()
         return data
 
     def write_output(self, channel_index: int, value: Union[float, bool]) -> None:

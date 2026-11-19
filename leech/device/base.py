@@ -23,7 +23,10 @@ class DeviceOperation:
     instantaneous: bool = False
     params: List[ParamDef] = field(default_factory=list)
     color: str = "#0078D4"
+    # Runs the step. Signature: (runner, step_idx, device, device_name, params, duration)
     handler: Optional[Any] = None
+    # Runs while the device is still stopped, before its group starts.
+    prepare: Optional[Any] = None
 
     @property
     def operation_id(self):
@@ -44,6 +47,10 @@ class ChannelInfo:
 class Device(ABC):
     config_version = 1
     operation_aliases = {}
+    # On-disk storage this device writes and replay readers it can drive.
+    storage_format = "csv"
+    storage_globs = ("chunk_*.csv",)
+    replay_source_formats = frozenset()
 
     @property
     @abstractmethod
@@ -118,7 +125,51 @@ class Device(ABC):
         from leech.gui.tabs.base import DataTab
         return DataTab
 
+    def create_output_sink(self, sample_rate, channel_names, raw_dir, file_prefix,
+                           flush_interval_sec=1.0):
+        """Open the storage sink for a stream; ``None`` means the device records
+        natively via ``start_recording_session``."""
+        from leech.workers.chunk_writer import ChunkWriter
+        from leech.telemetry_logger import append_telemetry_line
+
+        num_channels = len(channel_names) or 1
+        text_rate = float(num_channels) * float(sample_rate) * 9.0
+        if text_rate > 10e6:
+            append_telemetry_line(
+                f"storage | warn | CSV at {num_channels} ch x {sample_rate:g} Hz "
+                f"is ~{text_rate / 1e6:.1f} MB/s; use native or HDF5 storage"
+            )
+        sink = ChunkWriter(
+            sample_rate=sample_rate,
+            num_channels=num_channels,
+            channel_names=channel_names,
+            chunk_max_sec=300.0,
+            buffer_bytes=1024 * 1024,
+            flush_interval_sec=flush_interval_sec,
+        )
+        return self._open_sink(sink, raw_dir, file_prefix)
+
+    @staticmethod
+    def _open_sink(sink, raw_dir, file_prefix):
+        sink.raw_chunks_dir = raw_dir
+        sink.filename_prefix = file_prefix
+        sink._open_new_chunk_locked()
+        return sink
+
+    @classmethod
+    def replay_source(cls, chunks_dir, fmt, **kwargs):
+        """Return a replay reader for ``fmt``; raise if the device has none."""
+        raise ValueError(f"{cls.__name__} has no replay source for {fmt!r}")
+
 
 class OutputSink(Protocol):
     def append_data(self, arr: np.ndarray, marker_info: dict = None) -> None: ...
     def close(self) -> None: ...
+
+
+def migrate_storage_key(config: dict) -> dict:
+    """Rename the legacy ``storage_mode`` device config key."""
+    result = dict(config or {})
+    if "storage_mode" in result and "storage_format" not in result:
+        result["storage_format"] = result.pop("storage_mode")
+    return result

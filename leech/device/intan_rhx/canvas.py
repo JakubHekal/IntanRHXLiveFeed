@@ -26,7 +26,7 @@ class PgCanvas(QtWidgets.QWidget):
         self.raw_plot.setLabel('left',   'U [uV]')
         self.raw_plot.setLabel('bottom', 't [s]')
         self.raw_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.raw_plot.setDownsampling(auto=True, mode='peak')
+        self.raw_plot.setDownsampling(None)
         self.raw_plot.setClipToView(True)
         self.raw_plot.setMouseEnabled(x=True, y=True)
 
@@ -53,7 +53,7 @@ class PgCanvas(QtWidgets.QWidget):
         self.wf_plot.setMouseEnabled(x=False, y=True)
         self.wf_plot.setYRange(-WAVEFORM_YLIM_ABS_UV, WAVEFORM_YLIM_ABS_UV, padding=0)
 
-        self.raw_curve   = self.raw_plot.plot(  pen=pg.mkPen("#1D20ED", width=1))
+        self.raw_curve   = self.raw_plot.plot(  pen=pg.mkPen("#4FC3F7", width=1))
         self.psd_curve   = self.psd_plot.plot(  pen=pg.mkPen("#f62d2d", width=2))
         self.spike_curve = self.spike_plot.plot(pen=pg.mkPen("#20C814", width=2))
         self.wf_curve    = self.wf_plot.plot(   pen=pg.mkPen("#e840b3", width=2))

@@ -33,6 +33,7 @@ class ExperimentTimeline(QWidget):
 
     block_selected = pyqtSignal(int, int, str, str, float, float, dict, str)
     data_changed = pyqtSignal()
+    structure_changed = pyqtSignal()
     device_selected = pyqtSignal(int, str, dict)
 
     def __init__(self, parent=None):
@@ -145,6 +146,7 @@ class ExperimentTimeline(QWidget):
         self._update_total_time()
         self._update_height()
         self.data_changed.emit()
+        self.structure_changed.emit()
         self.update()
         return row
 
@@ -216,6 +218,7 @@ class ExperimentTimeline(QWidget):
         self._update_total_time()
         self._update_height()
         self.data_changed.emit()
+        self.structure_changed.emit()
         self.update()
 
     def clear_all(self):
@@ -236,6 +239,7 @@ class ExperimentTimeline(QWidget):
         self._update_total_time()
         self._update_height()
         self.data_changed.emit()
+        self.structure_changed.emit()
         self.update()
 
     def set_active_block(self, device_name, block_label):

@@ -21,6 +21,81 @@ def _get_sos(fs):
     return _SOS_CACHE[0]
 
 
+class _FilterState:
+    """Carried sosfilt state plus the trailing filtered window used for z-scoring.
+
+    Mutated in place by the single analysis worker. The ring holds at most
+    ``window_sec`` of samples, which is what keeps median/MAD off the full tail.
+    """
+
+    __slots__ = ('num_channels', 'sample_rate', 'cap', 'hist', 'wpos', 'length', 'end_abs', 'zi')
+
+    def __init__(self, num_channels, sample_rate, window_sec):
+        self.num_channels = int(num_channels)
+        self.sample_rate = float(sample_rate)
+        self.cap = max(1, int(round(self.sample_rate * float(window_sec))))
+        self.hist = np.empty((self.num_channels, self.cap), dtype=np.float32)
+        self.wpos = 0
+        self.length = 0
+        self.end_abs = 0
+        self.zi = None
+
+    def matches(self, num_channels, sample_rate):
+        return (self.num_channels == int(num_channels)
+                and abs(self.sample_rate - float(sample_rate)) < 1e-9)
+
+    def reset(self, end_abs=0):
+        self.wpos = 0
+        self.length = 0
+        self.end_abs = int(end_abs)
+        self.zi = None
+
+    def append(self, x, start_abs):
+        n = x.shape[1]
+        if n <= 0:
+            return
+        if n >= self.cap:
+            self.hist[:, :] = x[:, -self.cap:]
+            self.wpos = 0
+            self.length = self.cap
+        else:
+            space = self.cap - self.wpos
+            if n <= space:
+                self.hist[:, self.wpos:self.wpos + n] = x
+            else:
+                self.hist[:, self.wpos:] = x[:, :space]
+                self.hist[:, :n - space] = x[:, space:]
+            self.wpos = (self.wpos + n) % self.cap
+            self.length = min(self.cap, self.length + n)
+        self.end_abs = int(start_abs) + n
+
+    def _gather(self, start, n):
+        if n <= 0:
+            return None
+        if start + n <= self.cap:
+            return self.hist[:, start:start + n]
+        tail = self.cap - start
+        out = np.empty((self.num_channels, n), dtype=self.hist.dtype)
+        out[:, :tail] = self.hist[:, start:]
+        out[:, tail:] = self.hist[:, :n - tail]
+        return out
+
+    def last(self):
+        if self.length <= 0:
+            return None
+        return self._gather((self.wpos - self.length) % self.cap, self.length)
+
+    def read_abs(self, start_abs, end_abs):
+        """Return (samples, actual_start_abs) clamped to the stored window."""
+        oldest = self.end_abs - self.length
+        lo = max(int(start_abs), oldest)
+        hi = min(int(end_abs), self.end_abs)
+        if hi <= lo:
+            return None, lo
+        pos = (self.wpos - (self.end_abs - lo)) % self.cap
+        return self._gather(pos, hi - lo), lo
+
+
 class _ProcessingResult:
     __slots__ = (
         'has_psd_update', 'has_spike_update',
@@ -30,7 +105,7 @@ class _ProcessingResult:
         'spike_times_cache', 'last_scan_sample',
         'hist_minute_idx', 'hist_counts',
         'hist_states', 'last_scans',
-        'all_spike_caches',
+        'all_spike_caches', 'filter_state',
     )
 
     def __init__(self):
@@ -88,32 +163,76 @@ def _update_histogram_state(spike_times, last_time_s, state, bin_sec):
 
 def _run_all_channels(signal_matrix, t, fs, selected_ch, all_spike_caches,
                       last_scans, do_psd, do_spike, hist_states, abs_start=0,
-                      psd_buffer_sec=10, waveform_buffer_sec=10, spike_bin_sec=5):
-    """Vectorized matrix pipeline: spike detection + histogram for all channels."""
+                      psd_buffer_sec=10, waveform_buffer_sec=10, spike_bin_sec=5,
+                      filter_state=None, median_window_sec=5.0, psd_signal=None,
+                      num_channels=None):
+    """Vectorized matrix pipeline: spike detection + histogram for all channels.
+
+    ``filter_state`` carries the sosfilt delay line and a trailing window of
+    filtered samples. Median/MAD for z-scoring comes from that window only,
+    which keeps the analysis off the full display tail.
+    """
     result = _ProcessingResult()
     result.selected_ch = selected_ch
     result.has_psd_update = do_psd
     result.has_spike_update = do_spike
 
     n_ch, n_samp = signal_matrix.shape
+    if num_channels is not None:
+        n_ch = int(num_channels)
     stored_abs = abs_start + n_samp
 
     new_last_scans = dict(last_scans) if last_scans else {}
     new_hist_states = dict(hist_states) if hist_states else {}
     all_caches = {}
 
+    state = filter_state
+    if do_spike:
+        if state is not None and not state.matches(n_ch, fs):
+            state = None
+        if state is not None:
+            if state.length == 0:
+                if state.end_abs != abs_start:
+                    state.reset(abs_start)
+            elif not (abs_start <= state.end_abs <= stored_abs):
+                # Ring was cleared, resized, or a backlog drop skipped samples.
+                state.reset(abs_start)
+        if state is None:
+            state = _FilterState(n_ch, fs, median_window_sec)
+            state.reset(abs_start)
+
     if do_spike and n_samp >= 10:
-        sos = _get_sos(fs)
-        x_hp = sosfilt(sos, signal_matrix.astype(np.float64), axis=1)
+        sos = _get_sos(fs).astype(np.float32, copy=False)
+        rel = state.end_abs - abs_start
+        if rel < 0 or rel > n_samp:
+            state.reset(abs_start)
+            rel = 0
+        if rel < n_samp:
+            x_new = signal_matrix[:, rel:]
+            if state.zi is None:
+                state.zi = np.zeros((sos.shape[0], n_ch, 2), dtype=np.float32)
+            x_filt, state.zi = sosfilt(sos, x_new, axis=1, zi=state.zi)
+            state.append(x_filt, abs_start + rel)
 
-        med = np.median(x_hp, axis=1, keepdims=True)
-        mad = np.median(np.abs(x_hp - med), axis=1, keepdims=True)
-        mad = np.maximum(mad, 1e-12)
-        z = 0.6745 * (x_hp - med) / mad
-
-        mask = np.abs(z) > _spike_count.SPIKE_Z_THR
+        hist = state.last()
+        if hist is None or hist.shape[1] == 0:
+            hist = None
+        if hist is not None:
+            med = np.median(hist, axis=1, keepdims=True)
+            mad = np.median(np.abs(hist - med), axis=1, keepdims=True)
+            mad = np.maximum(mad, 1e-12)
 
         refractory = max(1, int(round((_spike_count.REFRACTORY_MS / 1000.0) * fs)))
+
+        # One gather for every channel; scanning per channel would copy the
+        # wrapped window 128 times.
+        scan_floor = max(
+            abs_start,
+            min(last_scans.get(ch, 0) for ch in range(n_ch)) - SPIKE_OVERLAP_SAMPLES,
+        )
+        scan_all, scan_base = state.read_abs(scan_floor, stored_abs)
+        if scan_all is not None and scan_all.shape[1] <= 0:
+            scan_all = None
 
         for ch in range(n_ch):
             last_scan_abs = last_scans.get(ch, 0) if last_scans else 0
@@ -121,20 +240,30 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, all_spike_caches,
             if gap < SPIKE_INCREMENTAL_MIN_SAMPLES:
                 continue
 
-            overlap = SPIKE_OVERLAP_SAMPLES
-            scan_start_abs = max(abs_start, last_scan_abs - overlap)
-            scan_start_rel = scan_start_abs - abs_start
+            new_last_scans[ch] = stored_abs
+            if hist is None or scan_all is None:
+                continue
 
-            ch_mask = mask[ch, scan_start_rel:n_samp]
-            peak_idx = np.where(ch_mask)[0]
+            overlap = SPIKE_OVERLAP_SAMPLES
+            ch_start = max(abs_start, last_scan_abs - overlap)
+            off = max(0, ch_start - scan_base)
+            if off >= scan_all.shape[1]:
+                continue
+            t_rel = scan_base - abs_start + off
+            if t_rel < 0:
+                t_rel = 0
+            if t_rel >= t.size:
+                t_rel = max(0, t.size - 1)
+
+            z = 0.6745 * (scan_all[ch, off:] - med[ch, 0]) / mad[ch, 0]
+            peak_idx = np.where(np.abs(z) > _spike_count.SPIKE_Z_THR)[0]
 
             if peak_idx.size > 0:
-                peak_idx = peak_idx + scan_start_rel
                 keep = np.concatenate([[True], np.diff(peak_idx) >= refractory])
                 peak_idx = peak_idx[keep]
 
                 if _spike_count.AMP_MIN_UV is not None or _spike_count.AMP_MAX_UV is not None:
-                    amps = np.abs(x_hp[ch, peak_idx])
+                    amps = np.abs(scan_all[ch, off + peak_idx])
                     amp_keep = np.ones_like(peak_idx, dtype=bool)
                     if _spike_count.AMP_MIN_UV is not None:
                         amp_keep &= amps >= float(_spike_count.AMP_MIN_UV)
@@ -142,12 +271,13 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, all_spike_caches,
                         amp_keep &= amps <= float(_spike_count.AMP_MAX_UV)
                     peak_idx = peak_idx[amp_keep]
 
-            spike_times = t[peak_idx] if peak_idx.size else np.array([], dtype=float)
-            new_last_scans[ch] = stored_abs
+            matrix_idx = peak_idx + t_rel
+            matrix_idx = matrix_idx[(matrix_idx >= 0) & (matrix_idx < t.size)]
+            spike_times = t[matrix_idx] if matrix_idx.size else np.array([], dtype=float)
 
             prev_cache = list(all_spike_caches.get(ch, []))
             if prev_cache:
-                cutoff = float(t[scan_start_rel]) if scan_start_rel < t.size else prev_cache[-1] + 1.0
+                cutoff = float(t[t_rel]) if t_rel < t.size else prev_cache[-1] + 1.0
                 new_cache = [s for s in prev_cache if s < cutoff]
                 new_cache.extend(spike_times.tolist())
             else:
@@ -155,9 +285,9 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, all_spike_caches,
 
             all_caches[ch] = new_cache
 
-            state = new_hist_states.get(ch, {})
+            hist_state = new_hist_states.get(ch, {})
             minute_idx, counts, new_state = _update_histogram_state(
-                new_cache, float(t[-1]) if t.size else 0.0, state,
+                new_cache, float(t[-1]) if t.size else 0.0, hist_state,
                 spike_bin_sec,
             )
             new_hist_states[ch] = new_state
@@ -207,25 +337,32 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, all_spike_caches,
         for ch in range(n_ch):
             new_last_scans[ch] = stored_abs
 
-    if do_psd and selected_ch < n_ch:
+    if do_psd:
         try:
             psd_samples = max(8, int(round(fs * psd_buffer_sec)))
-            psd_sig = signal_matrix[selected_ch, -psd_samples:]
-            target_nperseg = max(64, int(round(_psd.TARGET_NPERSEG_SEC * fs)))
-            nperseg = min(target_nperseg, psd_sig.size)
-            nperseg = max(64, 2 ** int(round(np.log2(nperseg))))
-            nperseg = min(nperseg, psd_sig.size)
-            noverlap = min(int(round(_psd.NOVERLAP_RATIO * nperseg)), nperseg - 1)
-            if nperseg >= 8:
-                f, _, Pxx_db = _psd.welch_psd(psd_sig, fs, nperseg, noverlap, fmax=_psd.FMAX)
-                result.psd_f = f
-                result.psd_db = Pxx_db
+            if psd_signal is not None:
+                psd_sig = np.asarray(psd_signal)[-psd_samples:]
+            elif selected_ch < n_ch:
+                psd_sig = signal_matrix[selected_ch, -psd_samples:]
+            else:
+                psd_sig = None
+            if psd_sig is not None and psd_sig.size:
+                target_nperseg = max(64, int(round(_psd.TARGET_NPERSEG_SEC * fs)))
+                nperseg = min(target_nperseg, psd_sig.size)
+                nperseg = max(64, 2 ** int(round(np.log2(nperseg))))
+                nperseg = min(nperseg, psd_sig.size)
+                noverlap = min(int(round(_psd.NOVERLAP_RATIO * nperseg)), nperseg - 1)
+                if nperseg >= 8:
+                    f, _, Pxx_db = _psd.welch_psd(psd_sig, fs, nperseg, noverlap, fmax=_psd.FMAX)
+                    result.psd_f = f
+                    result.psd_db = Pxx_db
         except Exception:
             pass
 
     result.hist_states = new_hist_states
     result.last_scans = new_last_scans
     result.all_spike_caches = all_caches
+    result.filter_state = state
     return result
 
 
