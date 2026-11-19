@@ -80,6 +80,7 @@ class MainWindow(QMainWindow):
 
         self._current_experiment_path = None
         self._current_run_path = None
+        self._dirty = False
         self._run_device_configs = {}
         self._run_device_instances = []
         self._run_device_instance_map = {}
@@ -118,6 +119,7 @@ class MainWindow(QMainWindow):
             return None
         self._current_experiment_path = str(path)
         self.setWindowTitle(f"LEECH — {config.metadata.experiment_name}")
+        self._set_dirty(False)
         self.main_stage.left_sidebar.reload_runs(str(Path(path) / "runs"))
         return config
 
@@ -146,6 +148,33 @@ class MainWindow(QMainWindow):
             config_path = Path(path) / "config.json"
             if config_path.exists() and self._activate_experiment(path) is not None:
                 save_recent_experiment(str(path))
+
+    def _on_timeline_changed(self):
+        if self._current_experiment_path and self.main_stage.timeline._edit_mode:
+            self._set_dirty(True)
+
+    def _set_dirty(self, dirty):
+        dirty = bool(dirty)
+        if dirty == self._dirty:
+            return
+        self._dirty = dirty
+        base = self.windowTitle().rstrip(" *")
+        self.setWindowTitle(base + (" *" if self._dirty else ""))
+
+    def _confirm_discard_changes(self):
+        if not self._dirty or not self._current_experiment_path:
+            return True
+        reply = QMessageBox.warning(
+            self, "Unsaved Changes",
+            "Save changes to this experiment before closing?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if reply == QMessageBox.Cancel:
+            return False
+        if reply == QMessageBox.Save:
+            return self._save_experiment()
+        return True
 
     def _close_devices(self):
         for inst in getattr(self, '_run_device_instances', []):
@@ -181,6 +210,9 @@ class MainWindow(QMainWindow):
             self.main_stage.tab_host.set_planning_state()
 
     def closeEvent(self, event):
+        if not self._confirm_discard_changes():
+            event.ignore()
+            return
         save_geometry(bytes(self.saveGeometry()))
         if getattr(self, '_experiment_runner', None) is not None and self._experiment_runner.is_running():
             self._experiment_runner.stop()
@@ -196,12 +228,17 @@ class MainWindow(QMainWindow):
 
         experiment_menu = QMenu("Experiment", self)
         self._exp_new_action = experiment_menu.addAction("New Experiment")
+        self._exp_new_action.setShortcut("Ctrl+N")
         self._exp_open_action = experiment_menu.addAction("Open Experiment")
+        self._exp_open_action.setShortcut("Ctrl+O")
         experiment_menu.addSeparator()
         self._exp_save_action = experiment_menu.addAction("Save Experiment")
+        self._exp_save_action.setShortcut("Ctrl+S")
         self._exp_duplicate_action = experiment_menu.addAction("Duplicate Experiment")
+        self._exp_duplicate_action.setShortcut("Ctrl+Shift+S")
         experiment_menu.addSeparator()
         self._exp_run_action = experiment_menu.addAction("Run Experiment\u2026")
+        self._exp_run_action.setShortcut("F5")
         exp_btn = self._create_menu_button("Experiment", experiment_menu)
         menubar_layout.addWidget(exp_btn)
 
@@ -250,6 +287,7 @@ class MainWindow(QMainWindow):
         self.main_stage.left_sidebar.run_selected.connect(self._on_replay_run)
         self.main_stage.left_sidebar.run_action.connect(self._on_run_action)
         self.main_stage.btn_play.clicked.connect(self._on_play_clicked)
+        self.main_stage.timeline.data_changed.connect(self._on_timeline_changed)
 
     def _setup_status_bar(self):
         status = QStatusBar()
@@ -443,13 +481,16 @@ class MainWindow(QMainWindow):
             save_recent_experiment(path)
 
     def _on_experiment_save(self):
+        self._save_experiment()
+
+    def _save_experiment(self) -> bool:
         if not self._current_experiment_path:
             QMessageBox.information(self, "No Experiment",
                                     "No experiment is open. Create or open one first.")
-            return
+            return False
         config = self._read_experiment(self._current_experiment_path)
         if config is None:
-            return
+            return False
         timeline = self.main_stage.timeline
         devs = timeline._devices
         existing_devices = {
@@ -510,8 +551,10 @@ class MainWindow(QMainWindow):
             )
         except (OSError, MigrationError, TypeError, ValueError) as exc:
             QMessageBox.warning(self, "Save Failed", str(exc))
-            return
+            return False
+        self._set_dirty(False)
         QMessageBox.information(self, "Saved", f"Experiment saved to {self._current_experiment_path}")
+        return True
 
     def _on_play_clicked(self):
         if self._experiment_runner is not None:
@@ -757,8 +800,10 @@ class MainWindow(QMainWindow):
             pass
         self.main_stage.btn_pause.clicked.connect(self._experiment_runner.pause)
         self.main_stage.btn_pause.clicked.connect(lambda: self.main_stage.btn_pause.setEnabled(False))
+        self.main_stage.btn_pause.clicked.connect(lambda: self.main_stage.btn_play.setText("Resume"))
         self.main_stage.btn_pause.clicked.connect(lambda: self.main_stage.btn_play.setEnabled(True))
         self.main_stage.btn_stop.clicked.connect(self._experiment_runner.stop)
+        self.main_stage.btn_play.setText("Run Experiment")
         self.main_stage.btn_play.setEnabled(False)
         self.main_stage.btn_pause.setEnabled(True)
         self.main_stage.btn_stop.setEnabled(True)
@@ -810,6 +855,7 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage(f"Experiment aborted: {message}")
         self.main_stage.btn_play.setEnabled(True)
+        self.main_stage.btn_play.setText("Run Experiment")
         self.main_stage.btn_pause.setEnabled(False)
         self.main_stage.btn_stop.setEnabled(False)
         self._close_devices()

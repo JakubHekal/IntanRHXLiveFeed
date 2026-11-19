@@ -41,8 +41,8 @@ class TabHost(QtWidgets.QWidget):
         self._empty_label.setStyleSheet("color: #6C6C6C; padding: 40px 16px; font-size: 13px;")
         layout.addWidget(self._empty_label, 1)
 
-        pg.setConfigOption('background', 'white')
-        pg.setConfigOption('foreground', 'black')
+        pg.setConfigOption('background', '#1E1E1E')
+        pg.setConfigOption('foreground', '#EDEBE9')
         pg.setConfigOption('antialias', True)
 
         self.render_timer = QtCore.QTimer(self)

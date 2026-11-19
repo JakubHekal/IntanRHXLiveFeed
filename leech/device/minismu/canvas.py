@@ -31,5 +31,5 @@ class SmuCanvas(QtWidgets.QWidget):
         self.current_plot.setClipToView(True)
         self.current_plot.setMouseEnabled(x=True, y=True)
 
-        self.voltage_curve = self.voltage_plot.plot(pen=pg.mkPen("#1D20ED", width=1))
+        self.voltage_curve = self.voltage_plot.plot(pen=pg.mkPen("#4FC3F7", width=1))
         self.current_curve = self.current_plot.plot(pen=pg.mkPen("#f62d2d", width=1))
