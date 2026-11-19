@@ -288,19 +288,24 @@ class IntanDeviceTab(DataTab):
         should_run_psd = do_psd
 
         if should_run_psd or should_run_spike:
-            if should_run_spike:
-                psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec))) if should_run_psd else 0
-                spike_n = int(max(SPIKE_INCREMENTAL_MIN_SAMPLES, gap) + SPIKE_OVERLAP_SAMPLES)
-                # ponytail: no wf_n inflation — waveform extraction uses time-based
-                # searchsorted, doesn't need the full window in the matrix.
-                tail_n = min(stored, max(psd_n, spike_n))
-            else:
-                psd_n = max(8, int(round(self.sampling_rate * self._psd_buffer_sec)))
-                tail_n = psd_n
+            # ponytail: PSD reads one channel, spike reads only the new gap.
+            # Reading the whole 10 s x 128 matrix here cost 25-90 ms per update.
+            psd_signal = None
+            if should_run_psd:
+                psd_n = min(stored, max(8, int(round(self.sampling_rate * self._psd_buffer_sec))))
+                if psd_n > 0:
+                    _, psd_signal = self._ring.read_tail(psd_n, ch_idx=ch)
 
-            # matrix read: (1+num_channels, tail_n)
-            t_tail, sig_matrix = self._ring.read_tail_matrix(tail_n)
-            abs_start = self._ring.total - t_tail.size
+            if should_run_spike:
+                spike_n = int(max(SPIKE_INCREMENTAL_MIN_SAMPLES, gap) + SPIKE_OVERLAP_SAMPLES)
+                tail_n = min(stored, spike_n)
+                t_tail, sig_matrix = self._ring.read_tail_matrix(tail_n)
+                abs_start = self._ring.total - t_tail.size
+            else:
+                t_tail = np.array([], dtype=np.float64)
+                sig_matrix = np.empty((0, 0), dtype=np.float32)
+                abs_start = self._ring.total
+
             self._last_proc_abs_start = abs_start
             self._hist_last_time_s = float(t_tail[-1]) if t_tail.size else self._hist_last_time_s
 
@@ -317,6 +322,8 @@ class IntanDeviceTab(DataTab):
                 waveform_buffer_sec=self._waveform_buffer_sec,
                 spike_bin_sec=self._spike_bin_sec,
                 filter_state=self._filter_state,
+                psd_signal=psd_signal,
+                num_channels=self.num_channels,
             )
 
         self._tel_ingest_ms_total += (time.perf_counter() - ingest_t0) * 1000.0

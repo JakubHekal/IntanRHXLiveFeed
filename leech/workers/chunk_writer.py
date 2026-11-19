@@ -44,7 +44,7 @@ class ChunkWriter:
         self.filename_prefix = None
         self._io_mutex = QtCore.QMutex()
 
-    def _format_rows(self, seg, times, marker_ids, marker_names, has_marker):
+    def _format_text(self, seg, times, marker_ids, marker_names, has_marker):
         # savetxt formats in C and is ~1.3x faster than np.char.mod here.
         n = int(seg.shape[1])
         matrix = np.empty((n, 1 + seg.shape[0]), dtype=np.float64)
@@ -53,13 +53,19 @@ class ChunkWriter:
         fmt = ['%.6f'] + ['%.4f'] * seg.shape[0]
         buf = io.StringIO()
         np.savetxt(buf, matrix, fmt=fmt, delimiter=',')
-        lines = buf.getvalue().splitlines()
+        text = buf.getvalue()
         if has_marker:
-            return [
+            return "\n".join(
                 f"{line},{int(marker_ids[i])},{marker_names[i]}"
-                for i, line in enumerate(lines)
-            ]
-        return [line + ",0," for line in lines]
+                for i, line in enumerate(text.splitlines())
+            ) + "\n"
+        # C-level replace avoids splitlines+join on every ordinary block.
+        return text.replace("\n", ",0,\n")
+
+    def _format_rows(self, seg, times, marker_ids, marker_names, has_marker):
+        return self._format_text(
+            seg, times, marker_ids, marker_names, has_marker
+        ).splitlines()
 
     def append_data(self, arr: np.ndarray, marker_info: dict = None, force_flush: bool = False):
         if arr.ndim != 2 or arr.shape[0] < 1 or arr.shape[1] < 1:
@@ -98,9 +104,9 @@ class ChunkWriter:
                         local = sample_idx - seg_start
                         marker_ids[local] = int(marker_rec.get("id", 0))
                         marker_names[local] = str(marker_rec.get("name", ""))
-                rows = self._format_rows(seg, times, marker_ids, marker_names, has_marker)
-                self.csv_file_handle.write("\n".join(rows))
-                self.csv_file_handle.write("\n")
+                self.csv_file_handle.write(self._format_text(
+                    seg, times, marker_ids, marker_names, has_marker
+                ))
 
                 self._chunk_samples_written += take
                 offset += take

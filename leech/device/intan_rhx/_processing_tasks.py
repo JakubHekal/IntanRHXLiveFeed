@@ -34,7 +34,7 @@ class _FilterState:
         self.num_channels = int(num_channels)
         self.sample_rate = float(sample_rate)
         self.cap = max(1, int(round(self.sample_rate * float(window_sec))))
-        self.hist = np.empty((self.num_channels, self.cap), dtype=np.float64)
+        self.hist = np.empty((self.num_channels, self.cap), dtype=np.float32)
         self.wpos = 0
         self.length = 0
         self.end_abs = 0
@@ -164,7 +164,8 @@ def _update_histogram_state(spike_times, last_time_s, state, bin_sec):
 def _run_all_channels(signal_matrix, t, fs, selected_ch, all_spike_caches,
                       last_scans, do_psd, do_spike, hist_states, abs_start=0,
                       psd_buffer_sec=10, waveform_buffer_sec=10, spike_bin_sec=5,
-                      filter_state=None, median_window_sec=5.0):
+                      filter_state=None, median_window_sec=5.0, psd_signal=None,
+                      num_channels=None):
     """Vectorized matrix pipeline: spike detection + histogram for all channels.
 
     ``filter_state`` carries the sosfilt delay line and a trailing window of
@@ -177,6 +178,8 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, all_spike_caches,
     result.has_spike_update = do_spike
 
     n_ch, n_samp = signal_matrix.shape
+    if num_channels is not None:
+        n_ch = int(num_channels)
     stored_abs = abs_start + n_samp
 
     new_last_scans = dict(last_scans) if last_scans else {}
@@ -184,21 +187,22 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, all_spike_caches,
     all_caches = {}
 
     state = filter_state
-    if state is not None and not state.matches(n_ch, fs):
-        state = None
-    if state is not None:
-        if state.length == 0:
-            if state.end_abs != abs_start:
+    if do_spike:
+        if state is not None and not state.matches(n_ch, fs):
+            state = None
+        if state is not None:
+            if state.length == 0:
+                if state.end_abs != abs_start:
+                    state.reset(abs_start)
+            elif not (abs_start <= state.end_abs <= stored_abs):
+                # Ring was cleared, resized, or a backlog drop skipped samples.
                 state.reset(abs_start)
-        elif not (abs_start <= state.end_abs <= stored_abs):
-            # Ring was cleared, resized, or a backlog drop skipped samples.
+        if state is None:
+            state = _FilterState(n_ch, fs, median_window_sec)
             state.reset(abs_start)
-    if state is None:
-        state = _FilterState(n_ch, fs, median_window_sec)
-        state.reset(abs_start)
 
     if do_spike and n_samp >= 10:
-        sos = _get_sos(fs)
+        sos = _get_sos(fs).astype(np.float32, copy=False)
         rel = state.end_abs - abs_start
         if rel < 0 or rel > n_samp:
             state.reset(abs_start)
@@ -206,10 +210,8 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, all_spike_caches,
         if rel < n_samp:
             x_new = signal_matrix[:, rel:]
             if state.zi is None:
-                state.zi = np.zeros((sos.shape[0], n_ch, 2), dtype=np.float64)
-            x_filt, state.zi = sosfilt(
-                sos, x_new.astype(np.float64, copy=False), axis=1, zi=state.zi,
-            )
+                state.zi = np.zeros((sos.shape[0], n_ch, 2), dtype=np.float32)
+            x_filt, state.zi = sosfilt(sos, x_new, axis=1, zi=state.zi)
             state.append(x_filt, abs_start + rel)
 
         hist = state.last()
@@ -335,19 +337,25 @@ def _run_all_channels(signal_matrix, t, fs, selected_ch, all_spike_caches,
         for ch in range(n_ch):
             new_last_scans[ch] = stored_abs
 
-    if do_psd and selected_ch < n_ch:
+    if do_psd:
         try:
             psd_samples = max(8, int(round(fs * psd_buffer_sec)))
-            psd_sig = signal_matrix[selected_ch, -psd_samples:]
-            target_nperseg = max(64, int(round(_psd.TARGET_NPERSEG_SEC * fs)))
-            nperseg = min(target_nperseg, psd_sig.size)
-            nperseg = max(64, 2 ** int(round(np.log2(nperseg))))
-            nperseg = min(nperseg, psd_sig.size)
-            noverlap = min(int(round(_psd.NOVERLAP_RATIO * nperseg)), nperseg - 1)
-            if nperseg >= 8:
-                f, _, Pxx_db = _psd.welch_psd(psd_sig, fs, nperseg, noverlap, fmax=_psd.FMAX)
-                result.psd_f = f
-                result.psd_db = Pxx_db
+            if psd_signal is not None:
+                psd_sig = np.asarray(psd_signal)[-psd_samples:]
+            elif selected_ch < n_ch:
+                psd_sig = signal_matrix[selected_ch, -psd_samples:]
+            else:
+                psd_sig = None
+            if psd_sig is not None and psd_sig.size:
+                target_nperseg = max(64, int(round(_psd.TARGET_NPERSEG_SEC * fs)))
+                nperseg = min(target_nperseg, psd_sig.size)
+                nperseg = max(64, 2 ** int(round(np.log2(nperseg))))
+                nperseg = min(nperseg, psd_sig.size)
+                noverlap = min(int(round(_psd.NOVERLAP_RATIO * nperseg)), nperseg - 1)
+                if nperseg >= 8:
+                    f, _, Pxx_db = _psd.welch_psd(psd_sig, fs, nperseg, noverlap, fmax=_psd.FMAX)
+                    result.psd_f = f
+                    result.psd_db = Pxx_db
         except Exception:
             pass
 

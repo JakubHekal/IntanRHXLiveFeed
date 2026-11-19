@@ -259,6 +259,10 @@ class MinMaxModel:
         self._cache = (x_out, y_out)
         return self._cache
 
+    @property
+    def total(self):
+        return self._total
+
 
 if __name__ == "__main__":
     def _check():
