@@ -124,5 +124,3 @@ class IntanNativeSource:
         chunk = np.ascontiguousarray(self._buffer[:, :take])
         self._buffer = self._buffer[:, take:]
         return chunk, []
-
-

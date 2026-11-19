@@ -239,5 +239,3 @@ def read_intan_header(path: Path) -> IntanFile:
         stride=stride,
         dtype=dtype,
     )
-
-
