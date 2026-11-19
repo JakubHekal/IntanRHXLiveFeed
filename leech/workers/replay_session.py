@@ -167,10 +167,10 @@ class ReplaySession(QtCore.QObject):
                 chunk, markers = source.read(n)
             except Exception as exc:  # noqa: BLE001 - report and drop this source
                 self.error.emit(f"{name}: {exc}")
-                self._sources.pop(name, None)
+                self._drop_source(name)
                 continue
             if chunk is None or chunk.shape[1] == 0:
-                self._sources.pop(name, None)
+                self._drop_source(name)
                 continue
             alive = True
             base = self._emitted.get(name, 0)
@@ -202,6 +202,13 @@ class ReplaySession(QtCore.QObject):
         if _ACTIVE_SESSION is self:
             _ACTIVE_SESSION = None
         self.finished.emit()
+
+    def _drop_source(self, name):
+        source = self._sources.pop(name, None)
+        if source is not None:
+            closer = getattr(source, "close", None)
+            if callable(closer):
+                closer()
 
     def _close_sources(self):
         for source in self._sources.values():
